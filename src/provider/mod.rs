@@ -34,6 +34,6 @@ pub mod voyage;
 
 // Re-export the load-bearing types later phases (embedding/summarise remote
 // impls + CLI/MCP wiring) import as `crate::provider::{…}`.
-pub use config::{Capability, Credential, ResolvedProvider, resolve};
+pub use config::{Capability, Credential, ResolvedProvider, credential_preflight, resolve};
 pub use error::{ProviderError, ProviderErrorKind};
 pub use http::{ProviderTransportGuard, RawResponse, RequestSpec, request_with_retry};

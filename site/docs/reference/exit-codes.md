@@ -83,6 +83,12 @@ below). It is never carried by the `--json` *error* envelope's `category`.
 | `87` | `meta_skill_not_found` | Unknown bundled meta skill id. |
 | `88` | `meta_install_failed` | Failed to install a meta skill. |
 | `89` | `no_harness_detected` | No supported harness detected (use `--harness` or install one). |
+| `90` | `telemetry_endpoint_unreachable` | Telemetry endpoint unreachable (vestigial — retained for the closed-set contract; not constructed today). |
+| `91` | `telemetry_config_invalid` | Telemetry config invalid (vestigial — retained for the closed-set contract; not constructed today). |
+| `92` | `telemetry_queue_corrupt` | Telemetry queue corrupt: unparsable lines were dropped (`tome telemetry inspect`). |
+| `93` | `provider_config_invalid` | Provider config invalid: an undefined provider reference, a kind illegal for the capability, a `provider` set without a `model`, or a configured external provider with no resolvable credential (`tome models test`). |
+| `94` | `provider_request_failed` | A remote provider request failed (auth, rate-limit, timeout, unreachable, malformed response). |
+| `95` | `remote_embedding_invalid` | A remote embedding failed content validation (empty / non-finite / wrong dimension). |
 
 ## Authoring verdicts
 

@@ -141,6 +141,22 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         // is true → `DoctorFixNotSafe` (exit 75).
         doctor::reappend_corrupt_index_fix(&mut report, &paths, &cfg);
 
+        // Issue #291: `re_assemble` rebuilds `suggested_fixes` + `overall` via
+        // the 8-arg SSOT, which doesn't know about the provider-credential
+        // findings. `doctor --fix` NEVER sets a user's env var, so a
+        // still-missing `TOME_<NAME>_API_KEY` is never auto-fixed — re-apply the
+        // findings read-only so they persist through `--fix` as non-auto-fixable
+        // manual findings (→ exit 75 via `has_remaining_manual_fixes`) and keep
+        // escalating `overall`, exactly like the corrupt-index / config cases.
+        // Uses the strictly-loaded `cfg` (defensive-loaded in the CLI wrapper);
+        // a provider referenced with a resolve error is reported by the
+        // exit-93 path, not here.
+        doctor::apply_provider_credential_findings(
+            &mut report.suggested_fixes,
+            &mut report.overall,
+            &cfg,
+        );
+
         // Issue #283: `re_assemble` rebuilds `suggested_fixes` via the 8-arg
         // SSOT, which doesn't know about the fresh-install onboarding nudges.
         // `doctor --fix` never enrols a catalog / enables a plugin / configures
@@ -752,10 +768,17 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
     if !report.providers.is_empty() {
         writeln!(out, "Providers:")?;
         for p in &report.providers {
+            // Issue #291: when no credential resolves, NAME the exact expected
+            // env var (`TOME_<NAME>_API_KEY`, derived via the shared SSOT — never
+            // hardcoded) so the fix is obvious inline. The credential VALUE is
+            // never printed — only the env-var NAME (Principle XIII). The
+            // derivation is gated inside the no-credential branch so it isn't
+            // computed-and-discarded for every provider row that resolves fine.
             let cred = if p.credential_resolvable {
-                "credential resolved"
+                "credential resolved".to_owned()
             } else {
-                "no credential"
+                let env_var = crate::provider::config::derive_env_var_name(&p.name);
+                format!("no credential (set {env_var})")
             };
             let reach = match p.reachable {
                 Some(true) => format!("  {ok} reachable"),

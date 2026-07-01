@@ -302,7 +302,7 @@ pub fn assemble_report(
         );
         suggested_fixes.push(corrupt_index_fix(ci, active_is_remote));
     }
-    let overall = classify(
+    let mut overall = classify(
         &embedder,
         &reranker,
         &summariser,
@@ -313,6 +313,18 @@ pub fn assemble_report(
         &harness_rules,
         &harness_mcp,
     );
+
+    // Issue #291: provider credential findings. A configured EXTERNAL provider
+    // whose credential does not resolve is a config-resolve problem detectable
+    // statically (no network) — so it belongs on the non-verify path. Pushes one
+    // `Subsystem::Provider` SuggestedFix per (provider × capability) naming the
+    // exact `TOME_<NAME>_API_KEY`, and escalates `overall` (embedding → Unhealthy,
+    // summariser/reranker → Degraded), mirroring `apply_config_finding` /
+    // `corrupt_index_fix`. Not part of the 8-arg classify SSOT, so `--fix`'s
+    // `re_assemble` re-applies it (see `commands::doctor`). No-op when every
+    // configured provider's credential resolves (byte-stable minimal-report pin
+    // unchanged for a clean system).
+    apply_provider_credential_findings(&mut suggested_fixes, &mut overall, &cfg);
 
     // Phase 13 (native-agent model-registry): read-only model-registry
     // subsystem report. Always present (baked at minimum). Read-only.
@@ -476,6 +488,89 @@ fn corrupt_index_fix(ci: checks::CorruptIndex, active_is_remote: bool) -> Sugges
         command: "tome reindex --force".to_owned(),
         // Remote → print only (no surprise paid API cost). Bundled → auto.
         auto_fixable: !active_is_remote,
+    }
+}
+
+/// Issue #291: push the "provider configured but no credential resolved"
+/// findings onto `out` and escalate `overall`. For each configured EXTERNAL
+/// provider a model capability references whose credential does NOT resolve,
+/// emit one `auto_fixable: false` `Subsystem::Provider` SuggestedFix per
+/// capability, naming the exact expected `TOME_<NAME>_API_KEY` env var.
+///
+/// Health severity mirrors doctor's existing capability-health scheme: a broken
+/// EMBEDDING provider (search cannot run) escalates `overall` to `Unhealthy`; a
+/// broken SUMMARISER / RERANKER provider (the pipeline degrades but still serves)
+/// escalates to at least `Degraded`. `overall` is only ever escalated, never
+/// downgraded (a monotone `max`), so an already-Unhealthy report stays Unhealthy.
+///
+/// The credential VALUE is NEVER rendered — only its absence and the env-var
+/// NAME (Principle XIII). No-op when every configured provider's credential
+/// resolves (the finding list is empty), keeping the byte-stable minimal-report
+/// pin unchanged for a clean / no-provider install.
+///
+/// Shared by `assemble_report` (initial pass) and the `--fix` command layer's
+/// re-apply after `fixes::re_assemble` (which rebuilds `suggested_fixes` +
+/// `overall` via the 8-arg SSOT that doesn't know about provider findings),
+/// mirroring `reappend_corrupt_index_fix` / `apply_config_finding`. `doctor
+/// --fix` never sets a user's env var, so a still-missing credential persists as
+/// a non-auto-fixable manual finding through `--fix` (→ exit 75).
+pub(crate) fn apply_provider_credential_findings(
+    out: &mut Vec<SuggestedFix>,
+    overall: &mut DoctorClassification,
+    cfg: &crate::config::Config,
+) {
+    for finding in checks::build_provider_credential_findings(cfg) {
+        // Escalate `overall` monotonically per the finding's severity.
+        // DELIBERATE divergence from `classify`'s bundled-summariser rule: a
+        // broken *bundled* summariser is Unhealthy there (its model files are
+        // missing/corrupt — the rules pipeline can't run at all), but a missing
+        // summariser-*provider credential* is only Degraded here (it's a remote
+        // config nudge; summarisation is optional to search, which still serves
+        // on the bundled/absent-summary path). Do NOT "fix" this into false
+        // consistency with `classify` — the two conditions are genuinely
+        // different severities. Only embedding is critical (search cannot run
+        // without a working embedder).
+        let severity = if finding.critical {
+            DoctorClassification::Unhealthy
+        } else {
+            DoctorClassification::Degraded
+        };
+        *overall = escalate_classification(*overall, severity);
+
+        out.push(SuggestedFix {
+            subsystem: Subsystem::Provider(finding.provider.clone()),
+            diagnosis: format!(
+                "provider `{}` is configured for {} but no credential resolved — \
+                 set the `{}` environment variable",
+                finding.provider, finding.capability, finding.env_var,
+            ),
+            // Pointer, not a runnable repair: Tome never sets a user's env var,
+            // so `auto_fixable: false` keeps `--fix` from "fixing" it (and makes
+            // it a genuine remaining-manual fix → exit 75 under `--fix`).
+            command: format!("export {}=<your-api-key>", finding.env_var),
+            auto_fixable: false,
+        });
+    }
+}
+
+/// Monotone `max` over the three-state classification ordering
+/// `Ok < Degraded < Unhealthy`. Only ever raises severity — an already-worse
+/// verdict is never softened by a milder finding.
+fn escalate_classification(
+    current: DoctorClassification,
+    candidate: DoctorClassification,
+) -> DoctorClassification {
+    fn rank(c: DoctorClassification) -> u8 {
+        match c {
+            DoctorClassification::Ok => 0,
+            DoctorClassification::Degraded => 1,
+            DoctorClassification::Unhealthy => 2,
+        }
+    }
+    if rank(candidate) > rank(current) {
+        candidate
+    } else {
+        current
     }
 }
 
@@ -1427,6 +1522,243 @@ mod tests {
             has_remaining_manual_fixes(&report),
             "a genuine non-auto-fixable fix must still count",
         );
+    }
+
+    // --- Issue #291: provider credential findings escalate + surface ---------
+
+    use std::sync::Mutex;
+
+    /// Serialises tests mutating `TOME_<NAME>_API_KEY` (process-global env).
+    static PROVIDER_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn cfg_with_missing_embedding_cred() -> crate::config::Config {
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.insert(
+            "p".to_string(),
+            crate::config::ProviderEntry {
+                kind: crate::config::ProviderKind::Openai,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        cfg.embedding.provider = Some("p".to_string());
+        cfg.embedding.model = Some("text-embed".to_string());
+        cfg
+    }
+
+    #[test]
+    fn provider_credential_finding_embedding_escalates_to_unhealthy() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        let cfg = cfg_with_missing_embedding_cred();
+        let mut fixes = Vec::new();
+        let mut overall = DoctorClassification::Ok;
+        apply_provider_credential_findings(&mut fixes, &mut overall, &cfg);
+
+        assert_eq!(
+            overall,
+            DoctorClassification::Unhealthy,
+            "a broken embedding provider must escalate to Unhealthy",
+        );
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].subsystem, Subsystem::Provider("p".to_owned()));
+        assert!(!fixes[0].auto_fixable, "user must set the env var");
+        assert!(
+            fixes[0].diagnosis.contains("TOME_P_API_KEY"),
+            "diagnosis must name the exact env var: {}",
+            fixes[0].diagnosis,
+        );
+        assert!(
+            fixes[0].diagnosis.contains("embedding"),
+            "diagnosis names the capability: {}",
+            fixes[0].diagnosis,
+        );
+    }
+
+    /// R3: ONE provider serving 2+ capabilities with a missing credential. A
+    /// single `[providers.shared]` (kind `voyage`, legal for BOTH embedding and
+    /// reranker per the FR-005 matrix) referenced by both → TWO findings for
+    /// `provider:shared`, and the embedding-critical finding must win the
+    /// monotone escalation (→ Unhealthy) regardless of the (provider,capability)
+    /// sort order — "embedding" sorts before "reranker", but the test asserts the
+    /// max is taken, not the last-seen.
+    #[test]
+    fn provider_credential_finding_shared_provider_two_caps_embedding_wins() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX. `shared` derives
+        // `TOME_SHARED_API_KEY`.
+        unsafe {
+            std::env::remove_var("TOME_SHARED_API_KEY");
+        }
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.insert(
+            "shared".to_string(),
+            crate::config::ProviderEntry {
+                kind: crate::config::ProviderKind::Voyage,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        // Voyage is legal for BOTH embedding and reranker.
+        cfg.embedding.provider = Some("shared".to_string());
+        cfg.embedding.model = Some("voyage-3".to_string());
+        cfg.reranker.provider = Some("shared".to_string());
+        cfg.reranker.model = Some("rerank-2".to_string());
+
+        let mut fixes = Vec::new();
+        let mut overall = DoctorClassification::Ok;
+        apply_provider_credential_findings(&mut fixes, &mut overall, &cfg);
+
+        // Two findings, both for the shared provider.
+        assert_eq!(fixes.len(), 2, "one finding per referenced capability");
+        assert!(
+            fixes
+                .iter()
+                .all(|f| f.subsystem == Subsystem::Provider("shared".to_owned())),
+            "both findings must target `provider:shared`",
+        );
+        // One per capability (sorted: embedding, reranker).
+        let caps: Vec<&str> = fixes
+            .iter()
+            .map(|f| {
+                if f.diagnosis.contains("embedding") {
+                    "embedding"
+                } else if f.diagnosis.contains("reranker") {
+                    "reranker"
+                } else {
+                    "?"
+                }
+            })
+            .collect();
+        assert!(
+            caps.contains(&"embedding"),
+            "embedding finding present: {caps:?}"
+        );
+        assert!(
+            caps.contains(&"reranker"),
+            "reranker finding present: {caps:?}"
+        );
+        // Both name the exact env var.
+        assert!(
+            fixes
+                .iter()
+                .all(|f| f.diagnosis.contains("TOME_SHARED_API_KEY")),
+            "both findings must name TOME_SHARED_API_KEY",
+        );
+        // The embedding-critical finding wins the monotone escalation → Unhealthy,
+        // independent of the (provider, capability) sort order.
+        assert_eq!(
+            overall,
+            DoctorClassification::Unhealthy,
+            "the embedding-critical finding must drive Unhealthy even alongside a reranker (Degraded) finding",
+        );
+    }
+
+    #[test]
+    fn provider_credential_finding_summariser_escalates_to_degraded_only() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.insert(
+            "p".to_string(),
+            crate::config::ProviderEntry {
+                kind: crate::config::ProviderKind::Openai,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        cfg.summariser.provider = Some("p".to_string());
+        cfg.summariser.model = Some("gpt-4o".to_string());
+
+        let mut fixes = Vec::new();
+        let mut overall = DoctorClassification::Ok;
+        apply_provider_credential_findings(&mut fixes, &mut overall, &cfg);
+
+        assert_eq!(
+            overall,
+            DoctorClassification::Degraded,
+            "a broken summariser provider is optional → Degraded, not Unhealthy",
+        );
+        assert_eq!(fixes.len(), 1);
+        assert!(fixes[0].diagnosis.contains("summariser"));
+    }
+
+    #[test]
+    fn provider_credential_finding_never_downgrades_overall() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        // A summariser finding (Degraded severity) must NOT soften an already
+        // Unhealthy verdict.
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.insert(
+            "p".to_string(),
+            crate::config::ProviderEntry {
+                kind: crate::config::ProviderKind::Openai,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        cfg.summariser.provider = Some("p".to_string());
+        cfg.summariser.model = Some("gpt-4o".to_string());
+
+        let mut fixes = Vec::new();
+        let mut overall = DoctorClassification::Unhealthy;
+        apply_provider_credential_findings(&mut fixes, &mut overall, &cfg);
+        assert_eq!(
+            overall,
+            DoctorClassification::Unhealthy,
+            "a Degraded-severity finding must never downgrade an Unhealthy verdict",
+        );
+    }
+
+    #[test]
+    fn provider_credential_finding_noop_when_no_providers() {
+        // A clean install (no providers) leaves overall + fixes untouched — the
+        // byte-stable minimal-report pin stays unchanged.
+        let cfg = crate::config::Config::default();
+        let mut fixes = Vec::new();
+        let mut overall = DoctorClassification::Ok;
+        apply_provider_credential_findings(&mut fixes, &mut overall, &cfg);
+        assert!(fixes.is_empty());
+        assert_eq!(overall, DoctorClassification::Ok);
+    }
+
+    #[test]
+    fn provider_credential_finding_counts_as_remaining_manual_fix() {
+        use crate::doctor::fixes::has_remaining_manual_fixes;
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        let cfg = cfg_with_missing_embedding_cred();
+        let mut report = minimal_report();
+        apply_provider_credential_findings(&mut report.suggested_fixes, &mut report.overall, &cfg);
+        assert!(
+            has_remaining_manual_fixes(&report),
+            "a missing-credential finding must count as remaining manual work (→ exit 75 under --fix)",
+        );
+    }
+
+    #[test]
+    fn escalate_classification_is_monotone_max() {
+        use DoctorClassification::*;
+        assert_eq!(escalate_classification(Ok, Degraded), Degraded);
+        assert_eq!(escalate_classification(Ok, Unhealthy), Unhealthy);
+        assert_eq!(escalate_classification(Degraded, Unhealthy), Unhealthy);
+        // Never downgrades.
+        assert_eq!(escalate_classification(Unhealthy, Degraded), Unhealthy);
+        assert_eq!(escalate_classification(Degraded, Ok), Degraded);
+        assert_eq!(escalate_classification(Ok, Ok), Ok);
     }
 
     /// Build a minimal `DoctorReport` for gate tests. Mirrors the byte-stable

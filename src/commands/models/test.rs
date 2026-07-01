@@ -51,6 +51,14 @@ pub fn run(args: ModelsTestArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     // every other foreground command.
     let cfg = crate::config::load(&paths)?;
 
+    // Static credential pre-flight (issue #291): when the capability is
+    // configured to use an EXTERNAL provider whose credential does NOT resolve,
+    // fail fast naming the exact `TOME_<NAME>_API_KEY` env var — WITHOUT making
+    // a doomed network request that 401s into a deep `ProviderRequestFailed`/94.
+    // A missing credential is a config problem → `ProviderConfigInvalid`/93. The
+    // bundled-local path resolves to `Ok(None)` and the pre-flight is a no-op.
+    crate::provider::credential_preflight(&cfg, capability_of(args.capability))?;
+
     let outcome = match args.capability {
         TestCapability::Embedding => test_embedding(&cfg, &paths, scope)?,
         TestCapability::Summariser => test_summariser(&cfg, &paths)?,
@@ -60,6 +68,17 @@ pub fn run(args: ModelsTestArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     match mode {
         Mode::Human => emit_human(&outcome),
         Mode::Json => output::write_json(&outcome),
+    }
+}
+
+/// Map the CLI `TestCapability` onto the provider-resolution [`Capability`] used
+/// by the credential pre-flight. `models test` never exercises the runtime hook
+/// chat capability, so there is no `HookPrompt` arm.
+fn capability_of(cap: TestCapability) -> crate::provider::Capability {
+    match cap {
+        TestCapability::Embedding => crate::provider::Capability::Embedding,
+        TestCapability::Summariser => crate::provider::Capability::Summariser,
+        TestCapability::Reranker => crate::provider::Capability::Reranker,
     }
 }
 
@@ -623,5 +642,105 @@ mod tests {
         assert_eq!(ModelKindLabel::for_embedding(&cfg).as_str(), "bundled");
         assert_eq!(ModelKindLabel::for_summariser(&cfg).as_str(), "bundled");
         assert_eq!(ModelKindLabel::for_reranker(&cfg).as_str(), "bundled");
+    }
+
+    // --- Issue #291: credential pre-flight (no doomed network call) ----------
+
+    /// Serialises tests mutating `TOME_<NAME>_API_KEY` (process-global env) with
+    /// the transport override (also process-global via `set_transport_override`).
+    static PREFLIGHT_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn config_remote_embedding_no_key() -> Config {
+        let mut config = Config::default();
+        config.providers.insert(
+            "p".to_string(),
+            ProviderEntry {
+                kind: ProviderKind::Openai,
+                base_url: None,
+                api_key: None, // no inline key
+            },
+        );
+        config.embedding.provider = Some("p".to_string());
+        config.embedding.model = Some("embed-model".to_string());
+        config
+    }
+
+    #[test]
+    fn preflight_errors_93_before_any_network_call() {
+        let _env = PREFLIGHT_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PREFLIGHT_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        // A transport override that PANICS if reached — proving the pre-flight
+        // fails BEFORE any request is made.
+        let _t = set_transport_override(|_spec| {
+            panic!("network request must not be made when the credential is absent");
+        });
+        let cfg = config_remote_embedding_no_key();
+
+        let err =
+            crate::provider::credential_preflight(&cfg, capability_of(TestCapability::Embedding))
+                .expect_err("missing credential must error");
+        // A missing credential is a config problem → 93, NOT a request failure/94.
+        assert_eq!(err.exit_code(), 93);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TOME_P_API_KEY"),
+            "must name the exact env var: {msg}"
+        );
+    }
+
+    #[test]
+    fn preflight_passes_when_inline_key_present() {
+        let _env = PREFLIGHT_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PREFLIGHT_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        // Inline key present → pre-flight passes (the round-trip would proceed).
+        let cfg = config_remote_embedding(ProviderKind::Openai);
+        assert!(
+            crate::provider::credential_preflight(&cfg, capability_of(TestCapability::Embedding))
+                .is_ok(),
+        );
+    }
+
+    #[test]
+    fn preflight_noop_for_bundled_default() {
+        // No provider configured → bundled path → pre-flight is a no-op for
+        // every capability.
+        let cfg = Config::default();
+        for cap in [
+            TestCapability::Embedding,
+            TestCapability::Summariser,
+            TestCapability::Reranker,
+        ] {
+            assert!(
+                crate::provider::credential_preflight(&cfg, capability_of(cap)).is_ok(),
+                "{cap:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_of_maps_all_cli_variants() {
+        use crate::provider::Capability;
+        assert_eq!(
+            capability_of(TestCapability::Embedding),
+            Capability::Embedding
+        );
+        assert_eq!(
+            capability_of(TestCapability::Summariser),
+            Capability::Summariser
+        );
+        assert_eq!(
+            capability_of(TestCapability::Reranker),
+            Capability::Reranker
+        );
     }
 }

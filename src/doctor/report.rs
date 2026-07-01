@@ -215,6 +215,7 @@ pub enum RulesCopyState {
 /// - `ModelRegistry` ↔ `"model-registry"`
 /// - `Config` ↔ `"config"`
 /// - `Onboarding` ↔ `"onboarding"`
+/// - `Provider(name)` ↔ `"provider:<name>"`
 ///
 /// The two Phase 3 drift "subsystems" `embedder_drift`, `reranker_drift`,
 /// and the Phase 4 fold-in `summariser_drift` are not part of this enum:
@@ -252,6 +253,12 @@ pub enum Subsystem {
     /// render in the "Suggested fixes" block so a first-run `tome doctor` reads
     /// as "here's how to begin" rather than a silent "healthy with zeros".
     Onboarding,
+    /// Issue #291: a configured EXTERNAL model provider whose credential does not
+    /// resolve (no inline `api_key` AND the derived `TOME_<NAME>_API_KEY` unset).
+    /// The finding names the exact expected env var; `auto_fixable: false` — Tome
+    /// never sets a user's env var. The `String` is the provider registry name
+    /// (`provider:<name>` on the wire, mirroring `catalog:<name>`).
+    Provider(String),
 }
 
 impl Subsystem {
@@ -274,6 +281,7 @@ impl Subsystem {
             Subsystem::ModelRegistry => "model-registry".to_owned(),
             Subsystem::Config => "config".to_owned(),
             Subsystem::Onboarding => "onboarding".to_owned(),
+            Subsystem::Provider(n) => format!("provider:{n}"),
         }
     }
 
@@ -299,6 +307,8 @@ impl Subsystem {
                     Subsystem::HarnessRules(name.to_owned())
                 } else if let Some(name) = other.strip_prefix("harness-mcp:") {
                     Subsystem::HarnessMcp(name.to_owned())
+                } else if let Some(name) = other.strip_prefix("provider:") {
+                    Subsystem::Provider(name.to_owned())
                 } else {
                     return None;
                 }
@@ -388,6 +398,10 @@ mod tests {
             ),
             (Subsystem::Config, "\"config\""),
             (Subsystem::Onboarding, "\"onboarding\""),
+            (
+                Subsystem::Provider("my-prov".into()),
+                "\"provider:my-prov\"",
+            ),
         ];
         for (variant, wire) in cases {
             let serialised = serde_json::to_string(&variant).unwrap();

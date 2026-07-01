@@ -1201,6 +1201,69 @@ fn credential_resolves(name: &str, has_inline: bool) -> bool {
     has_inline
 }
 
+/// One "provider configured but no credential resolved" finding (issue #291),
+/// scoped to a single capability so its health severity is exact. Built from the
+/// same [`ProviderReport`] rows the report renders, so the two never diverge.
+///
+/// `env_var` is the EXACT expected `TOME_<NAME>_API_KEY` derived via the shared
+/// [`derive_env_var_name`] (never hardcoded). The credential VALUE is never
+/// carried — this struct only records its *absence*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCredentialFinding {
+    /// The `[providers.<name>]` registry name.
+    pub provider: String,
+    /// The capability the provider serves (`embedding` / `summariser` /
+    /// `reranker`) — drives the health severity.
+    pub capability: String,
+    /// The exact expected env var, e.g. `TOME_MY_PROV_API_KEY`.
+    pub env_var: String,
+    /// `true` when this capability is health-critical (embedding — search stops
+    /// working → Unhealthy); `false` for the optional capabilities (summariser /
+    /// reranker → Degraded).
+    pub critical: bool,
+}
+
+/// Build the credential-missing findings (issue #291): for every configured
+/// remote provider a MODEL CAPABILITY references whose credential does NOT
+/// resolve, emit one finding per capability it serves, naming the exact expected
+/// `TOME_<NAME>_API_KEY` env var.
+///
+/// A broken EMBEDDING provider is `critical` (search cannot run without a valid
+/// embedder), so it drives the overall classification to Unhealthy; a broken
+/// SUMMARISER / RERANKER provider is optional (the pipeline degrades but still
+/// serves) → Degraded. This mirrors doctor's existing capability-health scheme
+/// (embedder failure = Unhealthy, reranker/summariser = Degraded).
+///
+/// Read-only: reads config + the process env only. Reuses the same
+/// [`build_provider_report`] rows the report renders, so the finding set and the
+/// rendered `credential_resolvable` flag can never disagree. The findings are
+/// sorted `(provider, capability)` for deterministic output.
+pub fn build_provider_credential_findings(cfg: &Config) -> Vec<ProviderCredentialFinding> {
+    let mut findings: Vec<ProviderCredentialFinding> = build_provider_report(cfg)
+        .into_iter()
+        .filter(|p| !p.credential_resolvable)
+        .flat_map(|p| {
+            let env_var = derive_env_var_name(&p.name);
+            let name = p.name;
+            p.capabilities.into_iter().map(move |capability| {
+                let critical = capability == "embedding";
+                ProviderCredentialFinding {
+                    provider: name.clone(),
+                    capability,
+                    env_var: env_var.clone(),
+                    critical,
+                }
+            })
+        })
+        .collect();
+    findings.sort_by(|a, b| {
+        a.provider
+            .cmp(&b.provider)
+            .then_with(|| a.capability.cmp(&b.capability))
+    });
+    findings
+}
+
 /// `--verify` reachability (FR-018): for each provider in `report`, perform ONE
 /// lightweight real round-trip against a capability it serves and set
 /// `reachable = Some(ok)`. Read-only — the round-trips never persist anything (a
@@ -1210,8 +1273,22 @@ fn credential_resolves(name: &str, has_inline: bool) -> bool {
 ///
 /// The capability chosen per provider is the FIRST it serves, in the fixed
 /// order summariser → embedding → reranker, so the probe is deterministic.
+///
+/// Issue #291: a missing credential is detectable statically, so `--verify`
+/// SKIPS the live probe for any provider whose credential does not resolve —
+/// leaving `reachable = None` — rather than making a doomed network call that
+/// would 401/403. The distinct credential SuggestedFix (see
+/// [`build_provider_credential_findings`] + the mod-level applier) is the clear
+/// finding surfaced in its place; a doomed `reachable: false` would only be
+/// noise.
 pub fn verify_provider_reachability(report: &mut [ProviderReport], cfg: &Config, paths: &Paths) {
     for entry in report.iter_mut() {
+        // No credential resolves → skip the doomed live probe (issue #291). The
+        // credential finding + report line name the exact env var; a network
+        // round-trip here would only 401.
+        if !entry.credential_resolvable {
+            continue;
+        }
         // Pick the first capability the provider serves (deterministic order).
         let capability = entry.capabilities.iter().find_map(|c| match c.as_str() {
             "summariser" => Some(Capability::Summariser),
@@ -1833,6 +1910,147 @@ mod tests {
         unsafe {
             std::env::remove_var("TOME_VP_API_KEY");
         }
+    }
+
+    // --- Issue #291: provider credential findings --------------------------
+
+    #[test]
+    fn credential_findings_empty_when_no_providers() {
+        // A clean install with no `[providers]` → no findings (byte-stable pin).
+        let cfg = Config::default();
+        assert!(build_provider_credential_findings(&cfg).is_empty());
+    }
+
+    #[test]
+    fn credential_findings_empty_when_credential_resolves_inline() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        let mut cfg = config_with_provider("p", ProviderKind::Openai, Some("sk-inline"));
+        cfg.embedding.provider = Some("p".to_string());
+        cfg.embedding.model = Some("text-embed".to_string());
+
+        assert!(
+            build_provider_credential_findings(&cfg).is_empty(),
+            "an inline api_key resolves → no finding"
+        );
+    }
+
+    #[test]
+    fn credential_finding_names_exact_env_var_and_marks_embedding_critical() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_MY_PROV_API_KEY");
+        }
+        // Provider named `my-prov` derives `TOME_MY_PROV_API_KEY` — no inline key
+        // and env unset → the finding must name that exact var.
+        let mut cfg = config_with_provider("my-prov", ProviderKind::Openai, None);
+        cfg.embedding.provider = Some("my-prov".to_string());
+        cfg.embedding.model = Some("text-embed".to_string());
+
+        let findings = build_provider_credential_findings(&cfg);
+        assert_eq!(findings.len(), 1);
+        let f = &findings[0];
+        assert_eq!(f.provider, "my-prov");
+        assert_eq!(f.capability, "embedding");
+        assert_eq!(
+            f.env_var, "TOME_MY_PROV_API_KEY",
+            "the finding must name the exact derived env var (not hardcoded)"
+        );
+        assert!(f.critical, "embedding must be health-critical (Unhealthy)");
+    }
+
+    #[test]
+    fn credential_finding_summariser_and_reranker_are_not_critical() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_S_API_KEY");
+            std::env::remove_var("TOME_R_API_KEY");
+        }
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "s".to_string(),
+            ProviderEntry {
+                kind: ProviderKind::Openai,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        cfg.providers.insert(
+            "r".to_string(),
+            ProviderEntry {
+                kind: ProviderKind::Voyage,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        cfg.summariser.provider = Some("s".to_string());
+        cfg.summariser.model = Some("gpt-4o".to_string());
+        cfg.reranker.provider = Some("r".to_string());
+        cfg.reranker.model = Some("rerank-2".to_string());
+
+        let findings = build_provider_credential_findings(&cfg);
+        assert_eq!(findings.len(), 2, "one summariser + one reranker finding");
+        // Sorted by (provider, capability): "r"/reranker then "s"/summariser.
+        assert_eq!(findings[0].provider, "r");
+        assert_eq!(findings[0].capability, "reranker");
+        assert!(!findings[0].critical, "reranker → Degraded, not Unhealthy");
+        assert_eq!(findings[1].provider, "s");
+        assert_eq!(findings[1].capability, "summariser");
+        assert!(
+            !findings[1].critical,
+            "summariser → Degraded, not Unhealthy"
+        );
+    }
+
+    #[test]
+    fn credential_finding_env_var_resolves_suppresses_finding() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::set_var("TOME_P_API_KEY", "env-secret");
+        }
+        let mut cfg = config_with_provider("p", ProviderKind::Openai, None);
+        cfg.embedding.provider = Some("p".to_string());
+        cfg.embedding.model = Some("text-embed".to_string());
+
+        let findings = build_provider_credential_findings(&cfg);
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        assert!(
+            findings.is_empty(),
+            "a resolving env var suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn credential_findings_never_carry_the_value() {
+        // Structural: the finding struct has no field capable of holding a
+        // credential value — only the env-var NAME and provider/capability. An
+        // inline api_key that DOES resolve produces no finding at all, so it can
+        // never leak. Assert both directions here.
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        // Missing credential → a finding, but with no value anywhere.
+        let mut cfg = config_with_provider("p", ProviderKind::Openai, None);
+        cfg.embedding.provider = Some("p".to_string());
+        cfg.embedding.model = Some("text-embed".to_string());
+        let findings = build_provider_credential_findings(&cfg);
+        let rendered = format!("{findings:?}");
+        assert!(
+            !rendered.contains("sk-"),
+            "no credential-shaped value in the finding: {rendered}"
+        );
+        assert!(rendered.contains("TOME_P_API_KEY"), "{rendered}");
     }
 
     // --- US11 (P11 fix): doctor–status hook-translation surface agreement ----

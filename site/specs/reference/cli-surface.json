@@ -623,6 +623,36 @@
       "code": 89,
       "category": "no_harness_detected",
       "meaning": "No supported harness detected (use --harness or install one)."
+    },
+    {
+      "code": 90,
+      "category": "telemetry_endpoint_unreachable",
+      "meaning": "Telemetry endpoint unreachable (vestigial - retained for the closed-set contract; not constructed today)."
+    },
+    {
+      "code": 91,
+      "category": "telemetry_config_invalid",
+      "meaning": "Telemetry config invalid (vestigial - retained for the closed-set contract; not constructed today)."
+    },
+    {
+      "code": 92,
+      "category": "telemetry_queue_corrupt",
+      "meaning": "Telemetry queue corrupt: unparsable lines were dropped (tome telemetry inspect)."
+    },
+    {
+      "code": 93,
+      "category": "provider_config_invalid",
+      "meaning": "Provider config invalid: an undefined provider reference, a kind illegal for the capability, a provider set without a model, or a configured external provider with no resolvable credential (tome models test)."
+    },
+    {
+      "code": 94,
+      "category": "provider_request_failed",
+      "meaning": "A remote provider request failed (auth, rate-limit, timeout, unreachable, malformed response)."
+    },
+    {
+      "code": 95,
+      "category": "remote_embedding_invalid",
+      "meaning": "A remote embedding failed content validation (empty / non-finite / wrong dimension)."
     }
   ]
 }
