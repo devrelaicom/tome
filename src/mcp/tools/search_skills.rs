@@ -78,6 +78,65 @@ pub const MAX_QUERY_CHARS: usize = 4096;
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
     pub matches: Vec<SkillMatch>,
+    /// #285: the number of searchable entries actually searched IN THE
+    /// RESOLVED SCOPE — the enabled, `searchable = 1` skills joined into
+    /// this workspace, i.e. the exact universe the KNN ran over. Always
+    /// present; best-effort `0` on a count failure. Lets a caller
+    /// distinguish "nothing is indexed for this scope — reindex / enable a
+    /// plugin" (`corpus_size == 0`) from "the scope has searchable content
+    /// but nothing matched — rephrase" (`corpus_size > 0`) when `matches`
+    /// is empty. Threaded from `QueryOutcome::scope_searchable_count`
+    /// (computed in the query pipeline), not recomputed here. NOTE: this is
+    /// the SCOPE-EFFECTIVE count, deliberately distinct from the whole-index
+    /// count that feeds the `tome.search` telemetry bucket.
+    pub corpus_size: u64,
+    /// #285: how the returned `score` on each match was produced —
+    /// `"reranked"` (a cross-encoder logit) or `"embedding-similarity"`
+    /// (`1.0 − cosine distance`, raw KNN order). Always present. This is
+    /// the SSOT string from the CLI's [`ScoringMode`](crate::commands::query::ScoringMode);
+    /// read it to interpret `score`, which is otherwise opaque and NOT
+    /// comparable across the two modes.
+    pub scoring: String,
+    /// #285: a one-line note when the ACTIVE reranker's identity has
+    /// drifted from the identity the index was built against, so results
+    /// fell back to embedding-similarity ranking. Present only under
+    /// drift (`skip_serializing_if`); absent on the common path so the
+    /// wire shape stays stable. Threaded from `QueryOutcome::reranker_drift`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reranker_drift: Option<String>,
+    /// #285: a machine-readable reason present ONLY when `matches` is
+    /// empty (`skip_serializing_if`), so the wire shape of a normal
+    /// non-empty result is unchanged. Distinguishes an empty index
+    /// (`index_empty`) from a populated index with no semantic match
+    /// (`no_match`); pair it with [`Self::hint`] for the human-readable
+    /// guidance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_results_reason: Option<NoResultsReason>,
+    /// #285: a one-line actionable hint present ONLY when `matches` is
+    /// empty (`skip_serializing_if`). Reindex guidance when the index is
+    /// empty; rephrase/broaden guidance when it has content but nothing
+    /// matched. This is the human-readable companion to
+    /// [`Self::no_results_reason`] — surfaced in the structured output (not
+    /// prose) so an MCP client can read it directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// #285: why a `search_skills` call returned no matches. A closed enum so
+/// the signal is structural — an agent can branch on it rather than parse
+/// the human-readable [`Output::hint`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NoResultsReason {
+    /// The resolved scope has zero searchable entries (`corpus_size == 0`) —
+    /// nothing was searchable here, so the fix is to reindex / enable a
+    /// plugin for this scope, NOT to rephrase. (Other scopes may hold
+    /// content; this reason is about the queried scope only.)
+    IndexEmpty,
+    /// The resolved scope has searchable content (`corpus_size > 0`) but
+    /// nothing scored a semantic match — the fix is to rephrase or broaden
+    /// the query, not to reindex.
+    NoMatch,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -97,9 +156,13 @@ pub struct SkillMatch {
     pub plugin_version: String,
     /// Absolute path to the SKILL.md file.
     pub path: String,
-    /// Reranker score by default; embedding similarity if reranker
-    /// drift forced fallback. The output does NOT distinguish — the
-    /// score is opaque.
+    /// Ranking score for this match. Its scale is OPAQUE and mode-dependent
+    /// — read [`Output::scoring`] to interpret it: `"reranked"` means a
+    /// cross-encoder logit (can be negative or exceed 1, higher is better);
+    /// `"embedding-similarity"` means `1.0 − cosine distance` in `[-1, 1]`.
+    /// Scores are only comparable WITHIN one result set / one scoring mode;
+    /// do not compare a score against a fixed threshold or across calls.
+    /// #285: the top-level `scoring` field names the mode for the whole set.
     pub score: f32,
     /// #289: the MCP prompt name (`<plugin>__<entry>` form, post-override
     /// and post-collision-suffix) this entry is reachable under via
@@ -531,7 +594,52 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         "call",
     );
 
-    Ok(Output { matches })
+    // #285: thread the signal the pipeline already computed into the tool
+    // output. `corpus_size` + `scoring` are always present; `reranker_drift`
+    // rides only when detected. On an empty result set, attach a structured
+    // reason + a one-line hint so the agent can tell "index empty for this
+    // scope → reindex" from "no semantic match → rephrase" without parsing
+    // prose.
+    //
+    // `corpus_size` here is the SCOPE-EFFECTIVE searchable count (the exact
+    // universe the KNN searched), NOT the whole-index count that feeds
+    // telemetry (`outcome.corpus_size`). Using the scoped count is what makes
+    // `corpus_size == 0` ⇔ `index_empty` self-consistent: an empty scope whose
+    // OTHER scopes hold content must be reported as `index_empty` (reindex /
+    // enable a plugin for THIS scope), not `no_match` (rephrase).
+    let corpus_size = outcome.scope_searchable_count;
+    let scoring = outcome.scoring.as_str().to_owned();
+    let reranker_drift = outcome.reranker_drift;
+    let (no_results_reason, hint) = if matches.is_empty() {
+        if corpus_size == 0 {
+            (
+                Some(NoResultsReason::IndexEmpty),
+                Some(
+                    "No skills are indexed for this scope — run `tome reindex`, or enable a plugin for this workspace."
+                        .to_owned(),
+                ),
+            )
+        } else {
+            (
+                Some(NoResultsReason::NoMatch),
+                Some(
+                    "No semantic match — try rephrasing or broadening the query, or check that a relevant plugin is enabled."
+                        .to_owned(),
+                ),
+            )
+        }
+    } else {
+        (None, None)
+    };
+
+    Ok(Output {
+        matches,
+        corpus_size,
+        scoring,
+        reranker_drift,
+        no_results_reason,
+        hint,
+    })
 }
 
 /// Truncate `s` to `max` Unicode scalar values, appending the ellipsis
