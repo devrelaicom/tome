@@ -69,17 +69,22 @@ fn main() {
             std::process::exit(code);
         }
     };
-    // `tome doctor` and `tome status` are the read-only diagnostics a user
-    // reaches for when their setup is broken — including a malformed
-    // `~/.tome/config.toml`. The pre-dispatch scope resolution is the
+    // `tome doctor`, `tome status`, and `tome config` are the read-only
+    // diagnostics a user reaches for when their setup is broken — including a
+    // malformed `~/.tome/config.toml`. The pre-dispatch scope resolution is the
     // "universal gate" that runs strict `config::load` for every command (so a
     // typo fails loudly with exit 5 uniformly); but that same gate would brick
-    // the very commands meant to diagnose the typo. Resolve those two leniently
+    // the very commands meant to diagnose the typo. Resolve those leniently
     // (a malformed config degrades step 3 — `[workspace] default` — to defaults,
-    // never aborting); their command bodies then surface the parse problem as a
-    // finding. Every OTHER command keeps the strict gate, so "fail loud on a
-    // malformed config" stays intact everywhere it matters.
-    let diagnostic = matches!(cli.command, Command::Doctor(_) | Command::Status(_));
+    // never aborting); their command bodies then surface the parse problem
+    // themselves — `config validate` REPORTS it (still exit 5), `config show`
+    // re-runs the strict `load` and fails loudly (exit 5). Every OTHER command
+    // keeps the strict gate, so "fail loud on a malformed config" stays intact
+    // everywhere it matters.
+    let diagnostic = matches!(
+        cli.command,
+        Command::Doctor(_) | Command::Status(_) | Command::Config(_)
+    );
     let resolved = if diagnostic {
         workspace::resolution::resolve_lenient(&cli.scope, &paths)
     } else {
@@ -150,6 +155,7 @@ fn main() {
         Command::Telemetry(cmd) => commands::telemetry::run(cmd, &scope, mode),
         Command::Tier(cmd) => commands::tier::run(cmd, &scope, mode),
         Command::Sync(args) => commands::sync::run(args, &scope, &paths, mode),
+        Command::Config(cmd) => commands::config::run(cmd, &scope, mode),
     };
 
     // Single exit-path teardown (FR-047b). `teardown_at_exit` is THE one call

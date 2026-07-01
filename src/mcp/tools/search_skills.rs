@@ -67,6 +67,12 @@ pub struct Input {
 /// Contract amended in same commit to mention the 100_000 sanity cap.
 pub const MAX_DESCRIPTION_MAX_CHARS: u32 = 100_000;
 
+/// Built-in default description-truncation cap when neither the per-call
+/// `description_max_chars` arg nor `[mcp] description_max_chars` is set. Single
+/// source of truth: this tool AND `tome config show` reference it so the shown
+/// default can't drift away from the effective one.
+pub const DEFAULT_DESCRIPTION_MAX_CHARS: u32 = 150;
+
 /// Maximum allowed length of an MCP `search_skills.query` input, in
 /// `char`s (Unicode scalar values). Research §R-17 documents 4096 as
 /// the cap; queries strictly longer than this are rejected with a
@@ -193,7 +199,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // Load config defensively (MCP handlers must never hard-fail on a malformed
     // config.toml — that's the CLI's job).
     let cfg = crate::config::load_or_default(&state.paths);
-    let effective_top_k: u32 = input.top_k.or(cfg.query.top_k).unwrap_or(10);
+    let effective_top_k: u32 = input
+        .top_k
+        .or(cfg.query.top_k)
+        .unwrap_or(crate::commands::query::DEFAULT_TOP_K);
 
     // Bounds-check the RESOLVED value so the config default is also guarded.
     if effective_top_k == 0 || effective_top_k > 100 {
@@ -203,12 +212,12 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         ));
     }
     // Resolve effective description_max_chars:
-    // per-call arg → [mcp] description_max_chars in config → 150.
+    // per-call arg → [mcp] description_max_chars in config → the built-in default.
     // Sanity-cap the RESOLVED value per `mcp-tools-p5.md` § Error responses.
     let effective_dmc = input
         .description_max_chars
         .or(cfg.mcp.description_max_chars)
-        .unwrap_or(150);
+        .unwrap_or(DEFAULT_DESCRIPTION_MAX_CHARS);
     if effective_dmc > MAX_DESCRIPTION_MAX_CHARS {
         return Err(McpError::invalid_params(
             format!("description_max_chars must be at most {MAX_DESCRIPTION_MAX_CHARS}"),
