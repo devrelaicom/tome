@@ -345,55 +345,14 @@ fn is_tome_op_bundle(plugin_root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::launcher::TOME_BIN_ENV;
-    use std::sync::Mutex;
+    // The `$TOME_BIN` launcher seam is serialised by the ONE shared lock in
+    // `launcher::test_support` (the SSOT — #337 flaky-test fix). These tests pin
+    // `$TOME_BIN` to a deterministic launcher via that guard rather than a local
+    // second `ENV_MUTEX`, so no `open_plugins` `$TOME_BIN` mutation can land
+    // between another lib test's two `tome_command()` reads (which would flake the
+    // `reconcile::hooks` launcher-change idempotence assertions).
+    use crate::harness::launcher::test_support::TomeBinGuard;
     use tempfile::TempDir;
-
-    /// Serialises every test that mutates `TOME_BIN` (process-global; `cargo
-    /// test` runs a module's tests on multiple threads). Mirrors the `ENV_MUTEX`
-    /// idiom used across the codebase (see `provider::config`, `telemetry`).
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
-    /// RAII guard: snapshot the named env vars, clear them, restore on drop.
-    /// Holds `ENV_MUTEX` for its lifetime so a restore can't interleave with
-    /// another test's set.
-    struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        saved: Vec<(String, Option<std::ffi::OsString>)>,
-    }
-
-    impl EnvGuard {
-        fn new(vars: &[&str]) -> Self {
-            let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-            let saved = vars
-                .iter()
-                .map(|&k| (k.to_string(), std::env::var_os(k)))
-                .collect::<Vec<_>>();
-            // SAFETY: ENV_MUTEX held for the guard's lifetime; no other test in
-            // this module mutates these vars concurrently.
-            for &k in vars {
-                unsafe { std::env::remove_var(k) };
-            }
-            EnvGuard { _lock: lock, saved }
-        }
-
-        fn set(&self, key: &str, val: &str) {
-            // SAFETY: guarded by ENV_MUTEX (held via `_lock`).
-            unsafe { std::env::set_var(key, val) };
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: still holding ENV_MUTEX (dropped after this).
-            for (k, v) in &self.saved {
-                match v {
-                    Some(val) => unsafe { std::env::set_var(k, val) },
-                    None => unsafe { std::env::remove_var(k) },
-                }
-            }
-        }
-    }
 
     fn project_with_rules(body: &str) -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
@@ -443,8 +402,8 @@ mod tests {
     fn emit_lands_four_files_and_is_idempotent() {
         // Pin the launcher via TOME_BIN so the emitted commands are deterministic
         // (and the `command` fields are an exact absolute path, not bare `tome`).
-        let guard = EnvGuard::new(&[TOME_BIN_ENV]);
-        guard.set(TOME_BIN_ENV, "/opt/tome/bin/tome");
+        // Held under the shared `$TOME_BIN` lock for the whole test.
+        let _tome_bin = TomeBinGuard::install("/opt/tome/bin/tome");
 
         let (_tmp, project) = project_with_rules("# rules body\n");
         let root = project.join(".config/goose/plugins/tome-op");
@@ -484,7 +443,9 @@ mod tests {
 
     #[test]
     fn emit_with_absent_rules_writes_empty_block() {
-        let _guard = EnvGuard::new(&[TOME_BIN_ENV]);
+        // Clear `$TOME_BIN` under the shared lock (falls through to `current_exe`);
+        // this test asserts only structure, not the exact launcher bytes.
+        let _tome_bin = TomeBinGuard::new();
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
