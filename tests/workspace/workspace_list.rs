@@ -8,7 +8,7 @@
 //! `current: true` (and no other), the `--json` `current` field, and the
 //! human relative/absolute `Last used` rendering.
 
-use crate::common::{lifecycle_paths, seed_workspace};
+use crate::common::{ToolEnv, lifecycle_paths, paths_for, seed_workspace};
 use std::path::Path;
 use tempfile::TempDir;
 use time::OffsetDateTime;
@@ -338,4 +338,152 @@ fn list_json_last_used_stays_absolute_integer() {
         json.contains("\"current\":true"),
         "--json must carry the current bool; got {json}",
     );
+}
+
+/// Issue #300 — end-to-end coverage of the human-table glue that the pure
+/// `human_last_used` unit tests can't reach: the `Cur` column `*` marker and
+/// the `run → emit → emit_human` `--absolute` threading. Drives the REAL
+/// `tome workspace list` binary under an isolated `$HOME`, so a regression in
+/// the marker render or an un-threaded `--absolute` flag fails here even
+/// though the unit tests stay green.
+///
+/// Determinism: the resolved workspace's `last_used_at` is stamped to a KNOWN
+/// past instant (10 days ago) so the relative form is a stable "days ago"
+/// bucket (never a wall-clock-sensitive "just now") and the absolute form is a
+/// concrete RFC 3339 string. Resolution is pinned via `TOME_WORKSPACE` (the
+/// highest-precedence non-flag source, membership-checked against the seeded
+/// DB) so `my-project` is unambiguously the current row for the spawned
+/// process's CWD.
+#[test]
+fn list_binary_renders_cur_marker_and_absolute_flag() {
+    let env = ToolEnv::new();
+
+    // `tome workspace init my-project` bootstraps the central DB (seeds
+    // `global`) and inserts the named workspace.
+    let init = env
+        .cmd()
+        .args(["workspace", "init", "my-project"])
+        .output()
+        .expect("spawn workspace init");
+    assert!(
+        init.status.success(),
+        "workspace init must succeed; stderr={}",
+        String::from_utf8_lossy(&init.stderr),
+    );
+
+    // Stamp `my-project`'s last_used_at to a fixed instant 10 days ago so the
+    // relative rendering is a deterministic "10 days ago" and the absolute
+    // rendering is a concrete RFC 3339 timestamp.
+    let paths = paths_for(&env);
+    let ten_days_ago = OffsetDateTime::now_utc().unix_timestamp() - 10 * 86_400;
+    {
+        let conn = open_central(&paths);
+        conn.execute(
+            "UPDATE workspaces SET last_used_at = ?1 WHERE name = ?2",
+            rusqlite::params![ten_days_ago, "my-project"],
+        )
+        .expect("stamp last_used_at");
+    }
+
+    // --- Default (relative) render -----------------------------------------
+    let relative = env
+        .cmd()
+        .env("TOME_WORKSPACE", "my-project")
+        .env("COLUMNS", "200") // wide → the table never wraps a row
+        .args(["workspace", "list"])
+        .output()
+        .expect("spawn workspace list");
+    assert!(
+        relative.status.success(),
+        "workspace list must succeed; stderr={}",
+        String::from_utf8_lossy(&relative.stderr),
+    );
+    let out = String::from_utf8_lossy(&relative.stdout);
+
+    let current_row = row_containing(&out, "my-project");
+    let other_row = row_containing(&out, "global");
+
+    // The resolved workspace's row carries the `*` current marker.
+    assert!(
+        current_row.contains('*'),
+        "the resolved workspace row must carry the `*` marker; row={current_row:?}\nfull:\n{out}",
+    );
+    // A non-resolved row does NOT.
+    assert!(
+        !other_row.contains('*'),
+        "a non-resolved workspace row must not carry the `*` marker; row={other_row:?}\nfull:\n{out}",
+    );
+    // `Last used` renders relative (the "ago" bucket), NOT an RFC 3339 stamp.
+    assert!(
+        current_row.contains("ago"),
+        "default render must show a relative time (contains 'ago'); row={current_row:?}\nfull:\n{out}",
+    );
+    assert!(
+        !is_rfc3339_shaped(current_row),
+        "default render must NOT be an RFC 3339 timestamp; row={current_row:?}\nfull:\n{out}",
+    );
+
+    // --- `--absolute` render -----------------------------------------------
+    let absolute = env
+        .cmd()
+        .env("TOME_WORKSPACE", "my-project")
+        .env("COLUMNS", "200")
+        .args(["workspace", "list", "--absolute"])
+        .output()
+        .expect("spawn workspace list --absolute");
+    assert!(
+        absolute.status.success(),
+        "workspace list --absolute must succeed; stderr={}",
+        String::from_utf8_lossy(&absolute.stderr),
+    );
+    let out_abs = String::from_utf8_lossy(&absolute.stdout);
+    let current_row_abs = row_containing(&out_abs, "my-project");
+
+    // `--absolute` is actually threaded through to the human render: the
+    // same row now shows an RFC 3339 timestamp, not the relative form.
+    assert!(
+        is_rfc3339_shaped(current_row_abs),
+        "--absolute must render an RFC 3339 timestamp (T…Z); row={current_row_abs:?}\nfull:\n{out_abs}",
+    );
+    assert!(
+        !current_row_abs.contains("ago"),
+        "--absolute must NOT render the relative form; row={current_row_abs:?}\nfull:\n{out_abs}",
+    );
+    // The `*` marker is unaffected by `--absolute`.
+    assert!(
+        current_row_abs.contains('*'),
+        "the `*` marker must persist under --absolute; row={current_row_abs:?}\nfull:\n{out_abs}",
+    );
+}
+
+/// Return the first line of `haystack` containing `needle`. The comfy-table
+/// output puts each workspace on its own row line, so this isolates the row
+/// under test for cell-level assertions. Panics with the full output if the
+/// row is absent (a clearer failure than an empty match).
+fn row_containing<'a>(haystack: &'a str, needle: &str) -> &'a str {
+    haystack
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no row containing {needle:?} in output:\n{haystack}"))
+}
+
+/// A loose RFC 3339 shape check: an ISO date with the `T` separator and a
+/// trailing `Z`, e.g. `2026-06-21T10:23:11Z`. Deliberately not a full parse —
+/// robust against exact seconds while still distinguishing "2026-…T…Z" from a
+/// relative "10 days ago".
+fn is_rfc3339_shaped(s: &str) -> bool {
+    // Find a `NNNN-NN-NNTNN:NN:NN` prefix followed (within the same token) by
+    // a `Z`. Scan tokens so surrounding table borders don't interfere.
+    s.split_whitespace().any(|tok| {
+        let bytes = tok.as_bytes();
+        // Minimum: 20 chars "2026-06-21T10:23:11Z".
+        bytes.len() >= 20
+            && tok.contains('T')
+            && tok.ends_with('Z')
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes[10] == b'T'
+            && bytes[13] == b':'
+            && bytes[16] == b':'
+    })
 }
