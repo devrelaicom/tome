@@ -166,6 +166,42 @@ OpenCode). Bare `tome harness` enumerates every supported harness.
 
 See [Harnesses](../using-tome/harnesses.md).
 
+## `tome sync`
+
+Propagate workspace state to bound projects: write each project's
+`.tome/RULES.md` and reconcile its harness files (rules sink, MCP config, hooks,
+agents). Byte-for-byte idempotent — re-running changes nothing. This is the same
+propagation `tome plugin enable/disable --sync` runs inline.
+
+| Flags | Purpose |
+| --- | --- |
+| `--all` | Sync **every** project bound to the resolved workspace, not just the current one. |
+| `--rules-only` | Only write `.tome/RULES.md`; skip the harness reconcile. Mutually exclusive with `--harness-only`. |
+| `--harness-only` | Only reconcile harness files; skip the `.tome/RULES.md` write. |
+| `--harness <name>` | Restrict the harness reconcile to one or more harnesses (repeatable: `--harness a --harness b`). Aliases resolve to their canonical module; unknown names exit `18`. Ignored with `--rules-only`. Empty (the default) reconciles the full effective set. |
+
+**Where it acts.** `tome sync` targets projects, not the whole workspace at
+once. Its behaviour depends on where you run it:
+
+- **Inside a bound project** (a `.tome/config.toml` marker resolves): syncs
+  **that project**.
+- **`--all`** (from anywhere): fans out to **every project bound to the
+  resolved workspace**. `--all` is scoped to the *active* workspace's bindings —
+  it does not reach projects bound to other workspaces.
+- **Outside any project, without `--all`**: rather than erroring, `tome sync`
+  falls back to the `--all` fan-out over the resolved workspace's bound
+  projects, printing a short note to stderr so it's clear it acted outside the
+  current directory (`--json` output is identical to `--all`). If the workspace
+  has **no** bound projects, it exits `2` (`usage`) with a message naming the
+  next step — run `tome workspace use` inside a project to bind it, or
+  `tome sync --all` once you have bindings.
+
+The fan-out reuses the exact `--all` writer path, so every project it touches
+inherits the same safety: managed edits stay inside Tome's markers, symlinked
+sinks are refused, and writes are atomic. A per-project failure does not abort
+the run — every reachable project is attempted and the first error is returned,
+so the exit code reflects a genuine failure while partial progress still lands.
+
 ## `tome meta`
 
 Install Tome's bundled meta skills — native `SKILL.md` guides that teach an

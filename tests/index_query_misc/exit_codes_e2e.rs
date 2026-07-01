@@ -859,6 +859,132 @@ fn workspace_remove_with_bound_projects_exits_16() {
     );
 }
 
+/// #303 — bare `tome sync` outside a project (no marker, no `--all`) in HUMAN
+/// mode must (1) fan out to the resolved workspace's bound projects, (2) print
+/// the human-only fan-out NOTE to stderr, and (3) actually reconcile the bound
+/// project. Binary-driven so the real `eprintln!` from `run()` is asserted on
+/// the process's stderr — the enhancement's whole UX signal. Also asserts the
+/// `--json` bare-sync report is byte-identical to explicit `--all` (the
+/// "note is human-only, --json untouched" claim).
+#[test]
+fn bare_sync_outside_project_human_prints_fanout_note_and_reconciles() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    // Init workspace `foo` and bind a project to it (real central-DB binding via
+    // the binary — `workspace use` runs the initial sync too).
+    let init_out = env
+        .cmd()
+        .args(["workspace", "init", "foo"])
+        .output()
+        .expect("spawn init");
+    assert!(
+        init_out.status.success(),
+        "init must succeed, stderr:\n{}",
+        String::from_utf8_lossy(&init_out.stderr),
+    );
+
+    let project = env.home_path().join("proj");
+    fs::create_dir_all(&project).expect("create project");
+    let bind_out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["workspace", "use", "foo"])
+        .output()
+        .expect("spawn use");
+    assert!(
+        bind_out.status.success(),
+        "bind must succeed, exit={:?} stderr:\n{}",
+        bind_out.status.code(),
+        String::from_utf8_lossy(&bind_out.stderr),
+    );
+
+    // Give the workspace a known central RULES.md and stale the project copy so
+    // a genuine reconcile is observable.
+    let ws = tome::workspace::WorkspaceName::parse("foo").unwrap();
+    let central_rules = paths.workspace_rules_file(&ws);
+    fs::create_dir_all(central_rules.parent().unwrap()).expect("workspace dir");
+    fs::write(&central_rules, b"foo canonical rules\n").expect("write central RULES.md");
+    let project_rules = project.join(".tome/RULES.md");
+    fs::write(&project_rules, b"STALE\n").expect("stale project RULES.md");
+
+    // Run bare `tome sync` (HUMAN mode — no --json) from a NON-marker directory
+    // that is neither the project nor $HOME. `TOME_WORKSPACE=foo` resolves the
+    // scope to `foo` with project_root=None → the bare-sync fan-out branch.
+    let elsewhere = env.home_path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).expect("create elsewhere");
+    let out = env
+        .cmd()
+        .current_dir(&elsewhere)
+        .env("TOME_WORKSPACE", "foo")
+        .args(["sync", "--rules-only"])
+        .output()
+        .expect("spawn bare sync");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "bare sync must exit 0, got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // (2) The human-only fan-out NOTE fired on stderr.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no project marker here")
+            && stderr.contains("syncing every project bound to workspace `foo`")
+            && stderr.contains("(like --all)"),
+        "fan-out note missing from stderr:\n{stderr}",
+    );
+
+    // (3) The bound project was actually reconciled to the workspace body.
+    assert_eq!(
+        fs::read(&project_rules).expect("read project RULES.md"),
+        b"foo canonical rules\n",
+        "bare-sync fan-out did not reconcile the bound project",
+    );
+
+    // Re-stale, then compare bare-sync `--json` stdout vs explicit `--all`
+    // `--json` stdout over the SAME fixture — they must be byte-identical
+    // (the "--json untouched, note is human-only" claim).
+    fs::write(&project_rules, b"STALE2\n").expect("re-stale");
+    let bare_json = env
+        .cmd()
+        .current_dir(&elsewhere)
+        .env("TOME_WORKSPACE", "foo")
+        .args(["sync", "--rules-only", "--json"])
+        .output()
+        .expect("spawn bare sync --json");
+    assert_eq!(bare_json.status.code(), Some(0));
+
+    fs::write(&project_rules, b"STALE3\n").expect("re-stale again");
+    let all_json = env
+        .cmd()
+        .current_dir(&elsewhere)
+        .env("TOME_WORKSPACE", "foo")
+        .args(["sync", "--rules-only", "--all", "--json"])
+        .output()
+        .expect("spawn --all --json");
+    assert_eq!(all_json.status.code(), Some(0));
+
+    assert_eq!(
+        bare_json.stdout,
+        all_json.stdout,
+        "bare-sync --json must be byte-identical to explicit --all --json;\nbare:\n{}\nall:\n{}",
+        String::from_utf8_lossy(&bare_json.stdout),
+        String::from_utf8_lossy(&all_json.stdout),
+    );
+
+    // And bare-sync --json emits NO note on stdout (JSON stays clean).
+    let bare_json_stdout = String::from_utf8_lossy(&bare_json.stdout);
+    assert!(
+        !bare_json_stdout.contains("no project marker here"),
+        "the human note must NOT appear on --json stdout:\n{bare_json_stdout}",
+    );
+}
+
 #[test]
 fn harness_list_with_unsupported_harness_exits_18() {
     // Write global settings with an unsupported harness name; running
