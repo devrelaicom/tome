@@ -213,9 +213,12 @@ impl ServerHandler for Server {
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("tome", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Discover and load locally-indexed agent skills. Use `search_skills` \
-                 with a natural-language task to retrieve ranked candidates, then \
-                 `get_skill` to fetch a specific skill's body and resource paths.",
+                "Discover and load locally-indexed agent skills in three steps: \
+                 `search_skills` with a natural-language task to retrieve ranked \
+                 candidates, then `get_skill_info` on a candidate to inspect its \
+                 metadata and `when_to_use` guidance without loading the full body, \
+                 then `get_skill` to fetch the body and resource paths once you've \
+                 confirmed the match.",
             )
     }
 

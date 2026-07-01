@@ -103,9 +103,12 @@ pub struct ResourceEnumeration {
 ///
 /// 1. Validate non-empty `catalog` / `plugin` / `name`.
 /// 2. Look up `(catalog, plugin, kind, name)` in the index, requiring
-///    `enabled = 1` — failures collapse to `entry_not_found` per contract
-///    (the contract does NOT split this into `unknown_catalog` /
-///    `unknown_plugin` like `get_skill` does).
+///    `enabled = 1`. #295: a miss is classified via the shared
+///    [`common::classify_not_found`](crate::mcp::tools::common::classify_not_found)
+///    SSOT into the SAME three codes `get_skill` uses — `unknown_catalog` /
+///    `unknown_plugin` / `unknown_skill` — so an agent never round-trips to
+///    learn which layer was wrong (pre-#295 this collapsed to a single
+///    `entry_not_found`).
 /// 3. Resolve the row's relative `path` to an absolute body path via
 ///    [`skills::resolve_entry_body_path`].
 /// 4. For skill-kind, walk the body's parent directory (one level deep) and
@@ -143,28 +146,65 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         internal(&input, started, e.to_string(), e.category().as_str())
     })?;
 
-    let LookupOutcome::Found(hit) = lookup else {
-        return Err(emit_error(
-            &input,
-            started,
-            "entry_not_found",
-            McpError::invalid_params(
-                format!(
-                    "entry `{}/{}/{}` (kind = {}) is not enabled in the resolved workspace",
-                    input.catalog,
-                    input.plugin,
-                    input.name,
-                    input.kind.as_str(),
+    let hit = match lookup {
+        LookupOutcome::Found(hit) => hit,
+        // #295: emit `get_skill`'s three-code surface — `unknown_catalog` /
+        // `unknown_plugin` / `unknown_skill` — with byte-identical messages and
+        // `data` shapes, so the two read-side tools report the same code (and
+        // the same fields) for the same not-found case. Pre-#295 this collapsed
+        // to a single `entry_not_found`, forcing an agent to round-trip to learn
+        // whether the catalog, the plugin, or just the entry name was wrong.
+        LookupOutcome::NotFound(crate::mcp::tools::common::NotFound::UnknownCatalog) => {
+            return Err(emit_error(
+                &input,
+                started,
+                "unknown_catalog",
+                McpError::invalid_params(
+                    format!(
+                        "catalog `{}` is not enabled in the resolved scope",
+                        input.catalog
+                    ),
+                    Some(json!({ "code": "unknown_catalog", "catalog": input.catalog })),
                 ),
-                Some(json!({
-                    "code": "entry_not_found",
-                    "catalog": input.catalog,
-                    "plugin": input.plugin,
-                    "name": input.name,
-                    "kind": input.kind.as_str(),
-                })),
-            ),
-        ));
+            ));
+        }
+        LookupOutcome::NotFound(crate::mcp::tools::common::NotFound::UnknownPlugin) => {
+            return Err(emit_error(
+                &input,
+                started,
+                "unknown_plugin",
+                McpError::invalid_params(
+                    format!(
+                        "plugin `{}/{}` is not enabled in the resolved scope",
+                        input.catalog, input.plugin
+                    ),
+                    Some(json!({
+                        "code": "unknown_plugin",
+                        "catalog": input.catalog,
+                        "plugin": input.plugin,
+                    })),
+                ),
+            ));
+        }
+        LookupOutcome::NotFound(crate::mcp::tools::common::NotFound::UnknownSkill) => {
+            return Err(emit_error(
+                &input,
+                started,
+                "unknown_skill",
+                McpError::invalid_params(
+                    format!(
+                        "skill `{}/{}/{}` is not enabled in the resolved scope",
+                        input.catalog, input.plugin, input.name,
+                    ),
+                    Some(json!({
+                        "code": "unknown_skill",
+                        "catalog": input.catalog,
+                        "plugin": input.plugin,
+                        "name": input.name,
+                    })),
+                ),
+            ));
+        }
     };
 
     let LookupHit {
@@ -262,7 +302,11 @@ struct LookupHit {
 
 enum LookupOutcome {
     Found(LookupHit),
-    NotFound,
+    /// #295: no enabled entry matched — carries the shared classification so the
+    /// handler can emit `get_skill`'s three-code surface (`unknown_catalog` /
+    /// `unknown_plugin` / `unknown_skill`) instead of the pre-#295 collapsed
+    /// `entry_not_found`.
+    NotFound(crate::mcp::tools::common::NotFound),
 }
 
 fn lookup_entry(
@@ -293,10 +337,17 @@ fn lookup_entry(
                 user_invocable: row.user_invocable,
             }))
         }
-        // The contract collapses both "row absent" and "row present but
-        // disabled in this workspace" onto the same `entry_not_found`
-        // envelope — `get_skill_info` doesn't surface enablement state.
-        Some(_) | None => Ok(LookupOutcome::NotFound),
+        // #295: the entry didn't resolve to an enabled row (absent, or present
+        // only as a disabled row). Classify *which* layer was missing via the
+        // shared `common::classify_not_found` SSOT — the same catalog/plugin
+        // guards `get_skill` uses — so `get_skill_info` reports
+        // `unknown_catalog` / `unknown_plugin` / `unknown_skill` with the same
+        // precedence, sparing the agent a second round-trip. (Pre-#295 this
+        // collapsed both "row absent" and "row present but disabled" onto a
+        // single `entry_not_found` envelope.)
+        Some(_) | None => Ok(LookupOutcome::NotFound(
+            crate::mcp::tools::common::classify_not_found(&conn, workspace_name, catalog, plugin)?,
+        )),
     }
 }
 

@@ -457,8 +457,10 @@ fn lookup_skill(
     // `config.toml`. Checked FIRST so an unknown catalog takes precedence
     // over unknown_plugin/unknown_skill — preserving the contract ordering
     // the old `config.catalogs.contains_key` gate enforced before the
-    // index lookup.
-    if crate::index::workspace_catalogs::find(&conn, workspace_name, catalog)?.is_none() {
+    // index lookup. The guard is the shared `common::catalog_enrolled` SSOT
+    // (#295) — `get_skill_info` uses the same one, so the two surfaces can't
+    // drift on what "unknown catalog" means.
+    if !crate::mcp::tools::common::catalog_enrolled(&conn, workspace_name, catalog)? {
         return Ok(LookupOutcome::UnknownCatalog);
     }
     // #289: `get_skill` resolves BOTH `skill` and `command` entries — the
@@ -502,15 +504,21 @@ fn lookup_skill(
     }
     // No enabled skill- or command-kind row matched. Distinguish "plugin not
     // enabled at all" from "plugin enabled but doesn't have this entry name"
-    // (or has it only as a disabled row). The shipping contract treats zero
-    // (catalog, plugin) rows as `unknown_plugin`. `list_for_plugin` scoped to
-    // the resolved workspace is what determines "enabled" here.
-    let any = skills::list_for_plugin(&conn, workspace_name, catalog, plugin)?;
-    if any.is_empty() {
-        Ok(LookupOutcome::UnknownPlugin)
-    } else {
-        Ok(LookupOutcome::UnknownSkill)
-    }
+    // (or has it only as a disabled row) via the shared `common::classify_not_found`
+    // SSOT (#295): zero `(catalog, plugin)` rows ⇒ `unknown_plugin`, otherwise
+    // `unknown_skill`. The catalog was already gated to enrolled above, so the
+    // classifier's `UnknownCatalog` arm is unreachable here — map it to
+    // `UnknownCatalog` anyway for exhaustiveness (a future catalog-drop-mid-
+    // lookup would then surface correctly).
+    use crate::mcp::tools::common::NotFound;
+    Ok(
+        match crate::mcp::tools::common::classify_not_found(&conn, workspace_name, catalog, plugin)?
+        {
+            NotFound::UnknownCatalog => LookupOutcome::UnknownCatalog,
+            NotFound::UnknownPlugin => LookupOutcome::UnknownPlugin,
+            NotFound::UnknownSkill => LookupOutcome::UnknownSkill,
+        },
+    )
 }
 
 enum ReadError {
