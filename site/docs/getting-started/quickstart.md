@@ -41,9 +41,9 @@ tome plugin list
 ```
 
 ```text
-| Catalog         | Plugin                | Version | Status     | Entries                           | Last indexed |
-|-----------------|-----------------------|---------|------------|-----------------------------------|--------------|
-| midnight-expert | midnight-verify       | 0.13.0  | ✓ enabled  | (19 skills, 2 commands, 7 agents) | just now     |
+| Catalog         | Plugin                | Version | Status     | Entries                           | Last indexed | Last upstream change |
+|-----------------|-----------------------|---------|------------|-----------------------------------|--------------|----------------------|
+| midnight-expert | midnight-verify       | 0.13.0  | ✓ enabled  | (19 skills, 2 commands, 7 agents) | just now     | just now             |
 ```
 
 That's one row of thirteen — the other twelve plugins stay `✗ disabled` until

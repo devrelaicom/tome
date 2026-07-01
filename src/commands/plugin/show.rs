@@ -95,9 +95,13 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
 
     // #309: the upstream committer date for this plugin's subtree, computed at
     // display time from the catalog clone (best-effort; None when the clone has
-    // no history for it / isn't a git repo). `plugin_dir` is the resolved
-    // `clone_dir.join(source)`, so `git log` runs from inside it.
-    let last_upstream_change = super::last_upstream_change_for_plugin_dir(&plugin_dir, &id.catalog);
+    // no history for it / isn't a git repo). Routes through the SAME
+    // `.git`-guarded helper `list` uses — resolving the `(clone_dir, source)`
+    // split from the identity so `git log` never walks up to an unrelated
+    // ancestor repository (which running it from the joined `plugin_dir` would
+    // allow).
+    let last_upstream_change =
+        super::last_upstream_change_for_id(&conn, &paths, scope.scope.name().as_str(), &id);
 
     let record = PluginRecord {
         id: id.clone(),

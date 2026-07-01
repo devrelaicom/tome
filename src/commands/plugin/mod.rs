@@ -200,28 +200,52 @@ pub(crate) fn last_upstream_change_at_display(
     OffsetDateTime::parse(&iso, &Rfc3339).ok()
 }
 
-/// [`last_upstream_change_at_display`] for callers that already hold the fully
-/// resolved `plugin_dir` (e.g. `plugin show`, whose `resolve_plugin_dir`
-/// returns `clone_dir.join(source)` directly). Runs `git log` from inside
-/// `plugin_dir` scoped to `.`, letting `git` discover the enclosing repository
-/// upward — so a plugin subtree deeper than the clone root is handled without
-/// re-reading the catalog manifest to recover the `(clone_dir, source)` split.
+/// [`last_upstream_change_at_display`] for callers that hold the plugin
+/// identity + a read handle rather than a pre-split `(clone_dir, source)` pair
+/// (e.g. `plugin show`, whose `resolve_plugin_dir` returns the JOINED
+/// `clone_dir.join(source)`). Recovers the `(clone_dir, source)` split the same
+/// way `resolve_plugin_dir` does — enrolment URL → `cache_dir_for(url)` for the
+/// clone root, catalog manifest → the plugin's `source` sub-path — then routes
+/// through the SAME `.git`-guarded [`last_upstream_change_at_display`] `list`
+/// uses.
 ///
-/// Same best-effort contract: `None` when `plugin_dir` isn't inside a git
-/// working tree, has no history, or `git` fails. Never propagates.
-pub(crate) fn last_upstream_change_for_plugin_dir(
-    plugin_dir: &std::path::Path,
-    catalog: &str,
+/// Routing through the shared guarded helper (rather than running `git log`
+/// from inside the joined plugin dir) is load-bearing: `git log` WALKS UP to
+/// find an enclosing `.git`, so a plugin dir that is not itself inside a real
+/// clone but sits under an unrelated ancestor repository (e.g. a `$HOME`
+/// dotfiles repo) would otherwise report that ANCESTOR's HEAD timestamp — a
+/// silently-wrong value. The `clone_dir.join(".git").exists()` guard in the
+/// shared helper makes `show` and `list` resolve the same fact by the same
+/// mechanism (both return `None` → `—`).
+///
+/// Same best-effort contract: any resolution/git failure degrades to `None`;
+/// nothing propagates (the read-only, no-lock display path must not change the
+/// command's exit code).
+pub(crate) fn last_upstream_change_for_id(
+    conn: &rusqlite::Connection,
+    paths: &Paths,
+    workspace_name: &str,
+    id: &crate::plugin::PluginId,
 ) -> Option<time::OffsetDateTime> {
-    use time::OffsetDateTime;
-    use time::format_description::well_known::Rfc3339;
+    // Enrolment URL → content-addressed clone root (mirrors resolve_plugin_dir).
+    let enrolment = crate::index::workspace_catalogs::find(conn, workspace_name, &id.catalog)
+        .ok()
+        .flatten()?;
+    let clone_dir = paths.cache_dir_for(&enrolment.url);
 
-    let git = crate::catalog::git::Git::new(catalog);
-    // `rel_path` empty → the helper substitutes `.`, i.e. "this directory's
-    // history"; `git` walks up to find `.git`. A non-repo `plugin_dir` makes
-    // `git` exit non-zero → `Err` → `None`.
-    let iso = git.last_commit_iso(plugin_dir, "").ok().flatten()?;
-    OffsetDateTime::parse(&iso, &Rfc3339).ok()
+    // Catalog manifest → the plugin's declared `source` sub-path; fall back to
+    // the plugin name (the same fallback resolve_plugin_dir applies when the
+    // manifest is absent/unreadable).
+    let rel_source = crate::catalog::manifest::read_catalog_manifest(&clone_dir)
+        .and_then(|m| {
+            m.plugins
+                .iter()
+                .find(|p| p.name == id.plugin)
+                .map(|p| p.source.clone())
+        })
+        .unwrap_or_else(|| id.plugin.clone());
+
+    last_upstream_change_at_display(&clone_dir, &id.catalog, &rel_source)
 }
 
 /// Open the index DB read-only-ish using the registry-derived seeds. We
