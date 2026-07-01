@@ -27,6 +27,7 @@ fn project_scope(project_root: std::path::PathBuf, ws_name: &str) -> ResolvedSco
         scope: Scope(WorkspaceName::parse(ws_name).unwrap()),
         source: ScopeSource::ProjectMarker,
         project_root: Some(project_root),
+        overridden_project_marker: None,
     }
 }
 

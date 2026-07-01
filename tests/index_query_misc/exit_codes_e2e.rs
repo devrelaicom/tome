@@ -1032,6 +1032,242 @@ fn global_config_present_does_not_cause_exit_70_for_commands_under_home() {
     );
 }
 
+/// Issue #302: when `[workspace] default` wins resolution AND a per-project
+/// `.tome/config.toml` marker exists in the CWD ancestry, the CLI prints a
+/// one-line `note:` on stderr explaining the override. The exit status is
+/// unchanged (exit 0) and the resolved workspace is still the config default —
+/// this is an additive notice, not an error.
+#[test]
+fn workspace_default_overriding_project_marker_prints_stderr_note() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    // Seed the "work" workspace in the central DB so the config default passes
+    // the membership check.
+    let out = env
+        .cmd()
+        .args(["workspace", "init", "work"])
+        .output()
+        .expect("spawn workspace init work");
+    assert!(
+        out.status.success(),
+        "workspace init work stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Set `[workspace] default = "work"` in the global config.
+    fs::write(
+        &paths.global_config_file,
+        "[workspace]\ndefault = \"work\"\n",
+    )
+    .expect("write global config");
+
+    // A project dir UNDER $HOME with its OWN `.tome/config.toml` marker — the
+    // per-project binding the config default will shadow.
+    let project = env.home_path().join("bound-project");
+    fs::create_dir_all(project.join(".tome")).expect("create marker dir");
+    fs::write(project.join(".tome/config.toml"), "workspace = \"work\"\n")
+        .expect("write project marker");
+
+    // Any cheap foreground command that resolves scope before dispatch.
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["harness", "list"])
+        .output()
+        .expect("spawn harness list from bound project");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Exit status unchanged (the notice is additive; `harness list` succeeds).
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "notice must NOT change the exit status; got {:?}, stdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code(),
+    );
+
+    // The one-line stderr note names the shadowing default, the marker path,
+    // and the accurate remediation commands.
+    assert!(
+        stderr.contains("note: [workspace] default 'work' is overriding the project binding"),
+        "expected the override note on stderr; stderr:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("bound-project"),
+        "note must reference the shadowed project directory (`overridden_project_marker`); \
+         stderr:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("tome workspace use"),
+        "note must name the accurate remediation command; stderr:\n{stderr}",
+    );
+}
+
+/// Issue #302 (`--json` gate): the override `note:` is a human-mode affordance
+/// only — in `--json` mode the note is suppressed so structured-stdout consumers
+/// aren't handed an unstructured stderr line. This exercises the SAME shadowing
+/// scenario as the positive test (config `[workspace] default` set + a `.tome`
+/// project marker in the CWD ancestry, so the Config-wins branch DOES populate
+/// `overridden_project_marker`) — proving the `--json` gate, not an unpopulated
+/// field, is what suppresses the note. Exit status is unchanged (exit 0).
+#[test]
+fn workspace_default_overriding_project_marker_in_json_mode_prints_no_note() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    // Seed "work" so the config default passes the membership check — the field
+    // IS populated, and only the `--json` gate suppresses the note.
+    let out = env
+        .cmd()
+        .args(["workspace", "init", "work"])
+        .output()
+        .expect("spawn workspace init work");
+    assert!(
+        out.status.success(),
+        "workspace init work stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    fs::write(
+        &paths.global_config_file,
+        "[workspace]\ndefault = \"work\"\n",
+    )
+    .expect("write global config");
+
+    // A project dir UNDER $HOME with its OWN `.tome/config.toml` marker — the
+    // exact shadowing scenario that populates the field.
+    let project = env.home_path().join("json-bound-project");
+    fs::create_dir_all(project.join(".tome")).expect("create marker dir");
+    fs::write(project.join(".tome/config.toml"), "workspace = \"work\"\n")
+        .expect("write project marker");
+
+    // Same foreground command, in `--json` mode. The pre-dispatch resolve still
+    // populates the field; the `main.rs` note guard skips it because `mode ==
+    // Json`.
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["harness", "list", "--json"])
+        .output()
+        .expect("spawn harness list --json from bound project");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Exit status unchanged.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the --json gate must not change the exit status; got {:?}, stdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code(),
+    );
+
+    // The note must NOT appear on stderr in `--json` mode.
+    assert!(
+        !stderr.contains("is overriding the project binding"),
+        "the override note must be suppressed in --json mode; stderr:\n{stderr}",
+    );
+}
+
+/// Issue #302 (negative): with `[workspace] default` set but NO project marker
+/// in the CWD ancestry, nothing is shadowed → no `note:` is printed.
+#[test]
+fn workspace_default_without_project_marker_prints_no_note() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    let out = env
+        .cmd()
+        .args(["workspace", "init", "work"])
+        .output()
+        .expect("spawn workspace init work");
+    assert!(out.status.success());
+
+    fs::write(
+        &paths.global_config_file,
+        "[workspace]\ndefault = \"work\"\n",
+    )
+    .expect("write global config");
+
+    // A project dir UNDER $HOME with NO `.tome/config.toml` marker of its own.
+    let project = env.home_path().join("unmarked-project");
+    fs::create_dir_all(&project).expect("create project dir");
+
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["harness", "list"])
+        .output()
+        .expect("spawn harness list from unmarked project");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("is overriding the project binding"),
+        "no marker present → no override note; stderr:\n{stderr}",
+    );
+}
+
+/// Issue #302 (MCP path): the override `note:` is a CLI-foreground affordance
+/// only — `tome mcp` speaks JSON-RPC and must NEVER surface it. Even in the
+/// exact Config-default-shadows-a-marker scenario (which populates
+/// `overridden_project_marker` on the resolved scope), spawning `tome mcp` from
+/// that CWD does not print the note to the process's stderr. The scope is
+/// still stamped via `--workspace` at real `harness sync`, but the resolver
+/// here reaches step 3, so this exercises the same detection the CLI note uses
+/// — proving the emit is gated OFF for the MCP command in `main.rs`.
+#[test]
+fn mcp_path_does_not_emit_override_note() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    let out = env
+        .cmd()
+        .args(["workspace", "init", "work"])
+        .output()
+        .expect("spawn workspace init work");
+    assert!(out.status.success());
+
+    fs::write(
+        &paths.global_config_file,
+        "[workspace]\ndefault = \"work\"\n",
+    )
+    .expect("write global config");
+
+    let project = env.home_path().join("mcp-bound-project");
+    fs::create_dir_all(project.join(".tome")).expect("create marker dir");
+    fs::write(project.join(".tome/config.toml"), "workspace = \"work\"\n")
+        .expect("write project marker");
+
+    // Spawn `tome mcp` WITHOUT `--workspace` so resolution reaches step 3
+    // (`[workspace] default`) — the branch that populates
+    // `overridden_project_marker`. Closed stdin so the server (if it starts)
+    // shuts down immediately; whether preflight then fails on missing models or
+    // the server starts, the notice guard in `main.rs` runs BEFORE `mcp::run`
+    // and skips the note for the MCP command. `TOME_MCP_LOG=off` keeps the
+    // server's own file-log sink off so stderr carries only what `main.rs`
+    // would print.
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .env("TOME_MCP_LOG", "off")
+        .args(["mcp"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn tome mcp from bound project");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("is overriding the project binding"),
+        "the MCP path must never emit the override note; stderr:\n{stderr}",
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn workspace_init_with_unwritable_parent_dir_exits_7() {

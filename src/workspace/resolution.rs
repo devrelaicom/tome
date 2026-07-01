@@ -96,6 +96,7 @@ pub fn resolve_with(
             scope: Scope(name),
             source: ScopeSource::Flag,
             project_root: None,
+            overridden_project_marker: None,
         });
     }
 
@@ -110,6 +111,7 @@ pub fn resolve_with(
                 scope: Scope(name),
                 source: ScopeSource::Env,
                 project_root: None,
+                overridden_project_marker: None,
             });
         }
     }
@@ -129,11 +131,29 @@ pub fn resolve_with(
         if let Some(raw) = cfg.workspace.default {
             let name = WorkspaceName::parse(&raw)?;
             require_workspace_membership(&name, paths)?;
+            // Issue #302: a `[workspace] default` win silently shadows any
+            // per-project `.tome/config.toml` binding in the CWD ancestry —
+            // `project_root` degrades to `None`, so harness sync,
+            // `${TOME_PROJECT_DIR}`, and `harness_mcp` all go inactive here. Run
+            // the SAME bounded CWD→root walk the project-marker branch uses to
+            // detect that shadowing and record the marker dir; the resolution
+            // RESULT is unchanged (scope stays the config default,
+            // `project_root` stays `None`). The CLI foreground boundary reads
+            // `overridden_project_marker` to print a one-line stderr notice.
+            //
+            // Performance: this walk runs ONLY on the Config-wins path — i.e.
+            // only when a default is actually set — never on the common
+            // no-default path (which reaches the project-marker branch below and
+            // walks there anyway). The walk is bounded (CWD→root) and already
+            // skips the global config file.
+            let overridden_project_marker =
+                walk_for_project_marker().map(|(project_root, _marker)| project_root);
             log_resolution(&name, ScopeSource::Config, None);
             return Ok(ResolvedScope {
                 scope: Scope(name),
                 source: ScopeSource::Config,
                 project_root: None,
+                overridden_project_marker,
             });
         }
     }
@@ -151,6 +171,7 @@ pub fn resolve_with(
             scope: Scope(cfg.workspace),
             source: ScopeSource::ProjectMarker,
             project_root: Some(project_root),
+            overridden_project_marker: None,
         });
     }
 

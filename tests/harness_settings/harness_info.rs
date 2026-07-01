@@ -11,6 +11,7 @@ fn fallback_scope() -> ResolvedScope {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 

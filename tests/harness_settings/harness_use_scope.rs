@@ -23,6 +23,7 @@ fn make_resolved_scope(name: &str, project_root: Option<std::path::PathBuf>) -> 
         scope,
         source,
         project_root,
+        overridden_project_marker: None,
     }
 }
 

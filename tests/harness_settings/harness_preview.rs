@@ -61,6 +61,7 @@ impl Fixture {
             scope: Scope(WorkspaceName::parse(WS).expect("parse ws")),
             source: ScopeSource::ProjectMarker,
             project_root: Some(self.project.clone()),
+            overridden_project_marker: None,
         }
     }
 
@@ -629,6 +630,7 @@ fn no_index_db_produces_empty_report_not_an_error() {
         scope: Scope(WorkspaceName::parse(WS).expect("ws")),
         source: ScopeSource::ProjectMarker,
         project_root: Some(env.home_path().join("project")),
+        overridden_project_marker: None,
     };
     let report = preview::pipeline("codex", None, &scope, &paths, env.home_path())
         .expect("no-DB preview must succeed (empty)");

@@ -156,6 +156,7 @@ mod tests {
             scope: Scope(WorkspaceName::parse(ws).unwrap()),
             source: ScopeSource::ProjectMarker,
             project_root: Some(project_root),
+            overridden_project_marker: None,
         }
     }
 

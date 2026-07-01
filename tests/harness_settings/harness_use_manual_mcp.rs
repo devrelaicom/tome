@@ -34,6 +34,7 @@ fn make_project_scope(workspace: &str, project_root: std::path::PathBuf) -> Reso
         scope: Scope(WorkspaceName::parse(workspace).unwrap()),
         source: ScopeSource::ProjectMarker,
         project_root: Some(project_root),
+        overridden_project_marker: None,
     }
 }
 

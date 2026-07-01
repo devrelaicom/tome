@@ -217,6 +217,7 @@ fn project_scope(project_root: &Path) -> ResolvedScope {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::ProjectMarker,
         project_root: Some(project_root.to_path_buf()),
+        overridden_project_marker: None,
     }
 }
 
@@ -227,6 +228,7 @@ fn global_fallback_scope() -> ResolvedScope {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 

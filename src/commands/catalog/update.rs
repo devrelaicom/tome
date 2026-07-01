@@ -184,6 +184,7 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
                 scope: ws_scope.clone(),
                 source: crate::workspace::ScopeSource::Flag,
                 project_root: None,
+                overridden_project_marker: None,
             };
             if let Some(catalog_id) =
                 crate::telemetry::resolve_attribution(&ws_resolved, &catalog_name)

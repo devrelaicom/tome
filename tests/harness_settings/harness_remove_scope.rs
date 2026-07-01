@@ -12,6 +12,7 @@ fn make_resolved_scope(name: &str) -> ResolvedScope {
         scope: Scope(WorkspaceName::parse(name).unwrap()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 

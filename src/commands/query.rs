@@ -375,6 +375,7 @@ pub fn run_with_deps(
             scope: deps.scope.clone(),
             source: ScopeSource::GlobalFallback,
             project_root: None,
+            overridden_project_marker: None,
         };
         let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
             std::collections::HashMap::new();

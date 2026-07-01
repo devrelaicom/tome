@@ -19,6 +19,7 @@ fn global_scope() -> ResolvedScope {
         scope: tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 

@@ -205,6 +205,7 @@ fn sync_unknown_harness_errors() {
         scope: tome::workspace::Scope(parse("global")),
         source: tome::workspace::ScopeSource::ProjectMarker,
         project_root: Some(project.clone()),
+        overridden_project_marker: None,
     };
 
     let args = SyncArgs {
@@ -241,6 +242,7 @@ fn sync_one_bad_harness_among_many_errors() {
         scope: tome::workspace::Scope(parse("global")),
         source: tome::workspace::ScopeSource::ProjectMarker,
         project_root: Some(project.clone()),
+        overridden_project_marker: None,
     };
 
     // cursor is valid; nope is not. The whole run must error (exit 18).
@@ -288,6 +290,7 @@ fn sync_alias_harness_passes_validation() {
         scope: tome::workspace::Scope(parse("global")),
         source: tome::workspace::ScopeSource::ProjectMarker,
         project_root: Some(project.clone()),
+        overridden_project_marker: None,
     };
 
     let args = SyncArgs {

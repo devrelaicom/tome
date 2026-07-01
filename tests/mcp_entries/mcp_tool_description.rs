@@ -45,6 +45,7 @@ fn build_state(paths: &Paths, ws: &WorkspaceName) -> Arc<McpState> {
         scope: Scope(ws.clone()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     };
     Arc::new(McpState {
         embedder,

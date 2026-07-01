@@ -58,6 +58,17 @@ pub struct ResolvedScope {
     /// The directory whose `.tome/config.toml` named the bound workspace
     /// (when `source == ProjectMarker`). `None` otherwise.
     pub project_root: Option<PathBuf>,
+    /// Issue #302: the directory of a project marker that a `[workspace] default`
+    /// resolution *shadowed*. Populated ONLY when `source == Config` AND a
+    /// `.tome/config.toml` project marker actually exists in the CWD ancestry —
+    /// i.e. the config default won resolution even though the user has a
+    /// per-project binding here. `None` in every other case (including a
+    /// `Config` win with no marker present).
+    ///
+    /// This is DETECTION ONLY: the resolved scope and `project_root: None` are
+    /// unchanged by its presence. The CLI foreground boundary reads it to print
+    /// a one-line stderr notice; the MCP island and tests never emit from it.
+    pub overridden_project_marker: Option<PathBuf>,
 }
 
 impl ResolvedScope {
@@ -67,6 +78,7 @@ impl ResolvedScope {
             scope: Scope(WorkspaceName::global()),
             source: ScopeSource::GlobalFallback,
             project_root: None,
+            overridden_project_marker: None,
         }
     }
 

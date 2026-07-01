@@ -568,6 +568,7 @@ fn build_state_for_scope(paths: &tome::paths::Paths, workspace: &str) -> Arc<Mcp
             scope: Scope(WorkspaceName::parse(workspace).expect("valid workspace name")),
             source: ScopeSource::Flag,
             project_root: None,
+            overridden_project_marker: None,
         },
         paths: paths.clone(),
         embedder_entry: base.embedder_entry,

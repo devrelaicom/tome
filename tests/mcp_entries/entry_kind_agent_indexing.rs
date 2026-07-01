@@ -132,6 +132,7 @@ fn global_resolved_scope() -> ResolvedScope {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 
