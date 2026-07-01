@@ -648,3 +648,175 @@ fn exhaustive_match_compile_check() {
         }
     }
 }
+
+// ---- #296: structured retryable / remediation on the CLI + MCP surfaces ----
+
+/// The CLI `--json` error envelope carries the new structured fields, derived
+/// from the `ErrorCategory` SSOT: a retryable case (IndexBusy → `retryable:true`,
+/// no `remediation` key) and a remediation case (drift → `remediation:"tome
+/// reindex --force"`), plus a non-retryable/no-remediation case (`remediation`
+/// omitted entirely).
+#[test]
+fn cli_error_envelope_carries_retryable_and_remediation() {
+    use tome::output::ErrorRecord;
+
+    // `ErrorRecord` borrows the error, so bind each error to a `let` first
+    // (an inline temporary would be dropped before the record is serialised).
+
+    // Retryable, no remediation command.
+    let busy_err = TomeError::IndexBusy;
+    let busy_json = serde_json::to_value(ErrorRecord::from_error(&busy_err)).unwrap();
+    assert_eq!(busy_json["retryable"], serde_json::json!(true));
+    assert!(
+        busy_json.get("remediation").is_none(),
+        "IndexBusy has no fix command → `remediation` must be omitted; got {busy_json}",
+    );
+
+    // Remediation case: drift → the fix that used to live only in the prose.
+    let drift_err = TomeError::EmbedderNameDrift {
+        stored: "a".into(),
+        configured: "b".into(),
+    };
+    let drift_json = serde_json::to_value(ErrorRecord::from_error(&drift_err)).unwrap();
+    assert_eq!(drift_json["retryable"], serde_json::json!(false));
+    assert_eq!(
+        drift_json["remediation"],
+        serde_json::json!("tome reindex --force"),
+    );
+
+    // Non-retryable, no remediation: `remediation` key absent, `retryable:false`.
+    let usage_err = TomeError::Usage("bad flag".into());
+    let usage_json = serde_json::to_value(ErrorRecord::from_error(&usage_err)).unwrap();
+    assert_eq!(usage_json["retryable"], serde_json::json!(false));
+    assert!(
+        usage_json.get("remediation").is_none(),
+        "a usage error has no fix command; got {usage_json}",
+    );
+}
+
+/// CLI↔MCP parity: for the same `TomeError`, the CLI envelope and the MCP tool
+/// `data` payload agree on `code` / `retryable` / `remediation` — both derived
+/// from the one `ErrorCategory` SSOT (the MCP side via
+/// `mcp::tools::common::error_data`).
+#[test]
+fn cli_and_mcp_agree_on_code_retryable_remediation() {
+    use tome::mcp::tools::common::error_data;
+    use tome::output::ErrorRecord;
+
+    // One case per retryable×remediation quadrant, checked on both surfaces:
+    //   drift       → [retryable:false, remediation:Some]
+    //   IndexBusy   → [retryable:true,  remediation:None]
+    //   Usage       → [retryable:false, remediation:None]
+    //   HarnessClash→ [retryable:true,  remediation:Some]  (the only member)
+    let cases = [
+        TomeError::EmbedderNameDrift {
+            stored: "a".into(),
+            configured: "b".into(),
+        },
+        TomeError::IndexBusy,
+        TomeError::Usage("x".into()),
+        TomeError::HarnessClash {
+            path: std::path::PathBuf::from("/x/.mcp.json"),
+            command: "tome".into(),
+            first_arg: "mcp".into(),
+        },
+    ];
+    for err in cases {
+        let cat = err.category();
+        let cli = serde_json::to_value(ErrorRecord::from_error(&err)).unwrap();
+        let mcp = error_data(cat);
+
+        // `code` (CLI `category`) matches the MCP `data.code` slug.
+        assert_eq!(cli["category"], mcp["code"], "code slug parity for {cat:?}");
+        // `retryable` matches.
+        assert_eq!(
+            cli["retryable"], mcp["retryable"],
+            "retryable parity for {cat:?}",
+        );
+        // `remediation` matches: both present-and-equal, or both absent.
+        assert_eq!(
+            cli.get("remediation"),
+            mcp.get("remediation"),
+            "remediation parity for {cat:?}",
+        );
+    }
+}
+
+/// The `[retryable:true, remediation:Some]` quadrant on the SERIALIZED wire —
+/// its only member is `HarnessClash`. Both the CLI envelope and the MCP `data`
+/// carry `retryable == true` AND `remediation == "tome harness use --force"`,
+/// and agree with each other. (The sequencing — retry AFTER the remediation —
+/// is documented on the `ErrorCategory::retryable` arm.)
+#[test]
+fn harness_clash_wire_carries_retryable_true_and_force_remediation() {
+    use tome::mcp::tools::common::error_data;
+    use tome::output::ErrorRecord;
+
+    let err = TomeError::HarnessClash {
+        path: std::path::PathBuf::from("/x/.mcp.json"),
+        command: "tome".into(),
+        first_arg: "mcp".into(),
+    };
+
+    // CLI `--json` envelope.
+    let cli = serde_json::to_value(ErrorRecord::from_error(&err)).unwrap();
+    assert_eq!(cli["category"], serde_json::json!("harness_clash"));
+    assert_eq!(cli["retryable"], serde_json::json!(true));
+    assert_eq!(
+        cli["remediation"],
+        serde_json::json!("tome harness use --force"),
+    );
+
+    // MCP tool error `data` (via the shared SSOT).
+    let mcp = error_data(err.category());
+    assert_eq!(mcp["code"], serde_json::json!("harness_clash"));
+    assert_eq!(mcp["retryable"], serde_json::json!(true));
+    assert_eq!(
+        mcp["remediation"],
+        serde_json::json!("tome harness use --force"),
+    );
+
+    // The two surfaces agree.
+    assert_eq!(cli["category"], mcp["code"]);
+    assert_eq!(cli["retryable"], mcp["retryable"]);
+    assert_eq!(cli.get("remediation"), mcp.get("remediation"));
+}
+
+/// The MCP `data` payload (via the shared SSOT helper) carries the structured
+/// fields — the surface the issue is about (an agent in another harness reading
+/// the tool error `data`, not regexing the prose).
+#[test]
+fn mcp_error_data_carries_retryable_and_remediation() {
+    use tome::error::ErrorCategory;
+    use tome::mcp::tools::common::{error_data, error_data_with_code};
+
+    // Drift → remediation rides the data payload.
+    let drift = error_data(ErrorCategory::EmbedderNameDrift);
+    assert_eq!(drift["code"], serde_json::json!("embedder_name_drift"));
+    assert_eq!(drift["retryable"], serde_json::json!(false));
+    assert_eq!(
+        drift["remediation"],
+        serde_json::json!("tome reindex --force")
+    );
+
+    // IndexBusy → retryable, no remediation key.
+    let busy = error_data(ErrorCategory::IndexBusy);
+    assert_eq!(busy["retryable"], serde_json::json!(true));
+    assert!(busy.get("remediation").is_none());
+
+    // The custom-slug helper keeps the custom `code` + extra fields but still
+    // derives retryable/remediation from the mapped category (the drift search
+    // path uses the `embedder_drift` slug).
+    let custom = error_data_with_code(
+        "embedder_drift",
+        ErrorCategory::EmbedderNameDrift,
+        &[("hint", serde_json::json!("v"))],
+    );
+    assert_eq!(custom["code"], serde_json::json!("embedder_drift"));
+    assert_eq!(custom["retryable"], serde_json::json!(false));
+    assert_eq!(
+        custom["remediation"],
+        serde_json::json!("tome reindex --force")
+    );
+    assert_eq!(custom["hint"], serde_json::json!("v"));
+}

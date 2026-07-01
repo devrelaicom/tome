@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info};
 
-use crate::error::TomeError;
+use crate::error::{ErrorCategory, TomeError};
 use crate::index::skills;
 use crate::mcp::state::McpState;
+use crate::mcp::tools::common::{error_data, error_data_with_code};
 use crate::plugin::frontmatter;
 use crate::substitution::{self, SubstitutionContext, SubstitutionError};
 
@@ -106,7 +107,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let lookup =
         tokio::task::spawn_blocking(move || lookup_skill(&paths, &scope, &catalog, &plugin, &name))
             .await
-            .map_err(|e| internal(&input, started, format!("lookup join: {e}"), "internal"))?
+            .map_err(|e| {
+                internal(
+                    &input,
+                    started,
+                    format!("lookup join: {e}"),
+                    ErrorCategory::Internal,
+                )
+            })?
             .map_err(|e| {
                 // C-L1: best-effort MCP-surface `tome.error` (closed category
                 // only), with this session's `calling_harness`. Never alters the
@@ -122,7 +130,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 // allowlisted source. Fabricating a version would be worse than
                 // the anonymous-only `tome.error` already emitted above, so the
                 // attributed error stays deferred at this boundary.
-                internal(&input, started, e.to_string(), e.category().as_str())
+                internal(&input, started, e.to_string(), e.category())
             })?;
 
     let hit = match lookup {
@@ -137,7 +145,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                         "catalog `{}` is not enabled in the resolved scope",
                         input.catalog
                     ),
-                    Some(json!({ "code": "unknown_catalog", "catalog": input.catalog })),
+                    Some(error_data_with_code(
+                        "unknown_catalog",
+                        ErrorCategory::EntryNotFound,
+                        &[("catalog", json!(input.catalog))],
+                    )),
                 ),
             ));
         }
@@ -151,11 +163,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                         "plugin `{}/{}` is not enabled in the resolved scope",
                         input.catalog, input.plugin
                     ),
-                    Some(json!({
-                        "code": "unknown_plugin",
-                        "catalog": input.catalog,
-                        "plugin": input.plugin,
-                    })),
+                    Some(error_data_with_code(
+                        "unknown_plugin",
+                        ErrorCategory::EntryNotFound,
+                        &[
+                            ("catalog", json!(input.catalog)),
+                            ("plugin", json!(input.plugin)),
+                        ],
+                    )),
                 ),
             ));
         }
@@ -169,12 +184,15 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                         "skill `{}/{}/{}` is not enabled in the resolved scope",
                         input.catalog, input.plugin, input.name,
                     ),
-                    Some(json!({
-                        "code": "unknown_skill",
-                        "catalog": input.catalog,
-                        "plugin": input.plugin,
-                        "name": input.name,
-                    })),
+                    Some(error_data_with_code(
+                        "unknown_skill",
+                        ErrorCategory::EntryNotFound,
+                        &[
+                            ("catalog", json!(input.catalog)),
+                            ("plugin", json!(input.plugin)),
+                            ("name", json!(input.name)),
+                        ],
+                    )),
                 ),
             ));
         }
@@ -204,7 +222,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let read_result =
         tokio::task::spawn_blocking(move || read_skill_and_resources(&read_path, walk_resources))
             .await
-            .map_err(|e| internal(&read_input, started, format!("read join: {e}"), "internal"))?;
+            .map_err(|e| {
+                internal(
+                    &read_input,
+                    started,
+                    format!("read join: {e}"),
+                    ErrorCategory::Internal,
+                )
+            })?;
 
     let body_and_resources = match read_result {
         Ok(v) => v,
@@ -224,10 +249,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                         McpError::new(
                             ErrorCode::INTERNAL_ERROR,
                             format!("skill file is missing: {}", p.display()),
-                            Some(json!({
-                                "code": "skill_file_missing",
-                                "path": p.display().to_string(),
-                            })),
+                            Some(error_data_with_code(
+                                "skill_file_missing",
+                                ErrorCategory::Io,
+                                &[("path", json!(p.display().to_string()))],
+                            )),
                         ),
                     ),
                 ),
@@ -240,13 +266,17 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                         McpError::new(
                             ErrorCode::INTERNAL_ERROR,
                             format!("frontmatter parse failed: {detail}"),
-                            Some(json!({ "code": "frontmatter_strip_failed" })),
+                            Some(error_data_with_code(
+                                "frontmatter_strip_failed",
+                                ErrorCategory::SkillFrontmatterParseError,
+                                &[],
+                            )),
                         ),
                     ),
                 ),
                 ReadError::Io(io) => (
                     crate::error::ErrorCategory::Io,
-                    internal(&read_input, started, io.to_string(), "io"),
+                    internal(&read_input, started, io.to_string(), ErrorCategory::Io),
                 ),
             };
             emit_post_resolution_error_telemetry(
@@ -287,7 +317,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         substitution::render(&raw_content, &ctx).map_err(map_substitution_error)
     })
     .await
-    .map_err(|e| internal(&input, started, format!("render join: {e}"), "internal"))?;
+    .map_err(|e| {
+        internal(
+            &input,
+            started,
+            format!("render join: {e}"),
+            ErrorCategory::Internal,
+        )
+    })?;
 
     let content = match rendered_result {
         Ok(s) => s,
@@ -628,7 +665,7 @@ fn build_substitution_context(
             "substitution_failed",
             McpError::internal_error(
                 format!("substitution context build failed: {e}"),
-                Some(json!({ "code": "substitution_failed" })),
+                Some(error_data(ErrorCategory::SubstitutionFailed)),
             ),
         )
     })
@@ -654,10 +691,11 @@ fn map_substitution_error(err: SubstitutionError) -> (&'static str, McpError) {
                     "plugin data dir creation failed at {}: {source}",
                     path.display()
                 ),
-                Some(json!({
-                    "code": "plugin_data_dir_write_failed",
-                    "path": path.display().to_string(),
-                })),
+                Some(error_data_with_code(
+                    "plugin_data_dir_write_failed",
+                    ErrorCategory::PluginDataDirWriteFailed,
+                    &[("path", json!(path.display().to_string()))],
+                )),
             ),
         ),
         SubstitutionError::WorkspaceDataDirCreationFailed { path, source } => (
@@ -668,10 +706,11 @@ fn map_substitution_error(err: SubstitutionError) -> (&'static str, McpError) {
                     "workspace data dir creation failed at {}: {source}",
                     path.display()
                 ),
-                Some(json!({
-                    "code": "workspace_data_dir_write_failed",
-                    "path": path.display().to_string(),
-                })),
+                Some(error_data_with_code(
+                    "workspace_data_dir_write_failed",
+                    ErrorCategory::WorkspaceDataDirWriteFailed,
+                    &[("path", json!(path.display().to_string()))],
+                )),
             ),
         ),
         SubstitutionError::InvalidArgumentFrontmatter { file, reason } => (
@@ -682,10 +721,11 @@ fn map_substitution_error(err: SubstitutionError) -> (&'static str, McpError) {
                     "invalid argument frontmatter in {}: {reason}",
                     file.display()
                 ),
-                Some(json!({
-                    "code": "invalid_argument_frontmatter",
-                    "file": file.display().to_string(),
-                })),
+                Some(error_data_with_code(
+                    "invalid_argument_frontmatter",
+                    ErrorCategory::InvalidArgumentFrontmatter,
+                    &[("file", json!(file.display().to_string()))],
+                )),
             ),
         ),
         SubstitutionError::PromptArgumentMismatch { expected, supplied } => (
@@ -693,11 +733,11 @@ fn map_substitution_error(err: SubstitutionError) -> (&'static str, McpError) {
             McpError::new(
                 ErrorCode::INVALID_PARAMS,
                 format!("prompt argument mismatch: expected {expected}, supplied {supplied}"),
-                Some(json!({
-                    "code": "prompt_argument_mismatch",
-                    "expected": expected,
-                    "supplied": supplied,
-                })),
+                Some(error_data_with_code(
+                    "prompt_argument_mismatch",
+                    ErrorCategory::PromptArgumentMismatch,
+                    &[("expected", json!(expected)), ("supplied", json!(supplied))],
+                )),
             ),
         ),
     }
@@ -721,7 +761,11 @@ fn substitution_code_to_category(code: &str) -> crate::error::ErrorCategory {
 }
 
 /// Build the `internal_error` envelope plus an error log event.
-fn internal(input: &Input, started: Instant, msg: String, code: &str) -> McpError {
+///
+/// #296: `category` drives both the `data.code` slug and the structured
+/// `retryable` / `remediation` fields (via [`error_data`]), so this residual
+/// path agrees with the CLI envelope and every other MCP surface.
+fn internal(input: &Input, started: Instant, msg: String, category: ErrorCategory) -> McpError {
     // FR-M-LOG-1: scrub error chains before logging — reqwest / git
     // error messages can carry signed URLs.
     let scrubbed = crate::catalog::git::scrub_to_string(msg.as_bytes());
@@ -730,12 +774,12 @@ fn internal(input: &Input, started: Instant, msg: String, code: &str) -> McpErro
         catalog = input.catalog,
         plugin = input.plugin,
         name = input.name,
-        error_code = code,
+        error_code = category.as_str(),
         error_message = %scrubbed,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "tool error",
     );
-    McpError::internal_error(msg, Some(json!({ "code": code })))
+    McpError::internal_error(msg, Some(error_data(category)))
 }
 
 /// Log the error variants the contract recognises, then return the

@@ -14,8 +14,52 @@
 //! have had to copy-paste the identical `workspace_catalogs::find` +
 //! `list_for_plugin`-is-empty logic. Both now call [`classify_not_found`].
 
-use crate::error::TomeError;
+use serde_json::{Value, json};
+
+use crate::error::{ErrorCategory, TomeError};
 use crate::index::{skills, workspace_catalogs};
+
+/// Build the MCP tool error `data` payload for a closed [`ErrorCategory`].
+///
+/// #296: the single source of truth for the MCP `data` object — `code` (the
+/// wire-stable category slug), plus the `retryable` bool and optional
+/// `remediation` command hint derived from the SAME accessors the CLI `--json`
+/// error envelope uses ([`ErrorCategory::retryable`] / [`remediation`]). Every
+/// MCP surface that attaches a category-driven `code` routes through this so an
+/// agent branches on structured data instead of regexing the English message,
+/// and the CLI and MCP can never disagree on `code`/`retryable`/`remediation`
+/// for the same failure.
+///
+/// `remediation` is omitted when the category has no single fix command, so the
+/// payload gains only the always-present `retryable` field over the historical
+/// `{ "code": … }` shape (plus `remediation` when one exists).
+///
+/// [`remediation`]: ErrorCategory::remediation
+pub fn error_data(category: ErrorCategory) -> Value {
+    error_data_with_code(category.as_str(), category, &[])
+}
+
+/// Like [`error_data`] but keeps a **custom** `code` slug (one that is not a
+/// bare `ErrorCategory::as_str()` — e.g. `embedder_drift`, `unknown_catalog`,
+/// `query_too_long`) while still deriving `retryable`/`remediation` from the
+/// representative `category`, and merges any `extra` `(key, value)` fields the
+/// call site already surfaced (e.g. `catalog`, `harness`, `max`).
+///
+/// This lets the input-validation and drift error sites keep their byte-stable
+/// custom `code` + extra fields yet gain the same structured `retryable` /
+/// `remediation` as every other error — one SSOT, no divergence.
+pub fn error_data_with_code(code: &str, category: ErrorCategory, extra: &[(&str, Value)]) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("code".to_string(), json!(code));
+    obj.insert("retryable".to_string(), json!(category.retryable()));
+    if let Some(remediation) = category.remediation() {
+        obj.insert("remediation".to_string(), json!(remediation));
+    }
+    for (key, value) in extra {
+        obj.insert((*key).to_string(), value.clone());
+    }
+    Value::Object(obj)
+}
 
 /// The three not-found classifications the read-side tools distinguish, in the
 /// contract's precedence order (catalog, then plugin, then skill). Each maps to

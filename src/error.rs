@@ -996,6 +996,225 @@ impl ErrorCategory {
             Self::RemoteEmbeddingInvalid => "remote_embedding_invalid",
         }
     }
+
+    /// Whether retrying the same operation, unchanged, could plausibly succeed.
+    ///
+    /// `true` only for **transient or contended** failure classes — another
+    /// process holds a lock, a settings file is in a clashing state that clears
+    /// once resolved, or a network/remote call failed for a reason that may not
+    /// recur (rate-limit, timeout, unreachable). Everything deterministic
+    /// (a malformed manifest, an unknown catalog, a strict-mode verdict) is
+    /// `false`: retrying it verbatim reproduces the same error.
+    ///
+    /// #296: this replaces the "regex the English message" contract — callers
+    /// (agents in other harnesses) branch on this machine-readable flag on both
+    /// the CLI `--json` error envelope and the MCP tool error `data` payload.
+    /// Wire-facing: exhaustive `match` (no wildcard) so a new [`ErrorCategory`]
+    /// variant fails to compile until its retry semantics are decided here.
+    pub fn retryable(&self) -> bool {
+        match self {
+            // Contended: another `tome` process holds the index lock. The
+            // canonical retry case (`IndexBusy` — "retry once it has finished").
+            Self::IndexBusy => true,
+            // Contended: a harness MCP config clash. This is the sole member of
+            // the `retryable && remediation.is_some()` quadrant — BOTH signals
+            // are set deliberately, and they are SEQUENCED: `retryable` here
+            // means "retry AFTER applying the `remediation`", not "retry the
+            // identical command". A naive agent that honours `retryable` by
+            // re-running the same command verbatim will loop forever, because the
+            // clash clears only once the `--force` remediation overwrites the
+            // clashing entry. Honour `remediation` first, then retry.
+            Self::HarnessClash => true,
+            // Network / remote: a git fetch, a BYOK/BYOM provider call, or the
+            // telemetry endpoint failed for a reason (rate-limit, timeout,
+            // transient unreachability) that may not recur on the next attempt.
+            Self::GitFailed
+            | Self::ProviderRequestFailed
+            | Self::TelemetryEndpointUnreachable
+            | Self::McpIo => true,
+
+            // Everything else is deterministic — retrying verbatim reproduces
+            // the same failure. Enumerated (no wildcard) so a future variant is
+            // a compile error until its retry semantics are classified above.
+            Self::Internal
+            | Self::Usage
+            | Self::CatalogNotFound
+            | Self::CatalogAlreadyExists
+            | Self::ManifestInvalid
+            | Self::Io
+            | Self::Interrupted
+            | Self::PluginDataDirWriteFailed
+            | Self::WorkspaceNotBound
+            | Self::WorkspaceNotFound
+            | Self::WorkspaceAlreadyExists
+            | Self::WorkspaceNameInvalid
+            | Self::WorkspaceHasBoundProjects
+            | Self::CompositionError
+            | Self::HarnessNotSupported
+            | Self::SummariserFailure
+            | Self::WorkspaceDataDirWriteFailed
+            | Self::PromptArgumentMismatch
+            | Self::EntryNotFound
+            | Self::SubstitutionFailed
+            | Self::InvalidArgumentFrontmatter
+            | Self::HookSpecParseError
+            | Self::HookSettingsWriteFailed
+            | Self::AgentTranslationFailed
+            | Self::GuardrailsWriteFailed
+            | Self::PluginNotFound
+            | Self::PluginAlreadyInState
+            | Self::PluginManifestParseError
+            | Self::SkillFrontmatterParseError
+            | Self::ModelMissing
+            | Self::ModelCorrupt
+            | Self::ModelChecksumMismatch
+            | Self::ModelRegistrationParseError
+            | Self::InferenceRuntimeInitFailure
+            | Self::VectorExtensionInitFailure
+            | Self::EmbeddingGenerationFailure
+            | Self::RerankingFailure
+            | Self::QueryNoResultsStrict
+            | Self::EmbedderNameDrift
+            | Self::EmbedderVersionDrift
+            | Self::ReindexScopedEmbedderChange
+            | Self::IndexIntegrityCheckFailure
+            | Self::SchemaTooNew
+            | Self::CatalogHasEnabledPlugins
+            | Self::NotATerminal
+            | Self::McpStartup
+            | Self::WorkspaceMalformed
+            | Self::SchemaMigration
+            | Self::DoctorFixUnsafe
+            | Self::PluginNotConverted
+            | Self::OutputExists
+            | Self::TemplateInvalid
+            | Self::SourceFormatUnrecognized
+            | Self::ConversionUnsupportedStrict
+            | Self::ValidationFoundErrors
+            | Self::ValidationStrictWarnings
+            | Self::MetaSkillNotFound
+            | Self::MetaInstallFailed
+            | Self::NoHarnessDetected
+            | Self::TelemetryConfigInvalid
+            | Self::TelemetryQueueCorrupt
+            | Self::ProviderConfigInvalid
+            | Self::RemoteEmbeddingInvalid => false,
+        }
+    }
+
+    /// The coarse, category-level `tome` command that fixes this failure class,
+    /// if a single one exists — `None` otherwise.
+    ///
+    /// #296: a **machine-readable** command hint so callers no longer regex the
+    /// fix out of the English `Display` string. Deliberately coarse: it names
+    /// the command family (`tome reindex --force`, `tome plugin convert`), while
+    /// the instance-specific detail (the exact path, model name, or env var)
+    /// stays in the human `message`. NEVER embed a credential or any
+    /// instance-specific secret here — every value is a `&'static str` literal,
+    /// so by construction nothing dynamic (and thus nothing credential-shaped)
+    /// can reach this field.
+    ///
+    /// Wire-facing on both the CLI `--json` envelope and the MCP `data` payload;
+    /// exhaustive `match` (no wildcard) so a new variant must decide its hint.
+    pub fn remediation(&self) -> Option<&'static str> {
+        match self {
+            // Embedder drift / corrupt or inconsistent index → rebuild it.
+            Self::EmbedderNameDrift
+            | Self::EmbedderVersionDrift
+            | Self::ReindexScopedEmbedderChange
+            | Self::IndexIntegrityCheckFailure => Some("tome reindex --force"),
+
+            // A model is absent → download it; corrupt/checksum-mismatch → force
+            // a re-download.
+            Self::ModelMissing => Some("tome models download"),
+            Self::ModelCorrupt | Self::ModelChecksumMismatch => {
+                Some("tome models download --force")
+            }
+
+            // A legacy plugin needs the native-format cutover.
+            Self::PluginNotConverted => Some("tome plugin convert"),
+
+            // A harness MCP config clash clears once the clashing entry is
+            // overwritten with the expected shape. `HarnessClash` is reachable
+            // from several commands (`harness use`/`harness sync`/`workspace
+            // use`/`plugin enable --sync`/`doctor --fix`); this is ONE
+            // representative coarse class-fix — the human `message` names the
+            // command(s) applicable to the surface the clash actually came from.
+            // This is the only category where both `retryable` and `remediation`
+            // are set (see the sequencing note on the `retryable()` arm).
+            Self::HarnessClash => Some("tome harness use --force"),
+
+            // No workspace named / bound → create or select one.
+            Self::WorkspaceNotFound => Some("tome workspace init"),
+            Self::WorkspaceNotBound => Some("tome workspace use"),
+
+            // A summariser fault (missing/corrupt model, backend init) is what
+            // `doctor --fix` re-provisions.
+            Self::SummariserFailure => Some("tome doctor --fix"),
+
+            // No single command fixes the rest — the human `message` carries the
+            // specifics (or there is nothing to "fix", e.g. a strict-mode
+            // verdict or a usage error). Enumerated (no wildcard) so a future
+            // variant must decide its hint rather than silently defaulting.
+            Self::Internal
+            | Self::Usage
+            | Self::CatalogNotFound
+            | Self::CatalogAlreadyExists
+            | Self::ManifestInvalid
+            | Self::GitFailed
+            | Self::Io
+            | Self::Interrupted
+            | Self::PluginDataDirWriteFailed
+            | Self::WorkspaceAlreadyExists
+            | Self::WorkspaceNameInvalid
+            | Self::WorkspaceHasBoundProjects
+            | Self::CompositionError
+            | Self::HarnessNotSupported
+            | Self::WorkspaceDataDirWriteFailed
+            | Self::PromptArgumentMismatch
+            | Self::EntryNotFound
+            | Self::SubstitutionFailed
+            | Self::InvalidArgumentFrontmatter
+            | Self::HookSpecParseError
+            | Self::HookSettingsWriteFailed
+            | Self::AgentTranslationFailed
+            | Self::GuardrailsWriteFailed
+            | Self::PluginNotFound
+            | Self::PluginAlreadyInState
+            | Self::PluginManifestParseError
+            | Self::SkillFrontmatterParseError
+            | Self::ModelRegistrationParseError
+            | Self::InferenceRuntimeInitFailure
+            | Self::VectorExtensionInitFailure
+            | Self::EmbeddingGenerationFailure
+            | Self::RerankingFailure
+            | Self::QueryNoResultsStrict
+            | Self::IndexBusy
+            | Self::SchemaTooNew
+            | Self::CatalogHasEnabledPlugins
+            | Self::NotATerminal
+            | Self::McpStartup
+            | Self::McpIo
+            | Self::WorkspaceMalformed
+            | Self::SchemaMigration
+            | Self::DoctorFixUnsafe
+            | Self::OutputExists
+            | Self::TemplateInvalid
+            | Self::SourceFormatUnrecognized
+            | Self::ConversionUnsupportedStrict
+            | Self::ValidationFoundErrors
+            | Self::ValidationStrictWarnings
+            | Self::MetaSkillNotFound
+            | Self::MetaInstallFailed
+            | Self::NoHarnessDetected
+            | Self::TelemetryEndpointUnreachable
+            | Self::TelemetryConfigInvalid
+            | Self::TelemetryQueueCorrupt
+            | Self::ProviderConfigInvalid
+            | Self::ProviderRequestFailed
+            | Self::RemoteEmbeddingInvalid => None,
+        }
+    }
 }
 
 impl std::fmt::Display for ErrorCategory {
@@ -1478,6 +1697,244 @@ mod tests {
         };
         for (variant, _) in table {
             probe(*variant);
+        }
+    }
+
+    // ---- #296: structured retryable / remediation accessors ----------------
+
+    /// Representative retryable case: `IndexBusy` (another process holds the
+    /// index lock) → `retryable: true`. Its message ("retry once it has
+    /// finished") is now backed by structured data.
+    #[test]
+    fn index_busy_is_retryable() {
+        assert!(TomeError::IndexBusy.category().retryable());
+        // And its coarse category has no single fix command — the retry IS the
+        // remedy — so `remediation` is absent.
+        assert_eq!(TomeError::IndexBusy.category().remediation(), None);
+    }
+
+    /// The issue explicitly calls out `HarnessClash` needing a machine-readable
+    /// retryable flag.
+    #[test]
+    fn harness_clash_is_retryable_with_force_remediation() {
+        let e = TomeError::HarnessClash {
+            path: PathBuf::from("/x/.mcp.json"),
+            command: "tome".into(),
+            first_arg: "mcp".into(),
+        };
+        assert!(e.category().retryable());
+        assert_eq!(e.category().remediation(), Some("tome harness use --force"));
+    }
+
+    /// Representative remediation case: embedder drift → the fix that used to
+    /// live only in the prose (`Run `tome reindex --force``) now rides the
+    /// structured `remediation` field. Drift is NOT retryable (retrying the
+    /// same stale query reproduces the drift).
+    #[test]
+    fn embedder_drift_remediation_is_reindex_force() {
+        let name = TomeError::EmbedderNameDrift {
+            stored: "a".into(),
+            configured: "b".into(),
+        };
+        let version = TomeError::EmbedderVersionDrift {
+            stored: "1".into(),
+            configured: "2".into(),
+        };
+        for e in [&name, &version] {
+            assert!(!e.category().retryable(), "drift is deterministic");
+            assert_eq!(
+                e.category().remediation(),
+                Some("tome reindex --force"),
+                "drift remediation must be the reindex command",
+            );
+        }
+    }
+
+    /// A non-retryable / no-remediation case: a usage error is deterministic and
+    /// has no single fix command.
+    #[test]
+    fn usage_is_not_retryable_and_has_no_remediation() {
+        let e = TomeError::Usage("bad flag".into());
+        assert!(!e.category().retryable());
+        assert_eq!(e.category().remediation(), None);
+    }
+
+    /// The `PluginNotConverted` remediation names the cutover command (coarse —
+    /// the exact path stays in the message).
+    #[test]
+    fn plugin_not_converted_remediation_is_convert() {
+        let e = TomeError::PluginNotConverted {
+            path: PathBuf::from("/x"),
+        };
+        assert_eq!(e.category().remediation(), Some("tome plugin convert"));
+        assert!(!e.category().retryable());
+    }
+
+    /// Hidden compile-time guard: an EXHAUSTIVE `match` over every category with
+    /// NO wildcard, invoking both accessors. A future `ErrorCategory` variant
+    /// fails to compile here (and in the accessor `match`es themselves) until its
+    /// retry semantics + remediation are decided — the same guard the wire-token
+    /// table gives `as_str()`. It also asserts the two invariants that keep the
+    /// field meaningful: (a) a `None` remediation with `retryable == false` is a
+    /// dead-end error class (no assertion — just that both accessors are total),
+    /// and (b) no remediation string can carry a credential (every value is a
+    /// static literal that starts with `tome ` — nothing dynamic reaches it).
+    #[test]
+    fn retryable_and_remediation_are_exhaustive_and_safe() {
+        use ErrorCategory::*;
+        let all = [
+            Internal,
+            Usage,
+            CatalogNotFound,
+            CatalogAlreadyExists,
+            ManifestInvalid,
+            GitFailed,
+            Io,
+            Interrupted,
+            PluginDataDirWriteFailed,
+            WorkspaceNotBound,
+            WorkspaceNotFound,
+            WorkspaceAlreadyExists,
+            WorkspaceNameInvalid,
+            WorkspaceHasBoundProjects,
+            CompositionError,
+            HarnessNotSupported,
+            HarnessClash,
+            SummariserFailure,
+            WorkspaceDataDirWriteFailed,
+            PromptArgumentMismatch,
+            EntryNotFound,
+            SubstitutionFailed,
+            InvalidArgumentFrontmatter,
+            HookSpecParseError,
+            HookSettingsWriteFailed,
+            AgentTranslationFailed,
+            GuardrailsWriteFailed,
+            PluginNotFound,
+            PluginAlreadyInState,
+            PluginManifestParseError,
+            SkillFrontmatterParseError,
+            ModelMissing,
+            ModelCorrupt,
+            ModelChecksumMismatch,
+            ModelRegistrationParseError,
+            InferenceRuntimeInitFailure,
+            VectorExtensionInitFailure,
+            EmbeddingGenerationFailure,
+            RerankingFailure,
+            QueryNoResultsStrict,
+            EmbedderNameDrift,
+            EmbedderVersionDrift,
+            ReindexScopedEmbedderChange,
+            IndexBusy,
+            IndexIntegrityCheckFailure,
+            SchemaTooNew,
+            CatalogHasEnabledPlugins,
+            NotATerminal,
+            McpStartup,
+            McpIo,
+            WorkspaceMalformed,
+            SchemaMigration,
+            DoctorFixUnsafe,
+            PluginNotConverted,
+            OutputExists,
+            TemplateInvalid,
+            SourceFormatUnrecognized,
+            ConversionUnsupportedStrict,
+            ValidationFoundErrors,
+            ValidationStrictWarnings,
+            MetaSkillNotFound,
+            MetaInstallFailed,
+            NoHarnessDetected,
+            TelemetryEndpointUnreachable,
+            TelemetryConfigInvalid,
+            TelemetryQueueCorrupt,
+            ProviderConfigInvalid,
+            ProviderRequestFailed,
+            RemoteEmbeddingInvalid,
+        ];
+        for c in all {
+            // The compile-time guard: a non-exhaustive `match` (no `_` arm)
+            // touching every variant — adding a variant breaks the build here.
+            let _both = match c {
+                Internal
+                | Usage
+                | CatalogNotFound
+                | CatalogAlreadyExists
+                | ManifestInvalid
+                | GitFailed
+                | Io
+                | Interrupted
+                | PluginDataDirWriteFailed
+                | WorkspaceNotBound
+                | WorkspaceNotFound
+                | WorkspaceAlreadyExists
+                | WorkspaceNameInvalid
+                | WorkspaceHasBoundProjects
+                | CompositionError
+                | HarnessNotSupported
+                | HarnessClash
+                | SummariserFailure
+                | WorkspaceDataDirWriteFailed
+                | PromptArgumentMismatch
+                | EntryNotFound
+                | SubstitutionFailed
+                | InvalidArgumentFrontmatter
+                | HookSpecParseError
+                | HookSettingsWriteFailed
+                | AgentTranslationFailed
+                | GuardrailsWriteFailed
+                | PluginNotFound
+                | PluginAlreadyInState
+                | PluginManifestParseError
+                | SkillFrontmatterParseError
+                | ModelMissing
+                | ModelCorrupt
+                | ModelChecksumMismatch
+                | ModelRegistrationParseError
+                | InferenceRuntimeInitFailure
+                | VectorExtensionInitFailure
+                | EmbeddingGenerationFailure
+                | RerankingFailure
+                | QueryNoResultsStrict
+                | EmbedderNameDrift
+                | EmbedderVersionDrift
+                | ReindexScopedEmbedderChange
+                | IndexBusy
+                | IndexIntegrityCheckFailure
+                | SchemaTooNew
+                | CatalogHasEnabledPlugins
+                | NotATerminal
+                | McpStartup
+                | McpIo
+                | WorkspaceMalformed
+                | SchemaMigration
+                | DoctorFixUnsafe
+                | PluginNotConverted
+                | OutputExists
+                | TemplateInvalid
+                | SourceFormatUnrecognized
+                | ConversionUnsupportedStrict
+                | ValidationFoundErrors
+                | ValidationStrictWarnings
+                | MetaSkillNotFound
+                | MetaInstallFailed
+                | NoHarnessDetected
+                | TelemetryEndpointUnreachable
+                | TelemetryConfigInvalid
+                | TelemetryQueueCorrupt
+                | ProviderConfigInvalid
+                | ProviderRequestFailed
+                | RemoteEmbeddingInvalid => (c.retryable(), c.remediation()),
+            };
+            // No remediation string may carry a credential: every value is a
+            // static `tome …` command literal, so it cannot contain a secret.
+            if let Some(cmd) = c.remediation() {
+                assert!(
+                    cmd.starts_with("tome "),
+                    "remediation for {c:?} must be a `tome …` command literal, got {cmd:?}",
+                );
+            }
         }
     }
 }

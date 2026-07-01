@@ -15,9 +15,10 @@ use tracing::{error, info};
 use crate::cli::QueryArgs;
 use crate::commands::query;
 use crate::embedding::Reranker;
-use crate::error::TomeError;
+use crate::error::{ErrorCategory, TomeError};
 use crate::index::MetaSeed;
 use crate::mcp::state::McpState;
+use crate::mcp::tools::common::{error_data, error_data_with_code};
 use crate::plugin::identity::EntryKind;
 
 /// The tool description per `mcp-tools.md` §search_skills lives on the
@@ -221,10 +222,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     if effective_dmc > MAX_DESCRIPTION_MAX_CHARS {
         return Err(McpError::invalid_params(
             format!("description_max_chars must be at most {MAX_DESCRIPTION_MAX_CHARS}"),
-            Some(json!({
-                "code": "invalid_description_max_chars",
-                "max": MAX_DESCRIPTION_MAX_CHARS,
-            })),
+            Some(error_data_with_code(
+                "invalid_description_max_chars",
+                ErrorCategory::Usage,
+                &[("max", json!(MAX_DESCRIPTION_MAX_CHARS))],
+            )),
         ));
     }
     if input.query.trim().is_empty() {
@@ -237,16 +239,21 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     if input.query.chars().count() > MAX_QUERY_CHARS {
         return Err(McpError::invalid_params(
             format!("query exceeds maximum length of {MAX_QUERY_CHARS} characters"),
-            Some(json!({
-                "code": "query_too_long",
-                "max_chars": MAX_QUERY_CHARS,
-            })),
+            Some(error_data_with_code(
+                "query_too_long",
+                ErrorCategory::Usage,
+                &[("max_chars", json!(MAX_QUERY_CHARS))],
+            )),
         ));
     }
     if input.plugin.is_some() && input.catalog.is_none() {
         return Err(McpError::invalid_params(
             "plugin requires catalog",
-            Some(json!({ "code": "plugin_without_catalog" })),
+            Some(error_data_with_code(
+                "plugin_without_catalog",
+                ErrorCategory::Usage,
+                &[],
+            )),
         ));
     }
 
@@ -270,14 +277,18 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         .map_err(|e| {
             McpError::internal_error(
                 format!("catalog check join: {e}"),
-                Some(json!({ "code": "internal" })),
+                Some(error_data(ErrorCategory::Internal)),
             )
         })?
         .map_err(tome_to_mcp)?;
         if !exists {
             return Err(McpError::invalid_params(
                 format!("catalog `{catalog}` is not enabled in the resolved scope"),
-                Some(json!({ "code": "unknown_catalog", "catalog": catalog })),
+                Some(error_data_with_code(
+                    "unknown_catalog",
+                    ErrorCategory::EntryNotFound,
+                    &[("catalog", json!(catalog))],
+                )),
             ));
         }
     }
@@ -399,7 +410,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     .map_err(|e| {
         McpError::internal_error(
             format!("query pipeline join: {e}"),
-            Some(json!({ "code": "internal" })),
+            Some(error_data(ErrorCategory::Internal)),
         )
     })?
     .map_err(|e| {
@@ -418,17 +429,21 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         match &e {
             TomeError::CatalogNotFound(name) => McpError::invalid_params(
                 format!("catalog `{name}` is not enabled in the resolved scope"),
-                Some(json!({ "code": "unknown_catalog", "catalog": name })),
+                Some(error_data_with_code(
+                    "unknown_catalog",
+                    ErrorCategory::EntryNotFound,
+                    &[("catalog", json!(name))],
+                )),
             ),
             TomeError::PluginNotFound(id) => {
                 let (catalog, plugin) = split_id(id);
                 McpError::invalid_params(
                     format!("plugin `{id}` is not enabled in the resolved scope"),
-                    Some(json!({
-                        "code": "unknown_plugin",
-                        "catalog": catalog,
-                        "plugin": plugin,
-                    })),
+                    Some(error_data_with_code(
+                        "unknown_plugin",
+                        ErrorCategory::EntryNotFound,
+                        &[("catalog", json!(catalog)), ("plugin", json!(plugin))],
+                    )),
                 )
             }
             _ => tome_to_mcp(e),
@@ -731,18 +746,26 @@ fn tome_to_mcp(e: TomeError) -> McpError {
         "tool error",
     );
     match &e {
+        // Both name + version drift collapse onto the custom `embedder_drift`
+        // slug (NOT `category().as_str()`); `retryable`/`remediation` still come
+        // from the drift category so the "run `tome reindex --force`" fix that
+        // used to live only in the prose now rides the structured payload.
         TomeError::EmbedderNameDrift { .. } | TomeError::EmbedderVersionDrift { .. } => {
             McpError::new(
                 ErrorCode::INTERNAL_ERROR,
                 msg,
-                Some(json!({ "code": "embedder_drift" })),
+                Some(error_data_with_code(
+                    "embedder_drift",
+                    ErrorCategory::EmbedderNameDrift,
+                    &[],
+                )),
             )
         }
         TomeError::IndexBusy => McpError::new(
             ErrorCode::INTERNAL_ERROR,
             msg,
-            Some(json!({ "code": "index_busy" })),
+            Some(error_data(ErrorCategory::IndexBusy)),
         ),
-        _ => McpError::internal_error(msg, Some(json!({ "code": e.category().as_str() }))),
+        _ => McpError::internal_error(msg, Some(error_data(e.category()))),
     }
 }

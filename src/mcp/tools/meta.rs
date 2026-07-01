@@ -19,8 +19,10 @@ use serde_json::json;
 
 use crate::authoring::meta as meta_skill;
 use crate::commands::harness::home_root;
+use crate::error::ErrorCategory;
 use crate::harness;
 use crate::mcp::state::McpState;
+use crate::mcp::tools::common::{error_data, error_data_with_code};
 
 /// The tool action. Only `install` ships; the enum is left open for a future
 /// `list`/`get` without a breaking input change.
@@ -87,7 +89,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     if meta_skill::find(&input.skill_id).is_none() {
         return Err(McpError::invalid_params(
             format!("no embedded meta skill with id `{}`", input.skill_id),
-            Some(json!({ "code": "meta_skill_not_found", "skill_id": input.skill_id })),
+            Some(error_data_with_code(
+                "meta_skill_not_found",
+                ErrorCategory::MetaSkillNotFound,
+                &[("skill_id", json!(input.skill_id))],
+            )),
         ));
     }
 
@@ -97,19 +103,27 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             "this Tome MCP server has no host-harness identity; re-run `tome sync` to \
              stamp it, or install via `tome meta add` from the CLI"
                 .to_string(),
-            Some(json!({ "code": "no_harness_detected" })),
+            Some(error_data(ErrorCategory::NoHarnessDetected)),
         ));
     };
     let Some(module) = harness::lookup(&host) else {
         return Err(McpError::invalid_params(
             format!("unknown host harness `{host}`"),
-            Some(json!({ "code": "no_harness_detected", "harness": host })),
+            Some(error_data_with_code(
+                "no_harness_detected",
+                ErrorCategory::NoHarnessDetected,
+                &[("harness", json!(host))],
+            )),
         ));
     };
     if !module.supports_native_skills() {
         return Err(McpError::invalid_params(
             format!("host harness `{host}` does not consume native skills"),
-            Some(json!({ "code": "no_harness_detected", "harness": host })),
+            Some(error_data_with_code(
+                "no_harness_detected",
+                ErrorCategory::NoHarnessDetected,
+                &[("harness", json!(host))],
+            )),
         ));
     }
 
@@ -137,7 +151,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 "host harness `{host}` has no skills dir for scope `{}`",
                 input.scope.as_str()
             ),
-            Some(json!({ "code": "no_harness_detected" })),
+            Some(error_data(ErrorCategory::NoHarnessDetected)),
         )
     })?;
 
@@ -157,10 +171,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 crate::mcp::enqueue_tool_error(&state, e.category());
                 // Carry the CLI exit-code slug (meta_skill_not_found /
                 // meta_install_failed) so the MCP error stays consistent.
-                McpError::invalid_params(
-                    e.to_string(),
-                    Some(json!({ "code": e.category().as_str() })),
-                )
+                McpError::invalid_params(e.to_string(), Some(error_data(e.category())))
             })?;
 
     Ok(Output {

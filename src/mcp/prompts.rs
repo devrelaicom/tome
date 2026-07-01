@@ -33,7 +33,7 @@ use rusqlite::Connection;
 use serde_json::json;
 use tracing::{error, info, warn};
 
-use crate::error::TomeError;
+use crate::error::{ErrorCategory, TomeError};
 use crate::index::skills::{
     agent_name_clash_set, enabled_agents_for_workspace, resolve_entry_body_path,
 };
@@ -41,6 +41,7 @@ use crate::index::workspaces::resolve_id_required;
 use crate::mcp::prompt_collision::{CollisionRecord, EntryIdentity, resolve_collisions};
 use crate::mcp::prompt_name::{derive_name, derive_suffixed_name};
 use crate::mcp::state::McpState;
+use crate::mcp::tools::common::error_data_with_code;
 use crate::paths::Paths;
 use crate::plugin::frontmatter::parse_skill_frontmatter;
 use crate::plugin::identity::EntryKind;
@@ -952,7 +953,11 @@ pub async fn handle_get(
             McpError::new(
                 ErrorCode::INVALID_PARAMS,
                 format!("prompt `{name}` not found in this workspace"),
-                Some(json!({ "code": "prompt_not_found", "name": name })),
+                Some(error_data_with_code(
+                    "prompt_not_found",
+                    ErrorCategory::EntryNotFound,
+                    &[("name", json!(name))],
+                )),
             ),
         ));
     };
@@ -1265,7 +1270,11 @@ fn emit_tome_error_for_get(name: &str, started: Instant, err: TomeError) -> McpE
             McpError::new(
                 ErrorCode::INVALID_PARAMS,
                 format!("prompt `{name}`'s body file is missing on disk: {err}"),
-                Some(json!({ "code": "prompt_not_found", "name": name })),
+                Some(error_data_with_code(
+                    "prompt_not_found",
+                    ErrorCategory::EntryNotFound,
+                    &[("name", json!(name))],
+                )),
             ),
         ),
         TomeError::PromptArgumentMismatch { expected, supplied } => emit_get_error(
@@ -1277,12 +1286,15 @@ fn emit_tome_error_for_get(name: &str, started: Instant, err: TomeError) -> McpE
                 format!(
                     "prompt `{name}` argument mismatch: expected {expected}, supplied {supplied}"
                 ),
-                Some(json!({
-                    "code": "prompt_argument_mismatch",
-                    "name": name,
-                    "expected": expected,
-                    "supplied": supplied,
-                })),
+                Some(error_data_with_code(
+                    "prompt_argument_mismatch",
+                    ErrorCategory::PromptArgumentMismatch,
+                    &[
+                        ("name", json!(name)),
+                        ("expected", json!(expected)),
+                        ("supplied", json!(supplied)),
+                    ],
+                )),
             ),
         ),
         TomeError::WorkspaceDataDirWriteFailed { ref path, .. } => emit_get_error(
@@ -1295,11 +1307,14 @@ fn emit_tome_error_for_get(name: &str, started: Instant, err: TomeError) -> McpE
                     "workspace data dir write failed at {}: {err}",
                     path.display()
                 ),
-                Some(json!({
-                    "code": "workspace_data_dir_write_failed",
-                    "name": name,
-                    "path": path.display().to_string(),
-                })),
+                Some(error_data_with_code(
+                    "workspace_data_dir_write_failed",
+                    ErrorCategory::WorkspaceDataDirWriteFailed,
+                    &[
+                        ("name", json!(name)),
+                        ("path", json!(path.display().to_string())),
+                    ],
+                )),
             ),
         ),
         TomeError::PluginDataDirWriteFailed { ref path, .. } => emit_get_error(
@@ -1309,11 +1324,14 @@ fn emit_tome_error_for_get(name: &str, started: Instant, err: TomeError) -> McpE
             McpError::new(
                 ErrorCode::INTERNAL_ERROR,
                 format!("plugin data dir write failed at {}: {err}", path.display()),
-                Some(json!({
-                    "code": "plugin_data_dir_write_failed",
-                    "name": name,
-                    "path": path.display().to_string(),
-                })),
+                Some(error_data_with_code(
+                    "plugin_data_dir_write_failed",
+                    ErrorCategory::PluginDataDirWriteFailed,
+                    &[
+                        ("name", json!(name)),
+                        ("path", json!(path.display().to_string())),
+                    ],
+                )),
             ),
         ),
         TomeError::InvalidArgumentFrontmatter { ref file, .. } => emit_get_error(
@@ -1323,11 +1341,14 @@ fn emit_tome_error_for_get(name: &str, started: Instant, err: TomeError) -> McpE
             McpError::new(
                 ErrorCode::INTERNAL_ERROR,
                 format!("invalid argument frontmatter in {}: {err}", file.display()),
-                Some(json!({
-                    "code": "invalid_argument_frontmatter",
-                    "name": name,
-                    "file": file.display().to_string(),
-                })),
+                Some(error_data_with_code(
+                    "invalid_argument_frontmatter",
+                    ErrorCategory::InvalidArgumentFrontmatter,
+                    &[
+                        ("name", json!(name)),
+                        ("file", json!(file.display().to_string())),
+                    ],
+                )),
             ),
         ),
         // R-M2 (US1.d reviewer pass): frontmatter parse failure during
@@ -1344,11 +1365,14 @@ fn emit_tome_error_for_get(name: &str, started: Instant, err: TomeError) -> McpE
                     "skill frontmatter parse failed in {}: {err}",
                     file.display()
                 ),
-                Some(json!({
-                    "code": "skill_frontmatter_parse_error",
-                    "name": name,
-                    "file": file.display().to_string(),
-                })),
+                Some(error_data_with_code(
+                    "skill_frontmatter_parse_error",
+                    ErrorCategory::SkillFrontmatterParseError,
+                    &[
+                        ("name", json!(name)),
+                        ("file", json!(file.display().to_string())),
+                    ],
+                )),
             ),
         ),
         // Everything else (including SubstitutionFailed) maps to
@@ -1375,7 +1399,11 @@ fn internal_get_error(name: &str, started: Instant, msg: String) -> McpError {
     McpError::new(
         ErrorCode::INTERNAL_ERROR,
         msg,
-        Some(json!({ "code": "substitution_failed", "name": name })),
+        Some(error_data_with_code(
+            "substitution_failed",
+            ErrorCategory::SubstitutionFailed,
+            &[("name", json!(name))],
+        )),
     )
 }
 
