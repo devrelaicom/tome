@@ -134,6 +134,32 @@ fn build_knn_sql(filters: &QueryFilters<'_>) -> String {
     sql
 }
 
+/// Count the entries [`knn`] would actually search in `workspace_name`: the
+/// enabled, `searchable = 1` skills joined into the resolved workspace via
+/// `workspace_skills`. This is the SAME universe the KNN's FROM/JOIN/WHERE
+/// defines — minus the vector distance / ORDER BY / LIMIT — so a caller can
+/// tell "nothing is searchable in THIS scope" (count `== 0`, the fix is to
+/// reindex / enable a plugin for the scope) apart from "the scope has
+/// searchable content but nothing matched the query" (count `> 0`, the fix
+/// is to rephrase).
+///
+/// Distinct from the whole-index `SELECT COUNT(*) FROM skill_embeddings`
+/// that feeds the bucketed telemetry corpus size: THAT counts every scope
+/// and ignores `searchable`, so it cannot answer the scope-effective
+/// empty-vs-populated question the `search_skills` empty-result signal
+/// needs. Cheap (one indexed `COUNT(*)`); callers only need `> 0` vs `== 0`.
+pub fn scope_searchable_count(conn: &Connection, workspace_name: &str) -> Result<u64, TomeError> {
+    let sql = "SELECT COUNT(*)
+         FROM skill_embeddings AS e
+         JOIN skills AS s ON s.id = e.skill_id
+         JOIN workspace_skills AS ws ON ws.skill_id = s.id
+                AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?1)
+         WHERE s.searchable = 1";
+    conn.query_row(sql, [workspace_name], |r| r.get::<_, i64>(0))
+        .map(|n| n.max(0) as u64)
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("scope searchable count: {e}")))
+}
+
 fn vector_to_bytes(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(std::mem::size_of_val(v));
     for f in v {
@@ -213,5 +239,23 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let result = knn(&conn, "global", &[], 5, &QueryFilters::default()).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn scope_searchable_count_zero_for_empty_scope() {
+        // A scope with no workspace / no enrolled skills counts 0 — the
+        // subquery `(SELECT id FROM workspaces WHERE name = ?1)` resolves to
+        // NULL and the join yields no rows. This is the #285 `index_empty`
+        // discriminant.
+        crate::index::vec_ext::register_globally().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for stmt in crate::index::schema::CREATE_STATEMENTS {
+            conn.execute(stmt, []).unwrap();
+        }
+        let count = scope_searchable_count(&conn, "no-such-workspace").unwrap();
+        assert_eq!(
+            count, 0,
+            "an unknown/empty scope must count 0 searchable rows"
+        );
     }
 }

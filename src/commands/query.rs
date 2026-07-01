@@ -69,10 +69,20 @@ pub struct QueryOutcome {
     /// the scoring mode in use). Always `true` after `--strict` filtering.
     pub threshold_passed: bool,
     pub reranker_drift: Option<String>,
-    /// Total searchable corpus size (enabled skill embeddings in scope), used
-    /// only for the bucketed `tome.search.corpus_size_bucket` telemetry field.
-    /// Best-effort: a count failure yields `0` rather than aborting the query.
+    /// WHOLE-INDEX embedding count (every workspace, ignoring `searchable`),
+    /// used ONLY for the bucketed `tome.search.corpus_size_bucket` telemetry
+    /// field. Best-effort: a count failure yields `0` rather than aborting the
+    /// query. NOT the universe the KNN searches — see
+    /// [`Self::scope_searchable_count`] for that.
     pub corpus_size: u64,
+    /// SCOPE-EFFECTIVE searchable count: the enabled, `searchable = 1` skills
+    /// joined into the resolved workspace — i.e. exactly the universe the KNN
+    /// searches (minus the vector distance / LIMIT). #285: the MCP
+    /// `search_skills` empty-result signal branches on THIS (not the
+    /// whole-index `corpus_size`) so `== 0` ⇔ "index empty for this scope →
+    /// reindex" and `> 0` ⇔ "no semantic match → rephrase". Best-effort: a
+    /// count failure yields `0`.
+    pub scope_searchable_count: u64,
 }
 
 /// Scoring source for a `QueryOutcome`.
@@ -529,12 +539,24 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
         .map(|n: i64| n.max(0) as u64)
         .unwrap_or(0);
 
+    // #285: the scope-effective searchable count — exactly the universe the
+    // KNN above searched (same workspace_skills join + `searchable = 1`),
+    // minus the vector distance / LIMIT. The MCP empty-result signal branches
+    // on THIS so an empty-scope-with-content-elsewhere layout is correctly
+    // reported as `index_empty` (reindex), not `no_match` (rephrase).
+    // Best-effort: a count failure falls back to 0 (treated as empty scope),
+    // which is the safe direction — it steers a user toward reindexing rather
+    // than fruitlessly rephrasing.
+    let scope_searchable_count =
+        crate::index::query::scope_searchable_count(&conn, deps.scope.name().as_str()).unwrap_or(0);
+
     Ok(QueryOutcome {
         results: trimmed,
         scoring,
         threshold_passed,
         reranker_drift,
         corpus_size,
+        scope_searchable_count,
     })
 }
 

@@ -652,14 +652,20 @@ fn empty_corpus_search_reports_index_empty_reason_and_reindex_hint() {
 }
 
 #[test]
-fn populated_index_no_match_reports_no_match_reason_and_rephrase_hint() {
-    // #285: the index has content (corpus_size > 0) but the resolved scope has
-    // no `workspace_skills` rows, so the scoped KNN returns nothing. That's the
-    // `no_match` case — the fix is to rephrase, NOT to reindex.
+fn empty_scope_with_content_elsewhere_reports_index_empty_not_no_match() {
+    // #285 review fix: the WHOLE index has content (a skill under `global`) but
+    // the RESOLVED scope has zero enrolled/searchable skills — the scoped KNN
+    // returns nothing. This is an `index_empty`-for-this-scope situation: the
+    // fix is to reindex / enable a plugin FOR THIS SCOPE, NOT to rephrase.
+    //
+    // The `corpus_size` on the Output is the SCOPE-EFFECTIVE searchable count
+    // (== 0 here), NOT the whole-index count — so the discriminant is
+    // self-consistent (`corpus_size == 0` ⇔ `index_empty`). Before the fix the
+    // handler used the whole-index count and wrongly emitted `no_match`.
     let body = "---\nname: elsewhere\ndescription: Indexed under global only.\n---\nbody\n";
     let (_tmp, paths) = stage_workspace(&[("elsewhere", body)], &[]);
-    // Query under a DIFFERENT (empty) workspace so the whole-index corpus is
-    // non-empty but the scoped join yields zero rows.
+    // Query under a DIFFERENT (empty) workspace: the whole-index corpus is
+    // non-empty, but the scoped join for this workspace yields zero rows.
     let state = build_state_for_scope(&paths, "no-such-workspace");
 
     let out = invoke(state, make_input("elsewhere", 150)).expect("search ok");
@@ -668,24 +674,57 @@ fn populated_index_no_match_reports_no_match_reason_and_rephrase_hint() {
         "a scope with no enrolled skills must return zero matches, got {}",
         out.matches.len()
     );
-    assert!(
-        out.corpus_size > 0,
-        "the whole-index corpus is populated, so corpus_size must be > 0, got {}",
+    assert_eq!(
+        out.corpus_size, 0,
+        "corpus_size must be the SCOPE-EFFECTIVE count (0 for an empty scope), \
+         NOT the whole-index count; got {}",
         out.corpus_size
     );
     assert_eq!(
         out.no_results_reason,
-        Some(NoResultsReason::NoMatch),
-        "populated index with no scoped match must report no_results_reason = no_match"
+        Some(NoResultsReason::IndexEmpty),
+        "an empty scope (even with content in another scope) must report index_empty, \
+         not no_match — the fix is to reindex/enable for this scope, not to rephrase"
     );
-    let hint = out.hint.expect("no-match must carry a hint");
+    let hint = out.hint.expect("index_empty must carry a hint");
     assert!(
-        hint.contains("rephrasing") || hint.contains("broadening"),
-        "no-match hint must suggest rephrasing/broadening; got: {hint:?}"
+        hint.contains("reindex"),
+        "index_empty hint must point at reindex/enable-for-this-scope; got: {hint:?}"
     );
-    // Not a reindex situation — the hint must NOT tell the agent to reindex.
+}
+
+/// #285 review note: the `no_match` reason (populated scope, zero matches) is
+/// NOT reachable through this handler today. The MCP path forces
+/// `strict: false` / `min_score: None`, so the KNN's nearest-neighbour rows
+/// are never filtered below a threshold — a non-empty scope therefore ALWAYS
+/// yields ≥1 match. `matches.is_empty()` on the MCP path thus implies the
+/// scope had zero searchable rows (`index_empty`). The `no_match` branch is
+/// retained for correctness (it represents a legitimate Output state a future
+/// score-floored path could produce) and its WIRE SHAPE is pinned in
+/// `mcp_search_skills_json_shape::empty_matches_wire_shape_no_match`. This
+/// test documents the invariant that closes the gap the review flagged:
+/// through the real handler, an empty result is always `index_empty`.
+#[test]
+fn non_strict_handler_never_reports_no_match_for_populated_scope() {
+    // A populated scope, queried in-scope: must return matches (never empty),
+    // so the `no_match` branch is not taken.
+    let body = "---\nname: present\ndescription: Present in this scope.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("present", body)], &[]);
+    let state = build_state(&paths);
+
+    let out = invoke(state, make_input("present", 150)).expect("search ok");
     assert!(
-        !hint.contains("reindex"),
-        "no-match hint must NOT mention reindex; got: {hint:?}"
+        !out.matches.is_empty(),
+        "a populated scope on the non-strict MCP path must never return zero matches"
+    );
+    assert!(
+        out.no_results_reason.is_none(),
+        "a non-empty result must not carry a no_results_reason"
+    );
+    assert!(
+        out.corpus_size >= out.matches.len() as u64,
+        "scope-effective corpus_size ({}) must be >= the returned match count ({})",
+        out.corpus_size,
+        out.matches.len()
     );
 }

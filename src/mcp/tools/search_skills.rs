@@ -78,13 +78,17 @@ pub const MAX_QUERY_CHARS: usize = 4096;
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
     pub matches: Vec<SkillMatch>,
-    /// #285: the number of indexed entries searched (the whole-index
-    /// corpus size for the resolved scope, best-effort `0` on a count
-    /// failure). Always present. Lets a caller distinguish "the index is
-    /// empty — reindex" (`corpus_size == 0`) from "the index has content
+    /// #285: the number of searchable entries actually searched IN THE
+    /// RESOLVED SCOPE — the enabled, `searchable = 1` skills joined into
+    /// this workspace, i.e. the exact universe the KNN ran over. Always
+    /// present; best-effort `0` on a count failure. Lets a caller
+    /// distinguish "nothing is indexed for this scope — reindex / enable a
+    /// plugin" (`corpus_size == 0`) from "the scope has searchable content
     /// but nothing matched — rephrase" (`corpus_size > 0`) when `matches`
-    /// is empty. Threaded straight from `QueryOutcome::corpus_size`
-    /// (already computed in the query pipeline), not recomputed here.
+    /// is empty. Threaded from `QueryOutcome::scope_searchable_count`
+    /// (computed in the query pipeline), not recomputed here. NOTE: this is
+    /// the SCOPE-EFFECTIVE count, deliberately distinct from the whole-index
+    /// count that feeds the `tome.search` telemetry bucket.
     pub corpus_size: u64,
     /// #285: how the returned `score` on each match was produced —
     /// `"reranked"` (a cross-encoder logit) or `"embedding-similarity"`
@@ -124,11 +128,14 @@ pub struct Output {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NoResultsReason {
-    /// The index has zero searchable entries in the resolved scope — the
-    /// fix is to reindex, not to rephrase.
+    /// The resolved scope has zero searchable entries (`corpus_size == 0`) —
+    /// nothing was searchable here, so the fix is to reindex / enable a
+    /// plugin for this scope, NOT to rephrase. (Other scopes may hold
+    /// content; this reason is about the queried scope only.)
     IndexEmpty,
-    /// The index has content but nothing scored a semantic match — the fix
-    /// is to rephrase or broaden the query, not to reindex.
+    /// The resolved scope has searchable content (`corpus_size > 0`) but
+    /// nothing scored a semantic match — the fix is to rephrase or broaden
+    /// the query, not to reindex.
     NoMatch,
 }
 
@@ -590,9 +597,17 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // #285: thread the signal the pipeline already computed into the tool
     // output. `corpus_size` + `scoring` are always present; `reranker_drift`
     // rides only when detected. On an empty result set, attach a structured
-    // reason + a one-line hint so the agent can tell "index empty → reindex"
-    // from "no semantic match → rephrase" without parsing prose.
-    let corpus_size = outcome.corpus_size;
+    // reason + a one-line hint so the agent can tell "index empty for this
+    // scope → reindex" from "no semantic match → rephrase" without parsing
+    // prose.
+    //
+    // `corpus_size` here is the SCOPE-EFFECTIVE searchable count (the exact
+    // universe the KNN searched), NOT the whole-index count that feeds
+    // telemetry (`outcome.corpus_size`). Using the scoped count is what makes
+    // `corpus_size == 0` ⇔ `index_empty` self-consistent: an empty scope whose
+    // OTHER scopes hold content must be reported as `index_empty` (reindex /
+    // enable a plugin for THIS scope), not `no_match` (rephrase).
+    let corpus_size = outcome.scope_searchable_count;
     let scoring = outcome.scoring.as_str().to_owned();
     let reranker_drift = outcome.reranker_drift;
     let (no_results_reason, hint) = if matches.is_empty() {
@@ -600,7 +615,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             (
                 Some(NoResultsReason::IndexEmpty),
                 Some(
-                    "The index is empty — run `tome reindex` to index enabled plugins for this scope."
+                    "No skills are indexed for this scope — run `tome reindex`, or enable a plugin for this workspace."
                         .to_owned(),
                 ),
             )
