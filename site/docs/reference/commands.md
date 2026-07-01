@@ -31,8 +31,8 @@ catalog → plugin → action picker (refused on a non-TTY, exit `54`).
 
 | Subcommand | Flags | Purpose |
 | --- | --- | --- |
-| `enable <catalog>/<plugin>` | `--yes` | Enable a plugin: index its entries and surface them in queries. `--yes` skips the model-download confirmation (required in CI when models are missing). |
-| `disable <catalog>/<plugin>` | `--force` | Disable a plugin; embeddings stay on disk so re-enable is cheap. `--force` skips the confirmation prompt. |
+| `enable <catalog>/<plugin>` | `--yes`, `--sync` | Enable a plugin: index its entries and surface them in queries. `--yes` skips the model-download confirmation (required in CI when models are missing). `--sync` applies the change to your harnesses inline (runs the same propagation as `tome sync` over every bound project); without it, enable prints a reminder to run `tome sync`. |
+| `disable <catalog>/<plugin>` | `--force`, `--sync` | Disable a plugin; embeddings stay on disk so re-enable is cheap. `--force` skips the confirmation prompt. `--sync` applies the change to your harnesses inline (runs the same propagation as `tome sync` over every bound project); without it, disable prints a reminder to run `tome sync`. |
 | `list` | `--catalog`, `--enabled-only` | List plugins across every catalog, grouping Skills and Commands with per-entry annotations. |
 | `show <catalog>/<plugin>` | | Show one plugin's metadata, component counts, and index status. |
 | `create <name>` | `--template`, `--output`, `--into`, `--force` | Scaffold a new plugin from a template. `--into` registers it in an existing catalog's `tome-catalog.toml`. See [Creating](../authoring/create.md). |

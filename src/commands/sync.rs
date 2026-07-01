@@ -252,6 +252,37 @@ pub fn sync_all(
     }
 }
 
+/// Run the SAME propagation `tome sync --all` performs — RULES.md write +
+/// harness reconcile over every project bound to `ws` — as an inline follow-up
+/// to a workspace-state change (`plugin enable`/`disable` with `--sync`).
+///
+/// This is the single shared entry point those `--sync` flags route through, so
+/// the inline sync inherits ALL of `sync_project`'s writer safety
+/// (structural-match-only removal, symlink refusal, marker-bounded edits,
+/// atomic writes) and the forward-progress `first_error` fan-out — it is NOT a
+/// second, hand-rolled sync path.
+///
+/// Scope: every bound project of the resolved workspace. This matches the scope
+/// the RULES.md propagation already reaches on enable/disable (via
+/// `regenerate_for_trigger` → `write_workspace_rules` →
+/// `sync_workspace_rules_to_bound_projects`), so the harness-file reconcile
+/// lands wherever the RULES.md write already lands — no broader, no narrower.
+///
+/// Ordering / failure contract: callers MUST run this AFTER the enable/disable
+/// state change has committed. A sync failure surfaces the underlying
+/// `sync_project` error (and its exit code, e.g. 43/44/45/19/7) but does NOT
+/// undo the committed enable/disable — the caller reports the state change as
+/// done and the sync as failed.
+pub fn sync_bound_projects(ws: &WorkspaceName, paths: &Paths) -> Result<SyncReport, TomeError> {
+    let args = SyncArgs {
+        all: true,
+        rules_only: false,
+        harness_only: false,
+        harness: Vec::new(),
+    };
+    sync_all(ws, &args, paths)
+}
+
 /// Emit the report per output mode. Human mode prints one line per project;
 /// `--json` emits the wire-stable [`SyncReport`].
 fn emit(report: &SyncReport, mode: Mode) -> Result<(), TomeError> {

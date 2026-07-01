@@ -836,6 +836,13 @@ pub struct PluginEnableArgs {
     /// per-entry later with `tome tier set`.
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=3))]
     pub tier: Option<u8>,
+    /// Apply the change to your harnesses immediately: after enabling, run the
+    /// same propagation `tome sync` performs over every project bound to the
+    /// resolved workspace (write `.tome/RULES.md` and reconcile harness files).
+    /// Without it, enable only updates the index and prints a reminder to run
+    /// `tome sync`.
+    #[arg(long)]
+    pub sync: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -846,6 +853,13 @@ pub struct PluginDisableArgs {
     /// non-interactive context (e.g. CI).
     #[arg(long)]
     pub force: bool,
+    /// Apply the change to your harnesses immediately: after disabling, run the
+    /// same propagation `tome sync` performs over every project bound to the
+    /// resolved workspace (write `.tome/RULES.md` and reconcile harness files).
+    /// Without it, disable only updates the index and prints a reminder to run
+    /// `tome sync`.
+    #[arg(long)]
+    pub sync: bool,
 }
 
 #[derive(Debug, clap::Args)]

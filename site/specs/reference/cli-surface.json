@@ -53,11 +53,13 @@
     "plugin": {
       "subcommands": {
         "enable": [
+          "--sync",
           "--verbose",
           "--yes"
         ],
         "disable": [
           "--force",
+          "--sync",
           "--verbose"
         ],
         "list": [

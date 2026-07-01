@@ -190,10 +190,62 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
         });
     }
 
-    match mode {
-        Mode::Human => emit_human(&id, &outcome),
-        Mode::Json => emit_json(&id, &outcome),
+    // --sync (#280): propagate the change to bound harnesses inline, reusing the
+    // SAME path `tome sync --all` uses (`commands::sync::sync_bound_projects` →
+    // `sync_all` → `sync_project`), so this inherits every writer safety and the
+    // forward-progress fan-out. It runs AFTER the state change + summary trigger
+    // above have committed: a sync failure here surfaces the underlying
+    // `sync_project` exit code but the enable itself is already durable and IS
+    // reported first (the success line prints before we propagate the error).
+    let projects_synced = if args.sync {
+        // Print the enable success line NOW so the user always sees that the
+        // enable landed, even if the follow-up sync errors out below.
+        emit_enable_success(&id, &outcome, mode, true)?;
+        let report = crate::commands::sync::sync_bound_projects(scope.scope.name(), &paths)?;
+        Some(report.projects.len())
+    } else {
+        None
+    };
+
+    match (mode, projects_synced) {
+        // --sync succeeded: the success line already printed above; now confirm
+        // what was applied (human) / carry the count (json).
+        (Mode::Human, Some(n)) => emit_synced_confirmation(n),
+        (Mode::Json, Some(n)) => emit_json(&id, &outcome, Some(n)),
+        // No --sync: normal success emit with the "run `tome sync`" reminder.
+        (Mode::Human, None) => emit_enable_success(&id, &outcome, mode, false),
+        (Mode::Json, None) => emit_json(&id, &outcome, None),
     }
+}
+
+/// Print the human success line + `next:` reminder (or, in JSON mode, nothing —
+/// the structured record is the contract there). `sync_will_run` suppresses the
+/// "or `tome sync` to apply" clause when `--sync` is about to apply the change
+/// itself (avoids a contradictory "already applied / run tome sync" pair).
+fn emit_enable_success(
+    id: &PluginId,
+    outcome: &lifecycle::EnableOutcome,
+    mode: Mode,
+    sync_will_run: bool,
+) -> Result<(), TomeError> {
+    if mode == Mode::Human {
+        let mut out = std::io::stdout().lock();
+        write_enable_human(&mut out, id, outcome, sync_will_run)?;
+    }
+    Ok(())
+}
+
+/// Human-mode confirmation printed after a successful `--sync`: mirrors
+/// `tier set`'s post-sync "applied" messaging (state → confirmation of the
+/// propagation) rather than the "run `tome sync`" reminder.
+fn emit_synced_confirmation(projects: usize) -> Result<(), TomeError> {
+    let mut out = std::io::stdout().lock();
+    writeln!(
+        out,
+        "  synced:   applied to harnesses in {} bound project(s)",
+        projects,
+    )?;
+    Ok(())
 }
 
 /// Probe each model's on-disk manifest and prompt the user for a download
@@ -287,22 +339,22 @@ fn ensure_models_or_prompt(
     Ok(())
 }
 
-fn emit_human(id: &PluginId, outcome: &lifecycle::EnableOutcome) -> Result<(), TomeError> {
-    let mut out = std::io::stdout().lock();
-    write_enable_human(&mut out, id, outcome)?;
-    Ok(())
-}
-
 /// Write the human-mode success lines for `plugin enable` to `out`.
 ///
-/// Split out from [`emit_human`] (which owns the locked stdout) so the
-/// `next:` onboarding hint (#281) is unit-testable against an in-memory sink
-/// without a real index / model download — the `write<W: Write>` seam already
-/// used by `plugin show`'s `write_entry_line`.
+/// Split out from the locked-stdout emit path so the `next:` onboarding hint
+/// (#281) is unit-testable against an in-memory sink without a real index /
+/// model download — the `write<W: Write>` seam already used by `plugin show`'s
+/// `write_entry_line`.
+///
+/// `sync_will_run` (#280): when `--sync` will apply the change inline, the
+/// "or `tome sync` to apply to your harnesses" clause is suppressed so the
+/// output never contradicts itself (telling the user to run a sync that is
+/// already running).
 fn write_enable_human<W: Write>(
     out: &mut W,
     id: &PluginId,
     outcome: &lifecycle::EnableOutcome,
+    sync_will_run: bool,
 ) -> std::io::Result<()> {
     let secs = outcome.duration.as_secs_f64();
     writeln!(
@@ -315,11 +367,19 @@ fn write_enable_human<W: Write>(
     )?;
     // Onboarding step hint (#281) — human mode only, mirroring the
     // `workspace init` `next:` line. Points the user at searching the freshly
-    // indexed skills and at propagating the change to bound harnesses.
-    writeln!(
-        out,
-        "  next:     `tome query <text>` to search these skills, or `tome sync` to apply to your harnesses",
-    )?;
+    // indexed skills and, unless `--sync` is applying it for them, at
+    // propagating the change to bound harnesses.
+    if sync_will_run {
+        writeln!(
+            out,
+            "  next:     `tome query <text>` to search these skills"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "  next:     `tome query <text>` to search these skills, or `tome sync` to apply to your harnesses",
+        )?;
+    }
     let _ = id; // referenced for consistency / future formatting
     Ok(())
 }
@@ -331,9 +391,18 @@ struct EnableRecord<'a> {
     skills_indexed: u32,
     skills_newly_embedded: u32,
     duration_ms: u64,
+    /// #280: number of bound projects the inline `--sync` propagated to.
+    /// Absent (omitted from the wire shape) when `--sync` was not passed, so
+    /// the byte-stable JSON pin for the no-`--sync` path is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projects_synced: Option<usize>,
 }
 
-fn emit_json(id: &PluginId, outcome: &lifecycle::EnableOutcome) -> Result<(), TomeError> {
+fn emit_json(
+    id: &PluginId,
+    outcome: &lifecycle::EnableOutcome,
+    projects_synced: Option<usize>,
+) -> Result<(), TomeError> {
     let duration_ms = outcome.duration.as_millis().min(u128::from(u64::MAX)) as u64;
     let record = EnableRecord {
         plugin: id.to_string(),
@@ -341,6 +410,7 @@ fn emit_json(id: &PluginId, outcome: &lifecycle::EnableOutcome) -> Result<(), To
         skills_indexed: outcome.summary.total_skills,
         skills_newly_embedded: outcome.summary.newly_embedded,
         duration_ms,
+        projects_synced,
     };
     output::write_json(&record)
 }
@@ -368,12 +438,13 @@ mod tests {
     }
 
     /// #281: the human success output carries the onboarding `next:` hint and
-    /// every command it names actually exists on the CLI surface.
+    /// every command it names actually exists on the CLI surface. Without
+    /// `--sync` (`sync_will_run == false`) the hint still points at `tome sync`.
     #[test]
     fn human_output_includes_onboarding_next_hint() {
         let outcome = sample_outcome();
         let mut buf: Vec<u8> = Vec::new();
-        write_enable_human(&mut buf, &outcome.plugin, &outcome).expect("write");
+        write_enable_human(&mut buf, &outcome.plugin, &outcome, false).expect("write");
         let text = String::from_utf8(buf).expect("utf8");
 
         assert!(
@@ -391,8 +462,37 @@ mod tests {
         );
     }
 
+    /// #280: when `--sync` will apply the change inline (`sync_will_run ==
+    /// true`), the "or `tome sync` to apply" reminder is suppressed — the
+    /// output must not tell the user to run a sync that is already running.
+    #[test]
+    fn human_output_suppresses_sync_reminder_when_sync_will_run() {
+        let outcome = sample_outcome();
+        let mut buf: Vec<u8> = Vec::new();
+        write_enable_human(&mut buf, &outcome.plugin, &outcome, true).expect("write");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        // The success line + a `next:` hint still print...
+        assert!(
+            text.contains("skills indexed"),
+            "success line missing: {text}"
+        );
+        assert!(text.contains("next:"), "onboarding hint missing: {text}");
+        assert!(
+            text.contains("tome query"),
+            "`tome query` not referenced: {text}",
+        );
+        // ...but the `tome sync` reminder is gone (it is being applied inline).
+        assert!(
+            !text.contains("tome sync"),
+            "`tome sync` reminder must be suppressed when --sync runs: {text}",
+        );
+    }
+
     /// #281: the `--json` success record has no `next` field — the hint is
-    /// human-mode only, so JSON stdout stays byte-stable.
+    /// human-mode only, so JSON stdout stays byte-stable. #280: with no
+    /// `--sync`, `projects_synced` is `None` and omitted, so the wire shape is
+    /// byte-identical to the pre-#280 record.
     #[test]
     fn json_record_has_no_next_hint() {
         let outcome = sample_outcome();
@@ -402,11 +502,37 @@ mod tests {
             skills_indexed: outcome.summary.total_skills,
             skills_newly_embedded: outcome.summary.newly_embedded,
             duration_ms: outcome.duration.as_millis() as u64,
+            projects_synced: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         assert!(
             !json.contains("next"),
             "JSON must carry no `next` hint: {json}"
+        );
+        // No `--sync` → `projects_synced` omitted; the wire shape is unchanged.
+        assert!(
+            !json.contains("projects_synced"),
+            "projects_synced must be omitted without --sync: {json}",
+        );
+    }
+
+    /// #280: with `--sync`, the JSON record carries the additive
+    /// `projects_synced` count as a trailing field.
+    #[test]
+    fn json_record_carries_projects_synced_with_sync() {
+        let outcome = sample_outcome();
+        let record = super::EnableRecord {
+            plugin: outcome.plugin.to_string(),
+            status: "enabled",
+            skills_indexed: outcome.summary.total_skills,
+            skills_newly_embedded: outcome.summary.newly_embedded,
+            duration_ms: outcome.duration.as_millis() as u64,
+            projects_synced: Some(2),
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(
+            json.contains("\"projects_synced\":2"),
+            "projects_synced count missing: {json}",
         );
     }
 }

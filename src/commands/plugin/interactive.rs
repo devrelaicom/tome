@@ -485,6 +485,9 @@ fn run_enable_action(scope: &ResolvedScope, id: &PluginId) -> Result<(), TomeErr
             // Interactive enable does not pre-set a tier; the default (3)
             // applies. Users can refine per-entry via `tome tier set`.
             tier: None,
+            // Interactive flow does not offer inline `--sync`; the user is
+            // reminded to run `tome sync` in the printed `next:` hint (#280).
+            sync: false,
         },
         scope,
         Mode::Human,
