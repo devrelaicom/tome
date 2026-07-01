@@ -229,6 +229,15 @@
         "--verbose"
       ]
     },
+    "sync": {
+      "subcommands": {},
+      "flags": [
+        "--all",
+        "--harness",
+        "--harness-only",
+        "--rules-only"
+      ]
+    },
     "skill": {
       "subcommands": {
         "create": [

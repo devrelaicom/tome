@@ -185,6 +185,159 @@ fn sync_all_rules_only_fans_out() {
     }
 }
 
+/// Build a `ResolvedScope` for `ws` with NO project marker — the bare-sync
+/// case (issue #303). `project_root: None` drives the new fan-out branch.
+fn scope_without_marker(ws: &str) -> tome::workspace::ResolvedScope {
+    tome::workspace::ResolvedScope {
+        scope: tome::workspace::Scope(parse(ws)),
+        source: tome::workspace::ScopeSource::Config,
+        project_root: None,
+        overridden_project_marker: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #303-a. Bare `tome sync` outside a project (no marker, no --all) with >=1
+//         bound project fans out to EVERY bound project — same as --all.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bare_sync_no_marker_fans_out_to_bound_projects() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    init_with_rules(&paths, "ws-a", "ws-a rules\n");
+
+    let project_a = tmp.path().join("proj-a");
+    let project_b = tmp.path().join("proj-b");
+    seed_bound_project(&paths, "ws-a", &project_a);
+    seed_bound_project(&paths, "ws-a", &project_b);
+
+    // Stale bodies so we can prove both were reconciled by the fan-out.
+    std::fs::write(project_a.join(".tome/RULES.md"), b"STALE_A\n").unwrap();
+    std::fs::write(project_b.join(".tome/RULES.md"), b"STALE_B\n").unwrap();
+
+    // `--rules-only` keeps the reconcile off the $HOME-dependent harness path
+    // while still exercising the bare-sync fan-out fallback end to end.
+    let args = SyncArgs {
+        all: false,
+        rules_only: true,
+        harness_only: false,
+        harness: vec![],
+    };
+    let scope = scope_without_marker("ws-a");
+
+    // Bare sync with no marker MUST succeed (exit 0), not error.
+    tome::commands::sync::run(args, &scope, &paths, tome::output::Mode::Json)
+        .expect("bare sync fans out cleanly");
+
+    // Both bound projects were reconciled with the workspace body.
+    assert_eq!(
+        std::fs::read(project_a.join(".tome/RULES.md")).unwrap(),
+        b"ws-a rules\n",
+        "proj-a not synced by bare-sync fan-out",
+    );
+    assert_eq!(
+        std::fs::read(project_b.join(".tome/RULES.md")).unwrap(),
+        b"ws-a rules\n",
+        "proj-b not synced by bare-sync fan-out",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #303-b. Bare `tome sync` with EXACTLY ONE bound project syncs that one
+//         (subsumed by the --all path — a one-element fan-out).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bare_sync_no_marker_single_bound_syncs_it() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    init_with_rules(&paths, "ws-a", "ws-a rules\n");
+
+    let project = tmp.path().join("only-proj");
+    seed_bound_project(&paths, "ws-a", &project);
+    std::fs::write(project.join(".tome/RULES.md"), b"STALE\n").unwrap();
+
+    let args = rules_only_args();
+    let scope = scope_without_marker("ws-a");
+
+    tome::commands::sync::run(args, &scope, &paths, tome::output::Mode::Json)
+        .expect("bare sync single-bound succeeds");
+
+    assert_eq!(
+        std::fs::read(project.join(".tome/RULES.md")).unwrap(),
+        b"ws-a rules\n",
+        "the single bound project was not synced",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #303-c. Bare `tome sync` with ZERO bound projects → detect-and-suggest
+//         usage error (exit 2), message names the concrete next steps.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bare_sync_no_marker_no_bindings_is_detect_and_suggest_error() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    // Workspace exists but has NO bound projects.
+    init_with_rules(&paths, "ws-a", "ws-a rules\n");
+
+    let args = rules_only_args();
+    let scope = scope_without_marker("ws-a");
+
+    let err = tome::commands::sync::run(args, &scope, &paths, tome::output::Mode::Json)
+        .expect_err("no bindings must error");
+
+    assert!(
+        matches!(err, TomeError::Usage(_)),
+        "expected Usage, got {err:?}",
+    );
+    assert_eq!(err.exit_code(), 2, "no-bindings usage error is exit 2");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("tome workspace use"),
+        "message must name `tome workspace use`: {msg}",
+    );
+    assert!(
+        msg.contains("tome sync --all"),
+        "message must name `tome sync --all`: {msg}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #303-d. Bare `tome sync` outside a project against a workspace with NO
+//         registry row (no DB at all) → the SAME detect-and-suggest usage
+//         error, never a bare WorkspaceNotFound (exit 13).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bare_sync_no_marker_no_db_is_detect_and_suggest_error() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    // Deliberately NO workspace init and NO central DB.
+
+    let args = rules_only_args();
+    let scope = scope_without_marker("ws-a");
+
+    let err = tome::commands::sync::run(args, &scope, &paths, tome::output::Mode::Json)
+        .expect_err("no db must error");
+
+    assert!(
+        matches!(err, TomeError::Usage(_)),
+        "expected Usage (not WorkspaceNotFound), got {err:?}",
+    );
+    assert_eq!(err.exit_code(), 2);
+}
+
 // ---------------------------------------------------------------------------
 // 3. Unknown --harness (not rules-only) errors with HarnessNotSupported.
 // ---------------------------------------------------------------------------

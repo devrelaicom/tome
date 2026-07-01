@@ -12,6 +12,17 @@
 //! `--all` fans out to every project bound to the resolved workspace in
 //! `workspace_projects`.
 //!
+//! ## Bare `tome sync` outside a project (issue #303)
+//!
+//! When no project marker resolves and `--all` was not passed, `tome sync`
+//! does NOT hard-error. It falls back to the `--all` fan-out over the resolved
+//! workspace's bound projects (reusing [`sync_all`], so it inherits every bit
+//! of the `--all` writer safety and forward-progress), printing a short note to
+//! stderr in human mode so the user isn't surprised it acted outside the CWD.
+//! `--json` output is byte-identical to `--all`. Only when the workspace has NO
+//! bound projects does it stay an error — a detect-and-suggest [`TomeError::Usage`]
+//! (exit 2) naming the concrete next step (`tome workspace use` / `tome sync --all`).
+//!
 //! ## Why both halves, why this order
 //!
 //! The RULES.md write lands the workspace prose first; the harness
@@ -90,13 +101,8 @@ pub fn run(
 
     let report = if args.all {
         sync_all(&ws, &args, paths)?
-    } else {
-        let Some(project_root) = scope.project_root.as_deref() else {
-            return Err(TomeError::Usage(
-                "`tome sync` requires a project marker — run inside a project bound via `tome workspace use`, or pass --all to sync every bound project"
-                    .into(),
-            ));
-        };
+    } else if let Some(project_root) = scope.project_root.as_deref() {
+        // In a project: sync exactly that project, unchanged.
         let mut report = SyncReport {
             projects: Vec::new(),
         };
@@ -104,9 +110,56 @@ pub fn run(
             .projects
             .push(sync_one_project(&ws, project_root, &args, paths)?);
         report
+    } else {
+        // No project marker resolved and `--all` was not passed. Rather than
+        // hard-error, fan out to the resolved workspace's bound projects —
+        // exactly what `--all` does (issue #303). We REUSE the vetted `--all`
+        // path (`sync_all`) so this inherits all of its writer safety (symlink
+        // refusal, marker-bounded edits, atomic writes) and forward-progress
+        // fan-out; it is NOT a re-implemented fan-out.
+        match sync_all(&ws, &args, paths) {
+            // Fanned out to at least one bound project. Print a short human
+            // note so the user isn't surprised `tome sync` acted outside CWD;
+            // `--json` stays byte-identical to what `--all` already emits.
+            Ok(report) if !report.projects.is_empty() => {
+                if mode == Mode::Human {
+                    eprintln!(
+                        "note: no project marker here; syncing every project bound to workspace `{}` (like --all)",
+                        ws.as_str(),
+                    );
+                }
+                report
+            }
+            // No bound projects to fan out to. `Ok(empty)` is the pre-bootstrap
+            // / no-bindings case; `WorkspaceNotFound` is a resolved workspace
+            // with no registry row (also "no bindings"). Both collapse to the
+            // same detect-and-suggest usage error naming the concrete next
+            // steps — never a bare `WorkspaceNotFound` (exit 13) here.
+            Ok(_) | Err(TomeError::WorkspaceNotFound { .. }) => {
+                return Err(TomeError::Usage(no_bindings_hint(&ws)));
+            }
+            // A genuine per-project sync failure (e.g. a symlink refusal or a
+            // harness write error). Surface it so the exit code reflects the
+            // real failure.
+            Err(e) => return Err(e),
+        }
     };
 
     emit(&report, mode)
+}
+
+/// Detect-and-suggest message for a bare `tome sync` (no project marker,
+/// no `--all`) run against a workspace with no bound projects. Names the two
+/// concrete next steps rather than the bare "requires a project marker" of the
+/// old branch (issue #303).
+fn no_bindings_hint(ws: &WorkspaceName) -> String {
+    format!(
+        "`tome sync`: no project marker here and no projects bound to workspace `{}` — \
+         run `tome workspace use {}` inside a project to bind it, or `tome sync --all` \
+         once you have bound projects",
+        ws.as_str(),
+        ws.as_str(),
+    )
 }
 
 /// Sync ONE project: the per-project RULES.md write (unless `--harness-only`)
