@@ -130,10 +130,13 @@ pub fn run(
     paths: &Paths,
     host_harness: Option<String>,
 ) -> Result<(), TomeError> {
-    // Open the file log appender before anything else can fail. If this
-    // errors, the harness sees a TomeError on stderr instead of a
-    // silent log.
-    let log_file = log::open_appender(paths)?;
+    // Resolve the file log sink before anything else can fail, honouring
+    // the `TOME_MCP_LOG` override (unset → default path; `off`/empty → no
+    // sink; `<path>` → that path). A failure opening the *default* path
+    // still surfaces as a TomeError on stderr (byte-identical to before);
+    // an unopenable *override* path degrades to no sink with a stderr
+    // warning so the server always starts. `None` = no file log.
+    let log_file = log::open_sink(paths)?;
     // Load the logging level from config defensively (any error → default level)
     // so a malformed config.toml doesn't prevent the MCP server from starting
     // once past the workspace resolve step. In practice `harness sync` always
