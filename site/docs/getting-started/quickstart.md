@@ -70,14 +70,17 @@ tome query "verify a Compact contract"
 ```
 
 ```text
-|   Score | Catalog         | Plugin          | Skill                                     | Version | Path                                                      |
-|---------|-----------------|-----------------|-------------------------------------------|---------|-----------------------------------------------------------|
-|  4.7874 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution       | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md       |
-|  3.4658 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker    | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md    |
-|  3.1529 | midnight-expert | midnight-verify | midnight-verify:verify-compact            | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md            |
+top_k=10  rerank=true  min_score=none  (10 results)
+|   Score | Catalog         | Plugin          | Name                                      | Type  | Version | Path                                                      |
+|---------|-----------------|-----------------|-------------------------------------------|-------|---------|-----------------------------------------------------------|
+|  4.7874 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution       | skill | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md       |
+|  3.4658 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker    | skill | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md    |
+|  3.1529 | midnight-expert | midnight-verify | midnight-verify:verify-compact            | skill | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md            |
 ```
 
-(Top three of ten rows shown.)
+(Top three of ten rows shown. The dim header line above the table — shown
+only in an interactive terminal — reports the effective `top_k`, `rerank`,
+and `min_score` knobs plus the result count.)
 
 :::note[What just happened]
 

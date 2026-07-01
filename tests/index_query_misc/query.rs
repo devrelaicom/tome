@@ -438,6 +438,113 @@ fn run_with_deps_populated_scope_reports_nonzero_searchable_count() {
     );
 }
 
+// ---- #304: applied_min_score reflects reality (the knobs-header SSOT) ------
+//
+// The human-mode effective-knobs header prints `min_score` ONLY when a floor
+// actually filtered rows. That floor is `QueryOutcome::applied_min_score`,
+// populated by the pipeline: `Some(threshold)` under `--strict`, `None`
+// otherwise. These prove the field matches the pipeline's real behaviour so
+// the header never advertises a floor that was not applied.
+
+#[test]
+fn run_with_deps_non_strict_reports_no_applied_floor() {
+    // No `--strict` → the pipeline computes `threshold_passed` but never filters,
+    // so no floor is in effect. The header must show `min_score=none`.
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope(WorkspaceName::global()),
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let outcome = run_with_deps(args_for("alpha widget", 5), deps, Mode::Json)
+        .expect("non-strict query must succeed");
+    assert_eq!(
+        outcome.applied_min_score, None,
+        "non-strict mode applies no floor, so applied_min_score must be None",
+    );
+}
+
+#[test]
+fn run_with_deps_strict_reports_applied_floor() {
+    // `--strict` with an explicit `--min-score` applies that exact floor. With
+    // cosine self-similarity (~1.0) a 0.5 floor keeps the top hit, so the query
+    // succeeds AND reports the applied floor for the header (`min_score=0.5000`).
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+
+    let target_name = "skill-a";
+    let target_description = "Well-formed skill that documents how to make alpha widgets shine.";
+    let query_text = embedding_text(target_name, target_description, None);
+
+    let mut args = args_for(&query_text, 5);
+    args.strict = true;
+    args.min_score = Some(0.5);
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope(WorkspaceName::global()),
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let outcome =
+        run_with_deps(args, deps, Mode::Json).expect("strict query above the floor must succeed");
+    assert_eq!(
+        outcome.applied_min_score,
+        Some(0.5),
+        "strict mode must report the applied floor (the explicit --min-score)",
+    );
+    assert!(
+        !outcome.results.is_empty(),
+        "the self-embedded top hit (~1.0) must pass a 0.5 floor",
+    );
+}
+
+#[test]
+fn run_with_deps_strict_default_floor_is_reported_for_cosine() {
+    // `--strict` with NO `--min-score` under cosine scoring applies the mode
+    // default (0.5). The header reads THIS resolved value, not a raw flag —
+    // proving `applied_min_score` carries the effective (defaulted) floor.
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+
+    let target_name = "skill-a";
+    let target_description = "Well-formed skill that documents how to make alpha widgets shine.";
+    let query_text = embedding_text(target_name, target_description, None);
+
+    let mut args = args_for(&query_text, 5);
+    args.strict = true;
+    args.min_score = None; // fall back to the cosine default (0.5)
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope(WorkspaceName::global()),
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let outcome = run_with_deps(args, deps, Mode::Json)
+        .expect("strict query with the default cosine floor must succeed");
+    assert_eq!(
+        outcome.applied_min_score,
+        Some(0.5),
+        "strict cosine mode must report the resolved default floor (0.5)",
+    );
+}
+
 #[test]
 fn run_with_deps_uses_reranker_when_provided() {
     let env = build_query_env();

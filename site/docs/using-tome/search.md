@@ -17,22 +17,30 @@ tome query "verify a Compact contract"
 ```
 
 ```text
-|   Score | Catalog         | Plugin          | Skill                                     | Version | Path                                                      |
-|---------|-----------------|-----------------|-------------------------------------------|---------|-----------------------------------------------------------|
-|  4.7874 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution       | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md       |
-|  3.4658 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker    | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md    |
-|  3.1529 | midnight-expert | midnight-verify | midnight-verify:verify-compact            | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md            |
-|  2.7010 | midnight-expert | midnight-verify | midnight-verify:verify-by-witness         | 0.13.0  | skills/midnight-verify:verify-by-witness/SKILL.md         |
-|  1.4746 | midnight-expert | midnight-verify | midnight-verify:verify-by-cli-execution   | 0.13.0  | skills/midnight-verify:verify-by-cli-execution/SKILL.md   |
-|  0.0356 | midnight-expert | midnight-verify | midnight-verify:verify                    | 0.13.0  | commands/midnight-verify:verify.md                        |
-| -0.4743 | midnight-expert | midnight-verify | midnight-verify:verify-by-source          | 0.13.0  | skills/midnight-verify:verify-by-source/SKILL.md          |
-| -1.0289 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-inspection | 0.13.0  | skills/midnight-verify:verify-by-zkir-inspection/SKILL.md |
-| -1.2946 | midnight-expert | midnight-verify | midnight-verify:verify-tooling            | 0.13.0  | skills/midnight-verify:verify-tooling/SKILL.md            |
-| -3.3564 | midnight-expert | midnight-verify | midnight-verify:verify-ledger             | 0.13.0  | skills/midnight-verify:verify-ledger/SKILL.md             |
+top_k=10  rerank=true  min_score=none  (10 results)
+|   Score | Catalog         | Plugin          | Name                                      | Type    | Version | Path                                                      |
+|---------|-----------------|-----------------|-------------------------------------------|---------|---------|-----------------------------------------------------------|
+|  4.7874 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution       | skill   | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md       |
+|  3.4658 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker    | skill   | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md    |
+|  3.1529 | midnight-expert | midnight-verify | midnight-verify:verify-compact            | skill   | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md            |
+|  2.7010 | midnight-expert | midnight-verify | midnight-verify:verify-by-witness         | skill   | 0.13.0  | skills/midnight-verify:verify-by-witness/SKILL.md         |
+|  1.4746 | midnight-expert | midnight-verify | midnight-verify:verify-by-cli-execution   | skill   | 0.13.0  | skills/midnight-verify:verify-by-cli-execution/SKILL.md   |
+|  0.0356 | midnight-expert | midnight-verify | midnight-verify:verify                    | command | 0.13.0  | commands/midnight-verify:verify.md                        |
+| -0.4743 | midnight-expert | midnight-verify | midnight-verify:verify-by-source          | skill   | 0.13.0  | skills/midnight-verify:verify-by-source/SKILL.md          |
+| -1.0289 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-inspection | skill   | 0.13.0  | skills/midnight-verify:verify-by-zkir-inspection/SKILL.md |
+| -1.2946 | midnight-expert | midnight-verify | midnight-verify:verify-tooling            | skill   | 0.13.0  | skills/midnight-verify:verify-tooling/SKILL.md            |
+| -3.3564 | midnight-expert | midnight-verify | midnight-verify:verify-ledger             | skill   | 0.13.0  | skills/midnight-verify:verify-ledger/SKILL.md             |
 ```
 
 The right skill is at the top with a clear margin, and the scores drop
 steeply — below zero for entries that only share vocabulary with the query.
+
+The dim header line above the table shows the effective knobs that produced
+the results — the resolved `top_k`, whether reranking ran, the applied
+`min_score` floor (or `none` when no floor is enforced), and the result count.
+It is shown only in an interactive terminal; piped or redirected output omits
+it so the table stays clean to `grep`. The `Type` column reports whether each
+result is a `skill`, `command`, or `agent`.
 
 Search runs in two stages:
 
@@ -62,11 +70,12 @@ tome query "verify a Compact contract" --top-k 3
 ```
 
 ```text
-|  Score | Catalog         | Plugin          | Skill                                  | Version | Path                                                   |
-|--------|-----------------|-----------------|----------------------------------------|---------|--------------------------------------------------------|
-| 4.3648 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution    | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md    |
-| 3.8602 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md |
-| 3.6187 | midnight-expert | midnight-verify | midnight-verify:verify-compact         | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md         |
+top_k=3  rerank=true  min_score=none  (3 results)
+|  Score | Catalog         | Plugin          | Name                                   | Type  | Version | Path                                                   |
+|--------|-----------------|-----------------|----------------------------------------|-------|---------|--------------------------------------------------------|
+| 4.3648 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution    | skill | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md    |
+| 3.8602 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker | skill | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md |
+| 3.6187 | midnight-expert | midnight-verify | midnight-verify:verify-compact         | skill | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md         |
 ```
 
 Same query, same top three entries — different scores than the ten-result run
