@@ -236,7 +236,7 @@ pub enum TomeError {
     // Phase 2 — plugin lifecycle (codes 20–23).
     // -----------------------------------------------------------------------
     #[error(
-        "plugin `{0}` is not installed under any registered catalog\nhint: list valid plugin ids with `tome plugin list`"
+        "plugin `{0}` is not installed under any registered catalog\nhint: list valid plugin ids with `tome plugin list`, or run `tome plugin` to browse and enable interactively"
     )]
     PluginNotFound(String),
 

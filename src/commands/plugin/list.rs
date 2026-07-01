@@ -209,7 +209,8 @@ fn build_row(
 /// catalogs exist but no plugins are surfaced the fix is to enable one.
 fn empty_plugin_list_message(any_catalogs: bool) -> &'static str {
     if any_catalogs {
-        "No plugins found. Use `tome plugin enable <catalog>/<plugin>` to enable one."
+        "No plugins found. Use `tome plugin enable <catalog>/<plugin>` to enable one, \
+         or browse interactively with `tome plugin`."
     } else {
         "No catalogs registered. Use `tome catalog add <source>` to add one, then enable a plugin."
     }
@@ -350,6 +351,11 @@ mod tests {
         assert!(
             !msg.contains("tome catalog add"),
             "catalog-present nudge must not tell the user to add a catalog, got: {msg}",
+        );
+        // #311: also offer the interactive browser as a newcomer-friendly path.
+        assert!(
+            msg.contains("browse interactively with `tome plugin`"),
+            "catalog-present nudge must offer the interactive browser, got: {msg}",
         );
     }
 }

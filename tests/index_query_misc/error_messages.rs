@@ -463,6 +463,12 @@ fn plugin_not_found_names_plugin_and_recovery_hint() {
     assert!(m.contains("not installed"), "{m}");
     assert!(m.contains("hint:"), "{m}");
     assert!(m.contains("tome plugin list"), "{m}");
+    // #311: the not-installed hint also surfaces the interactive browser so a
+    // newcomer who hits this error learns bare `tome plugin` exists.
+    assert!(m.contains("`tome plugin`"), "{m}");
+    // The whole recovery lives on a single `hint:` continuation line (#310
+    // dims exactly one such line).
+    assert_eq!(m.matches("\nhint:").count(), 1, "{m}");
 }
 
 #[test]
@@ -474,4 +480,7 @@ fn invalid_plugin_id_format_states_expected_shape_hint() {
     assert!(m.contains("<catalog>/<plugin>"), "{m}");
     assert!(m.contains("hint:"), "{m}");
     assert!(m.contains("tome plugin list"), "{m}");
+    // #311: also point at the interactive browser.
+    assert!(m.contains("`tome plugin`"), "{m}");
+    assert_eq!(m.matches("\nhint:").count(), 1, "{m}");
 }
