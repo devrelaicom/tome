@@ -199,6 +199,9 @@ fn error_envelope_prompt_not_found_is_byte_stable() {
         "message": "prompt `p__nope` not found in this workspace",
         "data": {
             "code": "prompt_not_found",
+            // #296: structured retryable flag (EntryNotFound is deterministic —
+            // not retryable, no single fix command → remediation omitted).
+            "retryable": false,
             "name": "p__nope"
         }
     });
@@ -234,6 +237,8 @@ fn error_envelope_prompt_argument_mismatch_is_byte_stable() {
         "message": "prompt `p__hello` argument mismatch: expected 1, supplied 1",
         "data": {
             "code": "prompt_argument_mismatch",
+            // #296: deterministic → not retryable, no remediation command.
+            "retryable": false,
             "name": "p__hello",
             "expected": 1,
             "supplied": 1
@@ -257,10 +262,17 @@ fn error_envelope_substitution_failed_is_byte_stable() {
     // catch-all uses (`internal_get_error`). The wire shape is what
     // matters; the trigger lives behind the US2/US3 wiring.
     let name = "p__hello";
+    // #296: build the `data` object via the SAME production helper the catch-all
+    // (`internal_get_error`) now routes through, so this hand-pinned envelope
+    // stays byte-true to production rather than re-encoding the old shape.
     let err = McpError::new(
         ErrorCode::INTERNAL_ERROR,
         "substitution failed: synthetic test trigger".to_owned(),
-        Some(json!({ "code": "substitution_failed", "name": name })),
+        Some(tome::mcp::tools::common::error_data_with_code(
+            "substitution_failed",
+            tome::error::ErrorCategory::SubstitutionFailed,
+            &[("name", json!(name))],
+        )),
     );
 
     let serialised = err_to_json(&err);
@@ -269,6 +281,8 @@ fn error_envelope_substitution_failed_is_byte_stable() {
         "message": "substitution failed: synthetic test trigger",
         "data": {
             "code": "substitution_failed",
+            // #296: deterministic umbrella class → not retryable, no remediation.
+            "retryable": false,
             "name": "p__hello"
         }
     });
@@ -293,11 +307,11 @@ fn error_envelope_workspace_data_dir_write_failed_is_byte_stable() {
         format!(
             "workspace data dir write failed at {path}: workspace data directory write failed at {path}: oh no"
         ),
-        Some(json!({
-            "code": "workspace_data_dir_write_failed",
-            "name": name,
-            "path": path,
-        })),
+        Some(tome::mcp::tools::common::error_data_with_code(
+            "workspace_data_dir_write_failed",
+            tome::error::ErrorCategory::WorkspaceDataDirWriteFailed,
+            &[("name", json!(name)), ("path", json!(path))],
+        )),
     );
 
     let serialised = err_to_json(&err);
@@ -306,6 +320,8 @@ fn error_envelope_workspace_data_dir_write_failed_is_byte_stable() {
         "message": "workspace data dir write failed at /home/u/.tome/workspace-data/global/acme/p: workspace data directory write failed at /home/u/.tome/workspace-data/global/acme/p: oh no",
         "data": {
             "code": "workspace_data_dir_write_failed",
+            // #296: an I/O write failure is deterministic → not retryable.
+            "retryable": false,
             "name": "p__hello",
             "path": "/home/u/.tome/workspace-data/global/acme/p"
         }
@@ -330,11 +346,11 @@ fn error_envelope_plugin_data_dir_write_failed_is_byte_stable() {
         format!(
             "plugin data dir write failed at {path}: plugin data dir write failed at {path}: oh no"
         ),
-        Some(json!({
-            "code": "plugin_data_dir_write_failed",
-            "name": name,
-            "path": path,
-        })),
+        Some(tome::mcp::tools::common::error_data_with_code(
+            "plugin_data_dir_write_failed",
+            tome::error::ErrorCategory::PluginDataDirWriteFailed,
+            &[("name", json!(name)), ("path", json!(path))],
+        )),
     );
 
     let serialised = err_to_json(&err);
@@ -343,6 +359,8 @@ fn error_envelope_plugin_data_dir_write_failed_is_byte_stable() {
         "message": "plugin data dir write failed at /home/u/.tome/plugin-data/acme/p: plugin data dir write failed at /home/u/.tome/plugin-data/acme/p: oh no",
         "data": {
             "code": "plugin_data_dir_write_failed",
+            // #296: an I/O write failure is deterministic → not retryable.
+            "retryable": false,
             "name": "p__hello",
             "path": "/home/u/.tome/plugin-data/acme/p"
         }

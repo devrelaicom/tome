@@ -22,9 +22,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info};
 
-use crate::error::TomeError;
+use crate::error::{ErrorCategory, TomeError};
 use crate::index::skills;
 use crate::mcp::state::McpState;
+use crate::mcp::tools::common::{error_data, error_data_with_code};
 use crate::plugin::identity::EntryKind;
 
 /// Resource enumeration cap. Top-level files and each subdirectory's
@@ -136,14 +137,21 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         lookup_entry(&paths, &scope, &catalog, &plugin, kind, &name)
     })
     .await
-    .map_err(|e| internal(&input, started, format!("lookup join: {e}"), "internal"))?
+    .map_err(|e| {
+        internal(
+            &input,
+            started,
+            format!("lookup join: {e}"),
+            ErrorCategory::Internal,
+        )
+    })?
     .map_err(|e| {
         // C-L1: best-effort MCP-surface `tome.error` (closed category only),
         // with this session's `calling_harness`. Never alters the returned
         // `McpError`. The other error arms below are non-`TomeError` lookup/walk
         // outcomes already shaped to the contract codes.
         crate::mcp::enqueue_tool_error(&state, e.category());
-        internal(&input, started, e.to_string(), e.category().as_str())
+        internal(&input, started, e.to_string(), e.category())
     })?;
 
     let hit = match lookup {
@@ -164,7 +172,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
                         "catalog `{}` is not enabled in the resolved scope",
                         input.catalog
                     ),
-                    Some(json!({ "code": "unknown_catalog", "catalog": input.catalog })),
+                    Some(error_data_with_code(
+                        "unknown_catalog",
+                        ErrorCategory::EntryNotFound,
+                        &[("catalog", json!(input.catalog))],
+                    )),
                 ),
             ));
         }
@@ -178,11 +190,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
                         "plugin `{}/{}` is not enabled in the resolved scope",
                         input.catalog, input.plugin
                     ),
-                    Some(json!({
-                        "code": "unknown_plugin",
-                        "catalog": input.catalog,
-                        "plugin": input.plugin,
-                    })),
+                    Some(error_data_with_code(
+                        "unknown_plugin",
+                        ErrorCategory::EntryNotFound,
+                        &[
+                            ("catalog", json!(input.catalog)),
+                            ("plugin", json!(input.plugin)),
+                        ],
+                    )),
                 ),
             ));
         }
@@ -196,12 +211,15 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
                         "skill `{}/{}/{}` is not enabled in the resolved scope",
                         input.catalog, input.plugin, input.name,
                     ),
-                    Some(json!({
-                        "code": "unknown_skill",
-                        "catalog": input.catalog,
-                        "plugin": input.plugin,
-                        "name": input.name,
-                    })),
+                    Some(error_data_with_code(
+                        "unknown_skill",
+                        ErrorCategory::EntryNotFound,
+                        &[
+                            ("catalog", json!(input.catalog)),
+                            ("plugin", json!(input.plugin)),
+                            ("name", json!(input.name)),
+                        ],
+                    )),
                 ),
             ));
         }
@@ -222,7 +240,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         let body_path_for_walk = body_path.clone();
         let walked = tokio::task::spawn_blocking(move || walk_resources(&body_path_for_walk))
             .await
-            .map_err(|e| internal(&input, started, format!("walk join: {e}"), "internal"))?;
+            .map_err(|e| {
+                internal(
+                    &input,
+                    started,
+                    format!("walk join: {e}"),
+                    ErrorCategory::Internal,
+                )
+            })?;
         match walked {
             Ok(r) => Some(r),
             Err(err) => {
@@ -233,10 +258,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
                     McpError::new(
                         ErrorCode::INTERNAL_ERROR,
                         format!("resource enumeration failed: {err}"),
-                        Some(json!({
-                            "code": "resource_enum_failed",
-                            "path": body_path.display().to_string(),
-                        })),
+                        Some(error_data_with_code(
+                            "resource_enum_failed",
+                            ErrorCategory::Io,
+                            &[("path", json!(body_path.display().to_string()))],
+                        )),
                     ),
                 ));
             }
@@ -480,7 +506,10 @@ fn basename_cmp(a: &Path, b: &Path) -> std::cmp::Ordering {
 /// Build the `internal_error` envelope plus an error log event. Mirrors
 /// `mcp::tools::get_skill::internal` so both surfaces emit identically
 /// shaped log records.
-fn internal(input: &Input, started: Instant, msg: String, code: &str) -> McpError {
+///
+/// #296: `category` drives the `data.code` slug AND the structured `retryable` /
+/// `remediation` fields (via [`error_data`]), matching the CLI envelope.
+fn internal(input: &Input, started: Instant, msg: String, category: ErrorCategory) -> McpError {
     let scrubbed = crate::catalog::git::scrub_to_string(msg.as_bytes());
     error!(
         target: "tome::mcp::tools::get_skill_info",
@@ -488,12 +517,12 @@ fn internal(input: &Input, started: Instant, msg: String, code: &str) -> McpErro
         plugin = input.plugin,
         name = input.name,
         kind = input.kind.as_str(),
-        error_code = code,
+        error_code = category.as_str(),
         error_message = %scrubbed,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "tool error",
     );
-    McpError::internal_error(msg, Some(json!({ "code": code })))
+    McpError::internal_error(msg, Some(error_data(category)))
 }
 
 /// Log the contract-recognised error variants, then return the pre-built

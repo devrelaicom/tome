@@ -12,6 +12,53 @@ failure in scripts. The `--json` error output also includes a snake-case
 a category — e.g. `52` and `73` both report `schema_too_new`). This table is
 enforced against the CLI contract in CI.
 
+## The `--json` error envelope
+
+A failed command with `--json` prints one error record to **stderr** (never
+stdout):
+
+```json
+{
+  "error": {
+    "category": "index_busy",
+    "exit_code": 50,
+    "message": "another tome process is updating the index; retry once it has finished",
+    "retryable": true
+  }
+}
+```
+
+The fields are:
+
+- `category` — the snake-case failure class (the middle column of the table
+  below).
+- `exit_code` — the integer this command exited with.
+- `message` — the human-readable message (already credential-scrubbed).
+- `retryable` — a boolean, **always present**. `true` for transient or contended
+  failures where retrying the same command unchanged could succeed
+  (`index_busy`, `harness_clash`, a network/remote provider call, a git fetch);
+  `false` for deterministic failures (a malformed manifest, an unknown catalog,
+  a strict-mode verdict).
+- `remediation` — the coarse `tome` command that fixes this class of failure,
+  when a single one exists (e.g. embedder drift → `tome reindex --force`,
+  `plugin_not_converted` → `tome plugin convert`). **Omitted entirely** when
+  there is no single fix command. It is always a static `tome …` command hint —
+  it never contains a path, credential, or other instance-specific value (those
+  stay in `message`).
+
+Branch on `retryable` / `remediation` rather than string-matching `message`:
+
+```sh
+tome query "…" --json 2>err.json || {
+  jq -e '.error.retryable' err.json >/dev/null && echo "will retry"
+  fix=$(jq -r '.error.remediation // empty' err.json); [ -n "$fix" ] && echo "run: $fix"
+}
+```
+
+The same `category` / `retryable` / `remediation` triple is attached to the MCP
+tool error `data` payload (alongside its `code`), so an agent driving Tome over
+MCP branches on the identical structured data.
+
 Code `10` is special: it is not a failure class but a **health verdict** emitted
 by `tome status` and `tome doctor` (see [Health verdicts](#health-verdicts-status--doctor)
 below). It is never carried by the `--json` *error* envelope's `category`.

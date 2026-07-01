@@ -45,19 +45,39 @@ pub fn write_json<T: Serialize + ?Sized>(value: &T) -> Result<(), TomeError> {
 
 /// `--json` error record schema (matches data-model.md §6). Always writes to
 /// stderr — errors never appear on stdout.
+///
+/// #296: `retryable` + `remediation` are appended (never reorder the existing
+/// fields — the envelope is byte-pinned). Both derive from the closed
+/// [`ErrorCategory`](crate::error::ErrorCategory) SSOT — the SAME accessors the
+/// MCP tool `data` payload uses — so an agent branches on structured data rather
+/// than regexing the English `message`. `retryable` is always present;
+/// `remediation` is omitted entirely when the category has no single fix
+/// command (`skip_serializing_if`), so error records that never had a fix keep
+/// their exact prior shape apart from the always-present `retryable` bool.
 #[derive(Debug, Serialize)]
 pub struct ErrorRecord<'a> {
     pub category: &'a str,
     pub exit_code: i32,
     pub message: String,
+    /// Whether retrying the same operation unchanged could plausibly succeed
+    /// (transient/contended failures — see [`ErrorCategory::retryable`]).
+    pub retryable: bool,
+    /// The coarse `tome` command that fixes this failure class, if one exists
+    /// (see [`ErrorCategory::remediation`]). Omitted when `None`. Never carries
+    /// a credential or instance-specific secret (it is a `&'static str`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 impl<'a> ErrorRecord<'a> {
     pub fn from_error(err: &'a TomeError) -> Self {
+        let category = err.category();
         Self {
-            category: err.category().as_str(),
+            category: category.as_str(),
             exit_code: err.exit_code(),
             message: format!("{}", err),
+            retryable: category.retryable(),
+            remediation: category.remediation().map(str::to_owned),
         }
     }
 }
