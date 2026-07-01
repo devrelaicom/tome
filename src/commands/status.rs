@@ -760,6 +760,29 @@ fn render_panel(report: &StatusReport) -> Vec<String> {
         lines.push(format!("{} ~/.tome/config.toml", key("")));
     }
 
+    // Issue #283: fresh-install onboarding. When no catalog is enrolled, a first
+    // run reads as either a bare `[fail]` (models not downloaded → Unhealthy) or
+    // a silent "healthy with zeros". Render a distinct, friendly "Getting
+    // started" block pointing at the real first-run flow (`tome catalog add` →
+    // `tome plugin enable` → `tome harness use`) so the install reads as "here's
+    // how to begin". HUMAN-mode only — `render_panel` feeds the human emitter;
+    // `--json` goes through `write_json` and is unaffected (the machine fields
+    // `catalogs_enrolled` / `entries` already carry this state for scripting).
+    if report.catalogs_enrolled == 0 {
+        lines.push(String::new());
+        lines.push(colour::dim("Getting started"));
+        lines.push(colour::bold("Not set up yet — start with:"));
+        lines.push(format!(
+            "  1. {}",
+            colour::label("tome catalog add <source>")
+        ));
+        lines.push(format!(
+            "  2. {}",
+            colour::label("tome plugin enable <catalog>/<plugin>")
+        ));
+        lines.push(format!("  3. {}", colour::label("tome harness use <name>")));
+    }
+
     lines.push(String::new());
 
     lines.push(format!("{} {}", key("Overall:"), overall));
@@ -1193,5 +1216,63 @@ mod harness_mcp_status_tests {
         assert_eq!(mcp_state_glyph("unverified"), "[unverified]");
         assert_eq!(mcp_state_glyph("drift"), "[drift]");
         assert_eq!(mcp_state_glyph("broken"), "[broken]");
+    }
+
+    /// Issue #283: with no catalogs enrolled, the human panel renders the
+    /// "Getting started" onboarding block naming the real first-run flow.
+    #[test]
+    fn panel_renders_onboarding_when_no_catalogs() {
+        let report = base_report(Vec::new()); // catalogs_enrolled == 0
+        let panel = render_panel(&report).join("\n");
+        assert!(
+            panel.contains("Getting started"),
+            "onboarding header missing: {panel}",
+        );
+        assert!(
+            panel.contains("Not set up yet"),
+            "onboarding call-to-action missing: {panel}",
+        );
+        // The three real first-run steps, in order.
+        assert!(
+            panel.contains("tome catalog add"),
+            "step 1 missing: {panel}",
+        );
+        assert!(
+            panel.contains("tome plugin enable"),
+            "step 2 missing: {panel}",
+        );
+        assert!(
+            panel.contains("tome harness use"),
+            "step 3 missing: {panel}",
+        );
+    }
+
+    /// Issue #283: a set-up install (>=1 catalog enrolled) does NOT render the
+    /// onboarding block — the nudge is scoped to the not-set-up state only.
+    #[test]
+    fn panel_omits_onboarding_when_catalogs_present() {
+        let mut report = base_report(Vec::new());
+        report.catalogs_enrolled = 2;
+        let panel = render_panel(&report).join("\n");
+        assert!(
+            !panel.contains("Getting started"),
+            "onboarding block must be absent once set up: {panel}",
+        );
+        assert!(
+            !panel.contains("Not set up yet"),
+            "onboarding call-to-action must be absent once set up: {panel}",
+        );
+    }
+
+    /// Issue #283: the onboarding line is HUMAN-only. Serialising the report
+    /// (the `--json` path) never emits any onboarding text — scripting reads the
+    /// existing machine fields (`catalogs_enrolled`, `entries`) instead.
+    #[test]
+    fn onboarding_is_absent_from_json() {
+        let json = serde_json::to_string(&base_report(Vec::new())).unwrap();
+        assert!(
+            !json.contains("Getting started") && !json.contains("Not set up yet"),
+            "onboarding text must not leak into --json; got: {json}",
+        );
     }
 }

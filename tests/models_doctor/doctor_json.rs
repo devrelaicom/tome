@@ -118,9 +118,64 @@ fn doctor_json_shape_is_pinned_on_healthy_install() {
         v["overall"],
     );
 
-    // suggested_fixes is an array; on a healthy install it's empty.
-    assert!(v["suggested_fixes"].is_array());
-    assert_eq!(v["suggested_fixes"].as_array().unwrap().len(), 0);
+    // suggested_fixes is an array. Issue #283: on a fresh install with no
+    // catalogs (this test), the only fixes are the informational onboarding
+    // nudges — every one `subsystem == "onboarding"` and non-auto-fixable — so
+    // the ADDITIVE guidance appears in `--json` without any genuine repair. A
+    // set-up install's JSON is unchanged (no onboarding nudges) — covered by
+    // `doctor_json_set_up_install_has_no_onboarding_fixes` below.
+    let fixes = v["suggested_fixes"].as_array().unwrap();
+    assert!(
+        !fixes.is_empty(),
+        "fresh install should surface onboarding guidance in --json",
+    );
+    assert!(
+        fixes
+            .iter()
+            .all(|f| f["subsystem"] == "onboarding" && f["auto_fixable"] == false),
+        "every fresh-install fix must be a non-auto-fixable onboarding nudge: {fixes:?}",
+    );
+    assert!(
+        fixes.iter().any(|f| f["command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("tome catalog add")),
+        "onboarding must point at `tome catalog add`: {fixes:?}",
+    );
+}
+
+/// Issue #283: once a catalog is enrolled, the `tome catalog add` onboarding
+/// nudge no longer appears in `--json` — confirming the nudges are scoped to
+/// the not-set-up state (the machine wire is unchanged for scripting once set
+/// up). Uses `catalog add` only (no `plugin enable`, which would need real
+/// embedding); the fully-set-up "no nudges at all" case has library-API
+/// coverage in `models_doctor/doctor.rs`.
+#[test]
+fn doctor_json_catalog_enrolled_drops_catalog_onboarding_nudge() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+
+    let fix = Fixture::build_sample();
+    let add = env
+        .cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "catalog add: {:?}", add.status.code());
+
+    let out = env.cmd().args(["--json", "doctor"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).expect("doctor --json parses");
+    let fixes = v["suggested_fixes"].as_array().unwrap();
+    assert!(
+        !fixes.iter().any(|f| f["subsystem"] == "onboarding"
+            && f["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("tome catalog add")),
+        "with a catalog enrolled, the `tome catalog add` nudge must be gone: {fixes:?}",
+    );
 }
 
 #[test]

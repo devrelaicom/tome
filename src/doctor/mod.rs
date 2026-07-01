@@ -330,6 +330,22 @@ pub fn assemble_report(
         });
     }
 
+    // Issue #283: fresh-install onboarding nudges. Read-only, derived from the
+    // already-assembled workspace stats + effective harness list. Additive per
+    // not-set-up condition; NONE for a fully set-up install. `Onboarding` fixes
+    // are informational (excluded from the `--fix` exit-75 gate), so they never
+    // change the exit code. Appended AFTER the real subsystem fixes so genuine
+    // repairs sort first.
+    let harness_configured = effective_harness_list
+        .as_ref()
+        .is_some_and(|l| !l.harnesses.is_empty());
+    push_onboarding_fixes(
+        &mut suggested_fixes,
+        workspace.catalogs,
+        workspace.plugins_enabled,
+        harness_configured,
+    );
+
     // Phase 8 cutover surfaces (read-only). The migration of any legacy model
     // `manifest.json` runs under `--fix` (in the command layer); the report
     // here only surfaces what would be migrated / converted.
@@ -420,6 +436,28 @@ pub(crate) fn reappend_corrupt_index_fix(
             .suggested_fixes
             .push(corrupt_index_fix(ci, active_is_remote));
     }
+}
+
+/// Issue #283: re-append the fresh-install onboarding nudges to
+/// `report.suggested_fixes` from the report's own workspace + effective-harness
+/// state. Called by the `--fix` command path AFTER `fixes::re_assemble` (which
+/// rebuilds `suggested_fixes` via the 8-arg SSOT that does not know about
+/// onboarding), mirroring `reappend_corrupt_index_fix`. `doctor --fix` never
+/// enrols a catalog / enables a plugin / configures a harness — those are user
+/// product decisions — so a still-not-set-up install keeps its guidance through
+/// `--fix`. `Onboarding` fixes are excluded from the exit-75 gate, so re-adding
+/// them does not change the exit code.
+pub(crate) fn reappend_onboarding_fixes(report: &mut DoctorReport) {
+    let harness_configured = report
+        .effective_harness_list
+        .as_ref()
+        .is_some_and(|l| !l.harnesses.is_empty());
+    push_onboarding_fixes(
+        &mut report.suggested_fixes,
+        report.workspace.catalogs,
+        report.workspace.plugins_enabled,
+        harness_configured,
+    );
 }
 
 /// The cost-aware corrupt-remote-index suggested fix (FR-017). A BUNDLED-local
@@ -1135,6 +1173,61 @@ fn build_suggested_fixes(
     out
 }
 
+/// Issue #283: append fresh-install onboarding nudges to `out` for each
+/// not-set-up condition that holds. These are INFORMATIONAL (`auto_fixable:
+/// false`) `Subsystem::Onboarding` entries — a fresh install is not "broken",
+/// so they render in the "Suggested fixes" block to guide a first-run user but
+/// are excluded from the `--fix` remaining-manual-fixes gate (see
+/// [`fixes::has_remaining_manual_fixes`]), so they never flip a pristine
+/// install into a spurious exit-75 / health-code failure.
+///
+/// The three conditions mirror the real first-run happy path:
+/// `tome catalog add` → `tome plugin enable` → `tome harness use`. They are
+/// ADDITIVE — a partially-set-up install (a catalog but no enabled plugins)
+/// still gets the relevant nudge. A fully-set-up install (catalog + plugins +
+/// harness) gets NONE, so its `--json`/human output is unchanged.
+///
+/// Shared by `assemble_report` (initial pass) and the command layer's
+/// re-append after `fixes::re_assemble` (which rebuilds `suggested_fixes` via
+/// the 8-arg SSOT that doesn't know about onboarding), mirroring the
+/// `reappend_corrupt_index_fix` / `apply_config_finding` discipline so the
+/// nudges persist through `--fix`.
+pub(crate) fn push_onboarding_fixes(
+    out: &mut Vec<SuggestedFix>,
+    catalogs_enrolled: u32,
+    plugins_enabled: u32,
+    harness_configured: bool,
+) {
+    if catalogs_enrolled == 0 {
+        out.push(SuggestedFix {
+            subsystem: Subsystem::Onboarding,
+            diagnosis: "no catalogs enrolled — Tome has nothing to index yet".to_owned(),
+            command: "tome catalog add <source>".to_owned(),
+            auto_fixable: false,
+        });
+    } else if plugins_enabled == 0 {
+        // Only nudge toward enabling once a catalog exists (there is nothing to
+        // enable from otherwise). `catalog add` above already points the way on
+        // a truly pristine install.
+        out.push(SuggestedFix {
+            subsystem: Subsystem::Onboarding,
+            diagnosis: "catalogs enrolled but no plugins enabled — nothing is indexed for search"
+                .to_owned(),
+            command: "tome plugin list  # then `tome plugin enable <catalog>/<plugin>`".to_owned(),
+            auto_fixable: false,
+        });
+    }
+    if !harness_configured {
+        out.push(SuggestedFix {
+            subsystem: Subsystem::Onboarding,
+            diagnosis: "no harness configured — Tome is not wired into an agentic coding tool yet"
+                .to_owned(),
+            command: "tome harness use <name>  # e.g. claude-code, cursor, codex".to_owned(),
+            auto_fixable: false,
+        });
+    }
+}
+
 fn model_fix(
     subsystem: Subsystem,
     h: &crate::commands::status::ModelHealth,
@@ -1269,5 +1362,141 @@ mod tests {
             DoctorClassification::Ok,
             "with the corrupt-index extinguished the install must classify Ok (exit 0)",
         );
+    }
+
+    /// Issue #283: a pristine install (no catalogs, no plugins, no harness)
+    /// emits all three onboarding nudges — every one `Subsystem::Onboarding`
+    /// and non-auto-fixable — pointing at the real first-run flow.
+    #[test]
+    fn onboarding_fixes_emitted_for_fresh_install() {
+        let mut out = Vec::new();
+        push_onboarding_fixes(&mut out, 0, 0, false);
+        assert_eq!(out.len(), 2, "pristine install: catalog + harness nudge");
+        assert!(out.iter().all(|f| f.subsystem == Subsystem::Onboarding));
+        assert!(out.iter().all(|f| !f.auto_fixable));
+        assert!(out.iter().any(|f| f.command.contains("tome catalog add")));
+        assert!(out.iter().any(|f| f.command.contains("tome harness use")));
+    }
+
+    /// Issue #283: the plugin-enable nudge only appears once a catalog exists
+    /// (there is nothing to enable from before that).
+    #[test]
+    fn onboarding_plugin_nudge_gated_on_catalog_present() {
+        let mut out = Vec::new();
+        push_onboarding_fixes(&mut out, 1, 0, true);
+        assert_eq!(out.len(), 1, "catalog present, no plugins, harness set");
+        assert!(out[0].command.contains("tome plugin"));
+        assert_eq!(out[0].subsystem, Subsystem::Onboarding);
+    }
+
+    /// Issue #283: a fully set-up install (catalog + plugins + harness) gets NO
+    /// onboarding nudges, so its output/JSON is unchanged.
+    #[test]
+    fn onboarding_fixes_absent_when_fully_set_up() {
+        let mut out = Vec::new();
+        push_onboarding_fixes(&mut out, 2, 3, true);
+        assert!(
+            out.is_empty(),
+            "set-up install must get no onboarding nudges"
+        );
+    }
+
+    /// Issue #283: `has_remaining_manual_fixes` excludes `Subsystem::Onboarding`
+    /// so onboarding nudges never flip a `--fix` run into exit 75. A genuine
+    /// non-auto-fixable fix still counts.
+    #[test]
+    fn onboarding_fixes_excluded_from_manual_fix_gate() {
+        use crate::doctor::fixes::has_remaining_manual_fixes;
+
+        let mut report = minimal_report();
+        // Only onboarding nudges present → not "remaining manual".
+        push_onboarding_fixes(&mut report.suggested_fixes, 0, 0, false);
+        assert!(
+            !has_remaining_manual_fixes(&report),
+            "onboarding-only fixes must not count as remaining manual work",
+        );
+
+        // A real non-auto-fixable fix DOES count, even alongside onboarding.
+        report.suggested_fixes.push(SuggestedFix {
+            subsystem: Subsystem::Drift,
+            diagnosis: "drift".to_owned(),
+            command: "tome reindex --force".to_owned(),
+            auto_fixable: false,
+        });
+        assert!(
+            has_remaining_manual_fixes(&report),
+            "a genuine non-auto-fixable fix must still count",
+        );
+    }
+
+    /// Build a minimal `DoctorReport` for gate tests. Mirrors the byte-stable
+    /// minimal-report shape; only the fields the gate reads matter here.
+    fn minimal_report() -> DoctorReport {
+        use crate::workspace::{ScopeKind, WorkspaceInfo, scope::ScopeSource};
+        DoctorReport {
+            tome_version: "0".to_owned(),
+            workspace: WorkspaceInfo {
+                scope: ScopeKind::Global,
+                path: None,
+                source: ScopeSource::GlobalFallback,
+                catalogs: 0,
+                plugins_total: 0,
+                plugins_enabled: 0,
+                skills_indexed: 0,
+                schema_version: None,
+                embedder: None,
+                enrolled_catalogs: Vec::new(),
+                enabled_plugins: Vec::new(),
+                bound_projects: Vec::new(),
+                summary_cache: None,
+                plugin_details: None,
+            },
+            project_binding: None,
+            embedder: ok_model(),
+            reranker: ok_model(),
+            summariser: ok_model(),
+            index: IndexHealth {
+                present: false,
+                schema_version: None,
+                plugins_enabled: 0,
+                skills_indexed: 0,
+                size_bytes: 0,
+                integrity_ok: true,
+            },
+            drift: DriftStatus::None,
+            catalogs: Vec::new(),
+            workspace_registry: report::WorkspaceRegistryStatus {
+                present: false,
+                tracked: 0,
+            },
+            harnesses: Vec::new(),
+            effective_harness_list: None,
+            harness_rules: Vec::new(),
+            harness_mcp: Vec::new(),
+            detected_uninstalled_harnesses: Vec::new(),
+            prompts: None,
+            orphan_data_dirs: None,
+            entry_counts: None,
+            hooks: None,
+            guardrails: None,
+            agents: None,
+            unrepresented_agents: None,
+            privilege_escalation: None,
+            personas: None,
+            legacy_model_manifests: Vec::new(),
+            unconverted_plugins: Vec::new(),
+            meta_skills: Vec::new(),
+            telemetry: None,
+            providers: Vec::new(),
+            model_registry: report::ModelRegistryReport {
+                source: "baked".to_owned(),
+                fetched_at: "0".to_owned(),
+                model_count: 0,
+                override_corrupt: false,
+            },
+            hook_translation: None,
+            overall: DoctorClassification::Ok,
+            suggested_fixes: Vec::new(),
+        }
     }
 }

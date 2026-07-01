@@ -598,3 +598,62 @@ fn status_human_plain_is_grouped_and_labeled() {
     // No box-drawing art when piped.
     assert!(!s.contains('┌'));
 }
+
+/// Issue #283: on a fresh install (no catalogs enrolled), `tome status` human
+/// output renders the "Getting started" onboarding block pointing at the real
+/// first-run flow — so the install reads as "here's how to begin" instead of a
+/// silent "healthy with zeros" (or a bare `[fail]` before models exist). This
+/// is the E2E complement to the `render_panel` unit tests.
+#[test]
+fn status_human_shows_onboarding_when_no_catalogs() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    // Models present so the install is otherwise-healthy (isolates the
+    // no-catalog onboarding case from the models-missing failure).
+    crate::common::fabricate_all_registry_models(&paths);
+
+    let out = env.cmd().args(["status"]).output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("Getting started"),
+        "onboarding header missing on fresh install; got:\n{s}",
+    );
+    assert!(
+        s.contains("Not set up yet"),
+        "onboarding call-to-action missing; got:\n{s}",
+    );
+    assert!(s.contains("tome catalog add"), "step 1 missing; got:\n{s}");
+    assert!(
+        s.contains("tome plugin enable"),
+        "step 2 missing; got:\n{s}"
+    );
+    assert!(s.contains("tome harness use"), "step 3 missing; got:\n{s}");
+}
+
+/// Issue #283: the onboarding line is HUMAN-only. `--json status` on the same
+/// fresh install carries NO onboarding text — scripting reads the machine
+/// fields (`catalogs_enrolled`, `entries`) instead, which stay byte-stable.
+#[test]
+fn status_json_has_no_onboarding_text() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    let out = env.cmd().args(["--json", "status"]).output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !s.contains("Getting started") && !s.contains("Not set up yet"),
+        "onboarding text must not appear in --json; got:\n{s}",
+    );
+    // The machine field carrying the same state is still present.
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("parse JSON");
+    assert_eq!(v["catalogs_enrolled"], 0);
+}

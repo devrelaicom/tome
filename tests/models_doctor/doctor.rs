@@ -69,8 +69,99 @@ fn assemble_with_models_and_no_catalogs_reports_ok() {
     let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
     assert_eq!(report.embedder.state, "ok");
     assert_eq!(report.reranker.state, "ok");
+    // A fresh install stays Ok (models present; not "broken") → exit 0.
     assert_eq!(report.overall, DoctorClassification::Ok);
-    assert!(report.suggested_fixes.is_empty());
+    // Issue #283: the ONLY fixes on a fresh install are the informational
+    // onboarding nudges — every one `onboarding` + non-auto-fixable — so a
+    // first-run `tome doctor` renders actionable setup guidance instead of a
+    // silent "healthy with zeros".
+    assert!(
+        !report.suggested_fixes.is_empty(),
+        "fresh install should surface onboarding guidance",
+    );
+    assert!(
+        report
+            .suggested_fixes
+            .iter()
+            .all(|f| f.subsystem == "onboarding" && !f.auto_fixable),
+        "every fresh-install fix must be a non-auto-fixable onboarding nudge: {:?}",
+        report.suggested_fixes,
+    );
+    // The catalog nudge names the real first-run entry point.
+    assert!(
+        report
+            .suggested_fixes
+            .iter()
+            .any(|f| f.command.contains("tome catalog add")),
+        "onboarding must point at `tome catalog add`",
+    );
+    // Onboarding nudges do NOT count as remaining manual work (exit-75 gate).
+    assert!(
+        !doctor::fixes::has_remaining_manual_fixes(&report),
+        "onboarding-only fixes must not trip the --fix exit-75 gate",
+    );
+}
+
+/// Issue #283: a set-up install (catalog enrolled + plugin enabled) does NOT
+/// surface any onboarding nudges — the guidance is scoped to the not-set-up
+/// state, so a healthy set-up install's report/JSON is unchanged.
+#[test]
+fn assemble_set_up_install_has_no_onboarding_fixes() {
+    use crate::common::{
+        config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked, lifecycle_paths,
+    };
+    use tome::commands::plugin::registry_seeds;
+    use tome::embedding::stub::StubEmbedder;
+    use tome::plugin::PluginId;
+    use tome::plugin::lifecycle::{self, LifecycleDeps};
+
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+    let home = empty_home();
+
+    // Enrol a catalog + enable a plugin so catalogs_enrolled >= 1 and
+    // plugins_enabled >= 1.
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
+    let embedder = StubEmbedder::new();
+    let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+        config: &config,
+        embedder: &embedder,
+        embedder_seed,
+        reranker_seed,
+        summariser_seed,
+        allow_model_download: false,
+    };
+    lifecycle::enable(&id, &deps).expect("enable alpha");
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    assert!(report.workspace.catalogs >= 1, "catalog should be enrolled");
+    assert!(
+        report.workspace.plugins_enabled >= 1,
+        "a plugin should be enabled",
+    );
+    // No catalog / no plugin nudges. (A harness nudge may still appear because
+    // no harness is configured in this bare workspace — that's correct and
+    // additive; assert only the catalog/plugin nudges are absent.)
+    assert!(
+        !report
+            .suggested_fixes
+            .iter()
+            .any(|f| f.subsystem == "onboarding"
+                && (f.command.contains("tome catalog add") || f.command.contains("tome plugin"))),
+        "a set-up install must not nudge to add a catalog or enable a plugin: {:?}",
+        report.suggested_fixes,
+    );
 }
 
 #[test]
