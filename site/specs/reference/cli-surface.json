@@ -29,6 +29,7 @@
           "--verbose"
         ],
         "convert": [
+          "--allow",
           "--dry-run",
           "--force",
           "--from",
@@ -78,6 +79,7 @@
           "--verbose"
         ],
         "convert": [
+          "--allow",
           "--dry-run",
           "--force",
           "--from",
@@ -238,6 +240,7 @@
           "--verbose"
         ],
         "convert": [
+          "--allow",
           "--dry-run",
           "--force",
           "--from",

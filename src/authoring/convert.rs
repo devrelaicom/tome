@@ -44,6 +44,11 @@ pub struct ConvertConfig {
     pub new_name: Option<String>,
     /// `--strict`: abort (writing nothing) on anything Tome cannot represent.
     pub strict: bool,
+    /// `--allow <rule-id>` (repeatable): rule ids demoted out of the strict
+    /// blocking set. An allowed rule still emits its normal warning/diagnostic;
+    /// it just no longer aborts `--strict`. An id that isn't strict-blocking (or
+    /// doesn't exist) is a harmless no-op. Only consulted when `strict` is set.
+    pub allow: Vec<String>,
     /// `--force`: overwrite colliding files only.
     pub force: bool,
     /// `--dry-run`: compute the plan; write nothing.
@@ -71,10 +76,11 @@ pub struct ConvertOutcome {
     /// Files written, relative to `target` (or planned, under `--dry-run`).
     pub written: Vec<PathBuf>,
     pub dry_run: bool,
-    /// Under `--dry-run --strict`, the message of the first unrepresentable
-    /// feature that WOULD abort a real run — so the plan is still reported and
-    /// the caller can surface the non-zero verdict (`Some` only when both
-    /// `--dry-run` and `--strict` are set and a blocking diagnostic was found).
+    /// Under `--dry-run --strict`, an aggregate message naming the COUNT and the
+    /// distinct blocking rule-ids that WOULD abort a real run — so the plan is
+    /// still reported and the caller can surface the non-zero verdict (`Some`
+    /// only when both `--dry-run` and `--strict` are set and, after `--allow`,
+    /// at least one blocking diagnostic remained).
     pub strict_blocked: Option<String>,
 }
 
@@ -126,9 +132,12 @@ pub fn run(source_root: &Path, cfg: &ConvertConfig) -> Result<ConvertOutcome, To
     // reported (under different rule ids) by reading the SOURCE, not the output.
     let report = lint::run(&artifact, &lint::rules::for_convert());
 
-    // The `--strict` verdict: the first unrepresentable feature, if any.
+    // The `--strict` verdict: ALL remaining blocking diagnostics (after
+    // applying `--allow`), summarized into one message naming the count and the
+    // distinct blocking rule-ids — so the user knows exactly what to `--allow`.
     let strict_blocked = if cfg.strict {
-        first_strict_blocking(&report).map(|d| d.message.clone())
+        let blocking = strict_blocking(&report, &cfg.allow);
+        (!blocking.is_empty()).then(|| strict_blocked_message(&blocking))
     } else {
         None
     };
@@ -244,17 +253,49 @@ fn set_artifact_name(artifact: &mut Artifact, name: &str) {
     }
 }
 
-/// The first diagnostic that represents content Tome cannot faithfully carry —
-/// what `--strict` aborts on. The benign drops (`Info`-level dropped fields,
-/// the defaulted-version warning) are intentionally NOT in this set: they
-/// produce a valid conversion. The genuinely-lossy ones are: unsupported
-/// components/manifest fields, lossy agent fields, dropped tool restrictions,
-/// skipped entries, malformed MCP servers, and unmappable harness-isms.
-fn first_strict_blocking(report: &LintReport) -> Option<&Diagnostic> {
+/// Every diagnostic that represents content Tome cannot faithfully carry AND is
+/// not demoted by `--allow` — what `--strict` aborts on. The benign drops
+/// (`Info`-level dropped fields, the defaulted-version warning) are intentionally
+/// NOT in the fixed blocking set: they produce a valid conversion. The
+/// genuinely-lossy ones are: unsupported components/manifest fields, lossy agent
+/// fields, dropped tool restrictions, skipped entries, malformed MCP servers,
+/// and unmappable harness-isms.
+///
+/// A diagnostic is strict-blocking IFF its rule id is in the fixed set AND that
+/// id is not present in `allow`. An `allow` entry that names a non-blocking (or
+/// unknown) rule id is a harmless no-op — it simply matches nothing here.
+fn strict_blocking<'a>(report: &'a LintReport, allow: &[String]) -> Vec<&'a Diagnostic> {
     report
         .diagnostics
         .iter()
-        .find(|d| is_strict_blocking(d.rule_id))
+        .filter(|d| is_strict_blocking(d.rule_id) && !allow.iter().any(|a| a == d.rule_id))
+        .collect()
+}
+
+/// Summarize the strict-blocking diagnostics into one message: the total count
+/// plus the distinct blocking rule-ids (so the user knows exactly what to
+/// `--allow`). Rule-ids are listed in first-seen order, de-duplicated. The
+/// caller has already checked the slice is non-empty.
+fn strict_blocked_message(blocking: &[&Diagnostic]) -> String {
+    let mut distinct: Vec<&str> = Vec::new();
+    for d in blocking {
+        if !distinct.contains(&d.rule_id) {
+            distinct.push(d.rule_id);
+        }
+    }
+    let ids = distinct.join(", ");
+    let noun = if blocking.len() == 1 {
+        "feature"
+    } else {
+        "features"
+    };
+    format!(
+        "{} unrepresentable {} across {} rule(s): {} — pass `--allow <rule-id>` per rule to tolerate an intentional drop",
+        blocking.len(),
+        noun,
+        distinct.len(),
+        ids,
+    )
 }
 
 fn is_strict_blocking(rule_id: &str) -> bool {
@@ -340,5 +381,101 @@ mod tests {
     fn source_basename_falls_back() {
         assert_eq!(source_basename(Path::new("/a/b/my-plugin")), "my-plugin");
         assert_eq!(source_basename(Path::new("/")), "plugin");
+    }
+
+    use crate::authoring::ir::{Diagnostic, Severity};
+    use crate::authoring::lint::LintReport;
+
+    fn report_with(diags: Vec<Diagnostic>) -> LintReport {
+        let mut r = LintReport::default();
+        for d in diags {
+            match d.severity {
+                Severity::Error => r.errors += 1,
+                Severity::Warning => r.warnings += 1,
+                Severity::Info => r.infos += 1,
+            }
+            r.diagnostics.push(d);
+        }
+        r
+    }
+
+    #[test]
+    fn strict_blocking_collects_all_and_respects_allow() {
+        use crate::authoring::import::rule as cc;
+        let report = report_with(vec![
+            Diagnostic::warning(cc::UNSUPPORTED_COMPONENT, "themes/ dropped"),
+            Diagnostic::warning(cc::TOOL_RESTRICTION_DROPPED, "allowed-tools dropped"),
+            // A benign drop — never blocks.
+            Diagnostic::info(cc::DROPPED_MANIFEST_FIELD, "displayName dropped"),
+        ]);
+
+        // No allow: both genuinely-lossy findings block (the benign one does not).
+        let all = strict_blocking(&report, &[]);
+        assert_eq!(all.len(), 2, "counts ALL blocking findings, not just first");
+
+        // Allow the component rule: only the tool-restriction one remains.
+        let allowed = strict_blocking(&report, &[cc::UNSUPPORTED_COMPONENT.to_owned()]);
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].rule_id, cc::TOOL_RESTRICTION_DROPPED);
+
+        // Allow both blocking rule ids: nothing left to block.
+        let none = strict_blocking(
+            &report,
+            &[
+                cc::UNSUPPORTED_COMPONENT.to_owned(),
+                cc::TOOL_RESTRICTION_DROPPED.to_owned(),
+            ],
+        );
+        assert!(none.is_empty(), "all blocking rules demoted → no abort");
+    }
+
+    #[test]
+    fn allow_of_non_blocking_or_unknown_id_is_a_no_op() {
+        use crate::authoring::import::rule as cc;
+        let report = report_with(vec![Diagnostic::warning(
+            cc::UNSUPPORTED_COMPONENT,
+            "themes/ dropped",
+        )]);
+        // Allowing a benign rule id and a made-up one changes nothing.
+        let blocking = strict_blocking(
+            &report,
+            &[
+                cc::DROPPED_MANIFEST_FIELD.to_owned(),
+                "convert/does-not-exist".to_owned(),
+            ],
+        );
+        assert_eq!(blocking.len(), 1);
+        assert_eq!(blocking[0].rule_id, cc::UNSUPPORTED_COMPONENT);
+    }
+
+    #[test]
+    fn strict_blocked_message_reports_count_and_distinct_rule_ids() {
+        use crate::authoring::import::rule as cc;
+        let d1 = Diagnostic::warning(cc::UNSUPPORTED_COMPONENT, "themes/ dropped");
+        let d2 = Diagnostic::warning(cc::UNSUPPORTED_COMPONENT, "monitors/ dropped");
+        let d3 = Diagnostic::warning(cc::TOOL_RESTRICTION_DROPPED, "allowed-tools dropped");
+        let blocking = vec![&d1, &d2, &d3];
+        let msg = strict_blocked_message(&blocking);
+        // Count of findings (3) not distinct-rule count.
+        assert!(msg.contains('3'), "reports the finding count: {msg}");
+        // Both distinct rule-ids named, once each.
+        assert!(msg.contains(cc::UNSUPPORTED_COMPONENT), "{msg}");
+        assert!(msg.contains(cc::TOOL_RESTRICTION_DROPPED), "{msg}");
+        assert_eq!(
+            msg.matches(cc::UNSUPPORTED_COMPONENT).count(),
+            1,
+            "rule-id de-duplicated: {msg}"
+        );
+        // Actionable hint present.
+        assert!(msg.contains("--allow"), "{msg}");
+    }
+
+    #[test]
+    fn strict_blocked_message_singular_for_one_finding() {
+        use crate::authoring::import::rule as cc;
+        let d1 = Diagnostic::warning(cc::TOOL_RESTRICTION_DROPPED, "allowed-tools dropped");
+        let msg = strict_blocked_message(&[&d1]);
+        assert!(msg.contains("1 unrepresentable feature"), "{msg}");
+        assert!(!msg.contains("features"), "singular noun: {msg}");
     }
 }

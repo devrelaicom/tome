@@ -1088,6 +1088,13 @@ pub struct ConvertArgs {
     /// Abort (writing nothing) on anything Tome cannot represent.
     #[arg(long)]
     pub strict: bool,
+    /// Demote a rule id out of the `--strict` blocking set (repeatable:
+    /// `--allow convert/unsupported-component --allow convert/agent-lossy`). An
+    /// allowed rule still emits its normal warning; it just no longer aborts
+    /// `--strict`. Naming a non-blocking or unknown rule id is a harmless no-op.
+    /// Only meaningful together with `--strict`.
+    #[arg(long = "allow", value_name = "RULE-ID")]
+    pub allow: Vec<String>,
     /// Do not fetch the marketplace's remote-source plugins (`catalog convert`
     /// only); they are warned-and-skipped instead. The SOURCE argument itself
     /// may still be a remote clone.
