@@ -11,6 +11,18 @@
 //!   (`antigravity-cli` → `gemini`) and opt-in targets (`generic`) by name work.
 //! - **`--all`** → every real `SUPPORTED_HARNESSES` module (NOT the opt-in
 //!   `generic` / `generic-op` targets). `--all` + names is a clap conflict.
+//! - **`--all --include-opt-in`** → the `--all` set PLUS every opt-in target
+//!   (`OPT_IN_TARGETS`: `generic` / `generic-op`). `--include-opt-in` requires
+//!   `--all` (clap `requires`), so passing it alone is a usage error.
+//!
+//! ## Opt-in-skip notice (issue #306)
+//!
+//! When `--all` runs WITHOUT `--include-opt-in` and opt-in targets exist that
+//! were therefore left unselected, `run` prints ONE human-only stderr note
+//! naming them and how to include them (mirroring the #302/#303 `note:` gating).
+//! It is suppressed under `--json` and never emitted on the MCP path (the MCP
+//! surface doesn't run `harness use`), and only fires when there is actually an
+//! unselected opt-in target — never when `--include-opt-in` swept them in.
 //!
 //! Alias resolution happens BEFORE dedupe (M5): `tome harness use
 //! antigravity-cli gemini` collapses to a SINGLE `gemini` configuration pass.
@@ -107,7 +119,11 @@ pub fn run(
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
-    let (report, first_error) = run_inner(args, scope, paths)?;
+    let RunInner {
+        report,
+        first_error,
+        skipped_opt_in,
+    } = run_inner(args, scope, paths)?;
 
     // Telemetry parity with the former single-name path: emit one
     // `tome.harness_action{Use}` per harness that configured successfully.
@@ -123,12 +139,37 @@ pub fn run(
         Mode::Json => write_json(&report)?,
     }
 
+    // Issue #306: after the (human) report, name the opt-in targets `--all`
+    // skipped so a "configure everything" run isn't silently partial. Human-only
+    // (mirrors the #302/#303 `note:` gating) → suppressed under `--json`; the
+    // list is empty unless `--all` ran without `--include-opt-in` AND unselected
+    // opt-in targets exist, so this is silent in every other invocation.
+    if mode == Mode::Human && !skipped_opt_in.is_empty() {
+        eprintln!(
+            "note: --all skipped opt-in targets: {} (pass --include-opt-in, or name them explicitly, to configure them)",
+            skipped_opt_in.join(", "),
+        );
+    }
+
     // Forward-progress: emit the full report FIRST (so partial progress is
     // visible), then surface the first failure's exit code.
     match first_error {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// The full outcome of [`run_inner`]: the emitted [`HarnessUseReport`], the
+/// first forward-progress failure (which sets the process exit code), and the
+/// opt-in targets `--all` skipped (issue #306 — drives the human-only note in
+/// [`run`], never serialised).
+#[doc(hidden)]
+pub struct RunInner {
+    pub report: HarnessUseReport,
+    pub first_error: Option<TomeError>,
+    /// Canonical names of the opt-in targets that exist but were NOT selected
+    /// (only ever non-empty for `--all` without `--include-opt-in`).
+    pub skipped_opt_in: Vec<String>,
 }
 
 /// Compute the full [`HarnessUseReport`] — selection resolution + the
@@ -139,22 +180,24 @@ pub fn run(
 /// proving the real `run → resolve_selection → configure_one → report` chain.
 ///
 /// Returns the report PLUS the first error captured by the forward-progress
-/// loop (so `run` can emit the report and still set the exit code). The
-/// `selection` resolution itself can fail loud (an unknown explicit name → 18,
-/// a `--scope project` with no project root → 2); those propagate via the
-/// outer `Result` (before any harness is touched).
+/// loop (so `run` can emit the report and still set the exit code) PLUS the
+/// opt-in targets `--all` skipped (issue #306). The `selection` resolution
+/// itself can fail loud (an unknown explicit name → 18, a `--scope project`
+/// with no project root → 2); those propagate via the outer `Result` (before
+/// any harness is touched).
 #[doc(hidden)]
 pub fn run_inner(
     args: HarnessUseArgs,
     scope: &ResolvedScope,
     paths: &Paths,
-) -> Result<(HarnessUseReport, Option<TomeError>), TomeError> {
+) -> Result<RunInner, TomeError> {
     let home = home_root()?;
 
     // 1. Resolve the selection set FIRST (alias-resolve → dedupe → order-
     //    preserve). An unknown explicit name fails loud here (exit 18) before
-    //    any settings edit.
-    let (selection, names) = resolve_selection(&args, &home)?;
+    //    any settings edit. `skipped_opt_in` names the opt-in targets `--all`
+    //    left out (issue #306) — empty in every other selection mode.
+    let (selection, names, skipped_opt_in) = resolve_selection(&args, &home)?;
 
     // 2. Resolve the effective scope then the target settings file path.
     //    Precedence: explicit --scope → [harness] default_scope in config → project.
@@ -193,23 +236,34 @@ pub fn run_inner(
         }
     }
 
-    Ok((HarnessUseReport { selection, results }, first_error))
+    Ok(RunInner {
+        report: HarnessUseReport { selection, results },
+        first_error,
+        skipped_opt_in,
+    })
 }
 
 /// Resolve the variadic / `--all` / detected selection into an ordered,
-/// deduped list of CANONICAL harness names plus the selection-mode label.
+/// deduped list of CANONICAL harness names, the selection-mode label, and the
+/// opt-in targets `--all` skipped (issue #306).
 ///
 /// - explicit names → each `resolve_alias`'d then validated via `lookup` (or
 ///   the effective-registry override). Aliases resolve BEFORE dedupe (M5), so
 ///   `antigravity-cli gemini` → one `gemini`. An unknown name → exit 18.
 /// - `--all` → every `SUPPORTED_HARNESSES` real module name (opt-in targets
-///   are not in that slice, so excluded).
+///   are not in that slice, so excluded); the excluded opt-in targets are
+///   returned as `skipped_opt_in` so the caller can note them.
+/// - `--all --include-opt-in` → the `--all` set PLUS every `OPT_IN_TARGETS`
+///   name (nothing skipped).
 /// - neither → every AUTO-DETECTED supported harness (opt-in targets are
 ///   inert-detect → excluded).
+///
+/// `skipped_opt_in` is non-empty ONLY in the `--all`-without-`--include-opt-in`
+/// case; every other mode returns an empty vec.
 fn resolve_selection(
     args: &HarnessUseArgs,
     home: &std::path::Path,
-) -> Result<(&'static str, Vec<String>), TomeError> {
+) -> Result<(&'static str, Vec<String>, Vec<String>), TomeError> {
     if !args.names.is_empty() {
         // Explicit names: alias-resolve → validate → order-preserving dedupe.
         let mut seen: Vec<String> = Vec::with_capacity(args.names.len());
@@ -228,13 +282,31 @@ fn resolve_selection(
                 seen.push(canonical);
             }
         }
-        Ok(("explicit", seen))
+        Ok(("explicit", seen, Vec::new()))
     } else if args.all {
         // `--all`: every real supported module (NOT the opt-in generics). Uses
         // the effective registry so a test override is honoured.
-        let names =
+        let mut names: Vec<String> =
             with_effective_modules(|mods| mods.iter().map(|m| m.name().to_string()).collect());
-        Ok(("all", names))
+
+        // The opt-in write targets `--all` excludes by default. `OPT_IN_TARGETS`
+        // is the ONE SSOT for the real-vs-opt-in partition, so this stays correct
+        // if the partition changes (e.g. goose is NOT here — it's detectable and
+        // already in `SUPPORTED_HARNESSES`, hence already in `--all`).
+        let opt_in: Vec<String> = crate::harness::OPT_IN_TARGETS
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect();
+
+        if args.include_opt_in {
+            // Fold the opt-in targets into the selection; nothing is skipped.
+            names.extend(opt_in);
+            Ok(("all", names, Vec::new()))
+        } else {
+            // Default `--all`: opt-in targets are left out — return them so the
+            // caller can print the #306 note.
+            Ok(("all", names, opt_in))
+        }
     } else {
         // Default: every auto-detected supported harness. Opt-in targets are
         // inert-detect, so they never surface here.
@@ -244,7 +316,7 @@ fn resolve_selection(
                 .map(|m| m.name().to_string())
                 .collect()
         });
-        Ok(("detected", names))
+        Ok(("detected", names, Vec::new()))
     }
 }
 

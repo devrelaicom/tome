@@ -37,6 +37,7 @@ fn use_unknown_harness_errors_with_exit_18() {
     let args = HarnessUseArgs {
         names: vec!["totally-not-a-harness".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
@@ -60,6 +61,7 @@ fn use_project_scope_without_project_errors_with_usage() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: false,
     };
@@ -85,6 +87,7 @@ fn use_global_scope_writes_global_settings_file() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
@@ -122,6 +125,7 @@ fn use_generic_op_global_scope_is_accepted() {
     let args = HarnessUseArgs {
         names: vec!["generic-op".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
@@ -151,6 +155,7 @@ fn use_workspace_scope_writes_workspace_settings_file() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Workspace),
         force: false,
     };
@@ -189,6 +194,7 @@ fn use_project_scope_writes_project_marker() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: false,
     };
@@ -236,6 +242,7 @@ fn use_with_force_true_propagates_to_sync_deps() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: true,
     };
@@ -283,6 +290,7 @@ fn use_idempotent_when_name_already_present_does_not_invoke_sync() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
@@ -315,6 +323,7 @@ fn use_global_scope_writes_config_harness_table() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };

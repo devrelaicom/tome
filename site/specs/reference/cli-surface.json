@@ -206,7 +206,9 @@
           "--verbose"
         ],
         "use": [
+          "--all",
           "--force",
+          "--include-opt-in",
           "--scope",
           "--verbose"
         ],
