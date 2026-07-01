@@ -166,6 +166,7 @@
           "--verbose"
         ],
         "list": [
+          "--absolute",
           "--verbose"
         ],
         "rename": [

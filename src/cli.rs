@@ -557,7 +557,11 @@ pub enum WorkspaceCommand {
     Init(WorkspaceInitArgs),
     /// List every workspace in the central registry with catalog,
     /// enabled-plugin, indexed-skill, bound-project counts plus
-    /// `last_used_at`.
+    /// `last_used_at`. The workspace resolved for the current directory
+    /// is marked in the `Cur` column (`*`). `Last used` renders as a
+    /// relative time by default; `--absolute` forces the RFC 3339
+    /// timestamp. `--json` carries a per-row `current` bool and always
+    /// emits the absolute timestamp.
     List(WorkspaceListArgs),
     /// Rename a workspace. Updates every bound project's marker
     /// `config.toml` atomically, renames `<root>/workspaces/<old>/` to
@@ -643,7 +647,12 @@ pub struct WorkspaceInitArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct WorkspaceListArgs {
-    // No subcommand-specific flags. `--json` is the global flag.
+    /// Render `Last used` as an absolute RFC 3339 timestamp
+    /// (e.g. `2026-06-28T10:23:11Z`) instead of the default relative
+    /// form (e.g. `2 days ago`). Human output only — `--json` always
+    /// emits the absolute unix-second timestamp regardless of this flag.
+    #[arg(long)]
+    pub absolute: bool,
 }
 
 #[derive(Debug, clap::Args)]

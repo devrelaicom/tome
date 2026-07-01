@@ -13,6 +13,7 @@
 pub mod atomic_dir;
 pub mod io;
 pub mod symlink_safe;
+pub mod time;
 
 pub use atomic_dir::{land_directory, land_directory_with_replace};
 pub use io::{
@@ -20,3 +21,4 @@ pub use io::{
     bounded_read, bounded_read_to_string,
 };
 pub use symlink_safe::refuse_symlinked_component;
+pub use time::relative_time;

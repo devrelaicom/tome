@@ -3,6 +3,10 @@
 //! Covers the bootstrap-not-yet path (no DB file → one synthetic
 //! `global` entry), the populated-registry path (multiple workspaces
 //! with distinct counts), and the JSON wire-shape byte-stability pin.
+//!
+//! Issue #300 adds: the row resolved for the current directory is flagged
+//! `current: true` (and no other), the `--json` `current` field, and the
+//! human relative/absolute `Last used` rendering.
 
 use crate::common::{lifecycle_paths, seed_workspace};
 use std::path::Path;
@@ -10,6 +14,7 @@ use tempfile::TempDir;
 use time::OffsetDateTime;
 use tome::commands::workspace::list::{WorkspaceListEntry, assemble};
 use tome::index::workspace_catalogs;
+use tome::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
 
 fn open_central(paths: &tome::paths::Paths) -> rusqlite::Connection {
     let (e, r, s) = tome::commands::plugin::registry_seeds();
@@ -25,11 +30,27 @@ fn open_central(paths: &tome::paths::Paths) -> rusqlite::Connection {
     .expect("open central DB")
 }
 
+/// A `ResolvedScope` resolving to `name` (the value the resolver would
+/// hand `list`). `source` is informational here — `list` only reads the
+/// resolved *name* to mark the active row.
+fn scope_for(name: &str, source: ScopeSource) -> ResolvedScope {
+    ResolvedScope {
+        scope: Scope(WorkspaceName::parse(name).unwrap()),
+        source,
+        project_root: None,
+    }
+}
+
+/// The `global` fallback scope (the common "nothing bound" default).
+fn global_scope() -> ResolvedScope {
+    ResolvedScope::global_fallback()
+}
+
 #[test]
 fn list_only_global_on_bootstrap_not_yet() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    let entries = assemble(&paths).expect("assemble");
+    let entries = assemble(&global_scope(), &paths).expect("assemble");
     assert_eq!(entries.len(), 1);
     let g = &entries[0];
     assert_eq!(g.name, "global");
@@ -38,6 +59,9 @@ fn list_only_global_on_bootstrap_not_yet() {
     assert_eq!(g.indexed_skills, 0);
     assert_eq!(g.bound_projects, 0);
     assert_eq!(g.last_used_at, 0);
+    // The `global` fallback resolves to `global`, so the synthetic row is
+    // the active one.
+    assert!(g.current, "global row is current under the global fallback");
 }
 
 #[test]
@@ -48,7 +72,7 @@ fn list_reports_seeded_global_after_bootstrap() {
     // Open central DB to trigger schema bootstrap (seeds `global`).
     let _ = open_central(&paths);
 
-    let entries = assemble(&paths).expect("assemble");
+    let entries = assemble(&global_scope(), &paths).expect("assemble");
     assert_eq!(entries.len(), 1);
     let g = &entries[0];
     assert_eq!(g.name, "global");
@@ -57,6 +81,7 @@ fn list_reports_seeded_global_after_bootstrap() {
         g.last_used_at > 0,
         "global should have non-zero last_used_at"
     );
+    assert!(g.current, "global row is current under the global fallback");
 }
 
 #[test]
@@ -75,7 +100,7 @@ fn list_two_workspaces_with_distinct_counts() {
         workspace_catalogs::insert(&conn, "extra", "c", "https://example.com/c", "v1").unwrap();
     }
 
-    let entries = assemble(&paths).expect("assemble");
+    let entries = assemble(&global_scope(), &paths).expect("assemble");
     assert_eq!(entries.len(), 2);
     // Alphabetical by name: extra, global.
     assert_eq!(entries[0].name, "extra");
@@ -95,12 +120,13 @@ fn list_json_wire_shape_is_byte_stable() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     // Bootstrap-not-yet → one synthetic `global` entry with all-zero
-    // counts and last_used_at = 0.
-    let entries = assemble(&paths).expect("assemble");
+    // counts and last_used_at = 0. Under the global fallback the row is
+    // `current: true`.
+    let entries = assemble(&global_scope(), &paths).expect("assemble");
     let json = serde_json::to_string(&entries).expect("serialise");
     assert_eq!(
         json,
-        r#"[{"name":"global","catalogs":0,"enabled_plugins":0,"indexed_skills":0,"bound_projects":0,"last_used_at":0}]"#,
+        r#"[{"name":"global","catalogs":0,"enabled_plugins":0,"indexed_skills":0,"bound_projects":0,"last_used_at":0,"current":true}]"#,
     );
 }
 
@@ -112,9 +138,62 @@ fn list_entries_are_sorted_alphabetically() {
     seed_workspace(&paths, "zeta");
     seed_workspace(&paths, "alpha");
 
-    let entries = assemble(&paths).expect("assemble");
+    let entries = assemble(&global_scope(), &paths).expect("assemble");
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, vec!["alpha", "global", "zeta"]);
+}
+
+/// Issue #300: exactly the resolved workspace's row is flagged `current`,
+/// and no other. Here the scope resolves to `alpha`, so only `alpha` is
+/// marked — `global` and `zeta` are not.
+#[test]
+fn list_marks_only_the_resolved_workspace_current() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    seed_workspace(&paths, "zeta");
+    seed_workspace(&paths, "alpha");
+
+    let scope = scope_for("alpha", ScopeSource::ProjectMarker);
+    let entries = assemble(&scope, &paths).expect("assemble");
+
+    let current: Vec<&str> = entries
+        .iter()
+        .filter(|e| e.current)
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(current, vec!["alpha"], "only the resolved row is current");
+
+    // Every other row is explicitly not current.
+    for e in &entries {
+        if e.name == "alpha" {
+            assert!(e.current, "alpha must be current");
+        } else {
+            assert!(!e.current, "{} must not be current", e.name);
+        }
+    }
+}
+
+/// Issue #300: a `--workspace zeta` style resolution marks `zeta`, not the
+/// `global` fallback — proving the marker follows the ACTUAL resolved name
+/// regardless of source.
+#[test]
+fn list_current_follows_the_resolved_name_not_global() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    seed_workspace(&paths, "zeta");
+
+    let scope = scope_for("zeta", ScopeSource::Flag);
+    let entries = assemble(&scope, &paths).expect("assemble");
+
+    let zeta = entries.iter().find(|e| e.name == "zeta").expect("zeta row");
+    let global = entries
+        .iter()
+        .find(|e| e.name == "global")
+        .expect("global row");
+    assert!(zeta.current, "zeta is the resolved workspace");
+    assert!(!global.current, "global is not the resolved workspace");
 }
 
 /// T-M6: a workspace seeded with bound projects + enabled plugins +
@@ -145,7 +224,7 @@ fn list_reports_non_zero_counts_for_active_workspace() {
     seed_bound_project_for_test(&paths, "active", &project_a);
     seed_bound_project_for_test(&paths, "active", &project_b);
 
-    let entries = assemble(&paths).expect("assemble");
+    let entries = assemble(&global_scope(), &paths).expect("assemble");
     let active = entries
         .iter()
         .find(|e| e.name == "active")
@@ -218,7 +297,7 @@ fn seed_bound_project_for_test(paths: &tome::paths::Paths, workspace_name: &str,
 fn list_entry_wire_struct_pins_field_order() {
     // Spot-check the field order of a single record. Combined with
     // list_json_wire_shape_is_byte_stable above, this fails fast if
-    // a contributor reorders the struct.
+    // a contributor reorders the struct. `current` is appended LAST.
     let entry = WorkspaceListEntry {
         name: "x".into(),
         catalogs: 0,
@@ -226,10 +305,37 @@ fn list_entry_wire_struct_pins_field_order() {
         indexed_skills: 0,
         bound_projects: 0,
         last_used_at: 0,
+        current: false,
     };
     let json = serde_json::to_string(&entry).unwrap();
     assert_eq!(
         json,
-        r#"{"name":"x","catalogs":0,"enabled_plugins":0,"indexed_skills":0,"bound_projects":0,"last_used_at":0}"#,
+        r#"{"name":"x","catalogs":0,"enabled_plugins":0,"indexed_skills":0,"bound_projects":0,"last_used_at":0,"current":false}"#,
+    );
+}
+
+/// Issue #300: `--json` carries the absolute unix-second timestamp
+/// UNCHANGED — the relative/absolute distinction is human-only, so a
+/// non-zero `last_used_at` serialises as the raw integer, never a relative
+/// string.
+#[test]
+fn list_json_last_used_stays_absolute_integer() {
+    let entry = WorkspaceListEntry {
+        name: "recent".into(),
+        catalogs: 0,
+        enabled_plugins: 0,
+        indexed_skills: 0,
+        bound_projects: 0,
+        last_used_at: 1_700_000_000,
+        current: true,
+    };
+    let json = serde_json::to_string(&entry).unwrap();
+    assert!(
+        json.contains("\"last_used_at\":1700000000"),
+        "--json must carry the absolute integer timestamp; got {json}",
+    );
+    assert!(
+        json.contains("\"current\":true"),
+        "--json must carry the current bool; got {json}",
     );
 }
