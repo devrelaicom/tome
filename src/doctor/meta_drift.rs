@@ -225,6 +225,7 @@ mod tests {
             scope: Scope(WorkspaceName::global()),
             source: ScopeSource::GlobalFallback,
             project_root: None,
+            overridden_project_marker: None,
         }
     }
 
@@ -233,6 +234,7 @@ mod tests {
             scope: Scope(WorkspaceName::global()),
             source: ScopeSource::ProjectMarker,
             project_root: Some(project_root.to_path_buf()),
+            overridden_project_marker: None,
         }
     }
 

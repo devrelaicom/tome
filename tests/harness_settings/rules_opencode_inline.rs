@@ -249,6 +249,7 @@ fn assert_doctor_sees_no_drift_after_sync(harnesses_toml: &str, expect_harnesses
         scope: Scope(fx.workspace.clone()),
         source: ScopeSource::ProjectMarker,
         project_root: Some(fx.project.clone()),
+        overridden_project_marker: None,
     };
     let report = doctor::assemble_report(&scope, &fx.paths, fx._home.path(), false)
         .expect("assemble doctor report");

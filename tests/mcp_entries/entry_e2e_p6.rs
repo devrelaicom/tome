@@ -169,6 +169,7 @@ fn workspace_startup_scope(workspace: &WorkspaceName) -> ResolvedScope {
         scope: Scope(workspace.clone()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 

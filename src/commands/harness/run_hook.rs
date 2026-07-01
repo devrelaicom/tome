@@ -3051,6 +3051,7 @@ mod tests {
             scope: Scope(workspace),
             source: ScopeSource::Flag,
             project_root: None,
+            overridden_project_marker: None,
         };
 
         // compute() reads the corrupt manifest, read_manifest() fails, .ok() → None,

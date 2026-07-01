@@ -353,6 +353,7 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
         scope: WsScope(WorkspaceName::global()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     };
     let update_err = catalog_update::run(
         CatalogUpdateArgs {

@@ -34,6 +34,7 @@ fn project_scope(project_root: PathBuf, ws_name: &str) -> ResolvedScope {
         scope: Scope(WorkspaceName::parse(ws_name).unwrap()),
         source: ScopeSource::ProjectMarker,
         project_root: Some(project_root),
+        overridden_project_marker: None,
     }
 }
 

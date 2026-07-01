@@ -152,6 +152,7 @@ fn global_resolved() -> ResolvedScope {
         scope: global_scope(),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 

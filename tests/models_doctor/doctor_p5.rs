@@ -83,6 +83,7 @@ fn prompts_surface_enumerates_with_collisions() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let report = tome::doctor::assemble_report(&scope, &fx.paths, home.path(), false).unwrap();
 
@@ -135,6 +136,7 @@ fn orphan_plugin_data_detected() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let report = tome::doctor::assemble_report(&scope, &fx.paths, home.path(), false).unwrap();
     let orphan_report = report
@@ -169,6 +171,7 @@ fn orphan_plugin_data_excludes_active_enrolment() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let report = tome::doctor::assemble_report(&scope, &fx.paths, home.path(), false).unwrap();
     let orphan_report = report.orphan_data_dirs.unwrap();
@@ -200,6 +203,7 @@ fn orphan_workspace_data_detected() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let report = tome::doctor::assemble_report(&scope, &fx.paths, home.path(), false).unwrap();
     let orphan_report = report.orphan_data_dirs.unwrap();
@@ -226,6 +230,7 @@ fn entry_counts_by_kind() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let report = tome::doctor::assemble_report(&scope, &fx.paths, home.path(), false).unwrap();
     let counts = report
@@ -268,6 +273,7 @@ fn pending_re_embedding_zero_when_no_files_touched() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let report = tome::doctor::assemble_report(&scope, &fx.paths, home.path(), false).unwrap();
     let counts = report
@@ -323,6 +329,7 @@ fn pending_re_embedding_count_matches_dirty_rows() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let report = tome::doctor::assemble_report(&scope, &fx.paths, home.path(), false).unwrap();
     let counts = report.entry_counts.unwrap();
@@ -401,6 +408,7 @@ fn doctor_phase5_surface_creates_no_dirs() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let _report = tome::doctor::assemble_report(&scope, &fx.paths, home.path(), false).unwrap();
 

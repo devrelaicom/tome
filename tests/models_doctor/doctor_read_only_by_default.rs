@@ -86,6 +86,7 @@ fn doctor_without_fix_does_not_mutate_root_or_project_trees() {
         scope: Scope(ws.clone()),
         source: ScopeSource::ProjectMarker,
         project_root: Some(project_root.clone()),
+        overridden_project_marker: None,
     };
 
     // Snapshot BEFORE doctor.

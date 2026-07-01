@@ -68,6 +68,7 @@ impl Fixture {
             scope: Scope(self.workspace.clone()),
             source: ScopeSource::ProjectMarker,
             project_root: Some(self.project.clone()),
+            overridden_project_marker: None,
         }
     }
 }
@@ -132,6 +133,7 @@ fn session_start_no_project_is_fail_soft() {
         scope: Scope(fx.workspace.clone()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     };
     let res = session_start_run(&fx, &scope);
     assert!(

@@ -99,6 +99,31 @@ fn main() {
         }
     };
 
+    // Issue #302: when a `[workspace] default` shadows a per-project marker that
+    // exists in the CWD ancestry, the resolver records the shadowed marker on
+    // `overridden_project_marker` (see `workspace::resolution`). Emit a one-line
+    // stderr note here — the CLI foreground boundary, resolved ONCE before
+    // dispatch — so the user learns why their per-project binding stopped
+    // applying. This is a `note:` (never an error): the exit status is unchanged.
+    //
+    // Skip the MCP path: `tome mcp` speaks JSON-RPC and its stderr is the
+    // harness's log channel, not a human's terminal — the resolver still
+    // populates the field, but the server never surfaces it to a client. Skip
+    // `--json` mode too so structured-stdout consumers aren't handed an
+    // unstructured stderr line they didn't ask for.
+    if !matches!(cli.command, Command::Mcp(_))
+        && mode != output::Mode::Json
+        && let Some(marker_dir) = scope.overridden_project_marker.as_deref()
+    {
+        eprintln!(
+            "note: [workspace] default '{}' is overriding the project binding at {} \
+             — per-project workspace/harness sync is inactive; unset [workspace] default \
+             or run `tome workspace use` here.",
+            scope.scope.name().as_str(),
+            marker_dir.display(),
+        );
+    }
+
     // Build the process-global telemetry handle ONCE, unconditionally — every
     // command needs it: the CLI emit/teardown paths, the spawned `flush --quiet`
     // child, and the MCP server (its `commands::mcp::run` path emits + flushes

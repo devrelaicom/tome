@@ -18,6 +18,7 @@ fn fallback_scope() -> ResolvedScope {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 
@@ -64,6 +65,7 @@ fn bare_with_project_root_emits_per_project_targets() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::ProjectMarker,
         project_root: Some(project.clone()),
+        overridden_project_marker: None,
     };
     let result = bare::run(&scope, &paths, Mode::Json);
     assert!(result.is_ok(), "bare run: {result:?}");

@@ -31,6 +31,7 @@ fn workspace_scope(path: &std::path::Path) -> ResolvedScope {
         scope: Scope(name),
         source: ScopeSource::Flag,
         project_root: Some(path.to_path_buf()),
+        overridden_project_marker: None,
     }
 }
 
@@ -313,6 +314,7 @@ fn info_with_name_argument_targets_other_workspace() {
         scope: tome::workspace::Scope(name.clone()),
         source: tome::workspace::ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let info = _assemble(&resolved, &paths).expect("assemble extra");
     assert_eq!(info.scope, ScopeKind::Workspace);
@@ -332,6 +334,7 @@ fn info_missing_workspace_returns_workspace_not_found() {
         scope: tome::workspace::Scope(name),
         source: tome::workspace::ScopeSource::Flag,
         project_root: None,
+        overridden_project_marker: None,
     };
     let err = assemble(&resolved, &paths).unwrap_err();
     assert!(

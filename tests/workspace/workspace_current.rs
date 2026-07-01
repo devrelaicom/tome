@@ -26,6 +26,7 @@ fn bound_scope(name: &str, source: ScopeSource) -> ResolvedScope {
         scope: Scope(WorkspaceName::parse(name).unwrap()),
         source,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 

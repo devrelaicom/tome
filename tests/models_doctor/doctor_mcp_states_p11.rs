@@ -210,6 +210,7 @@ fn assemble_report_surfaces_manual_and_unverified_without_degrading() {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::ProjectMarker,
         project_root: Some(project.clone()),
+        overridden_project_marker: None,
     };
     let report = doctor::assemble_report(&scope, &paths, home, false).expect("assemble");
 

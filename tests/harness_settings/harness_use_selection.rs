@@ -21,6 +21,7 @@ fn global_scope() -> ResolvedScope {
         scope: Scope(WorkspaceName::parse("global").unwrap()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+        overridden_project_marker: None,
     }
 }
 
@@ -29,6 +30,7 @@ fn project_scope(workspace: &str, project_root: std::path::PathBuf) -> ResolvedS
         scope: Scope(WorkspaceName::parse(workspace).unwrap()),
         source: ScopeSource::ProjectMarker,
         project_root: Some(project_root),
+        overridden_project_marker: None,
     }
 }
 
