@@ -115,12 +115,17 @@ pub fn resolve_sink(default_log: &Path, env: Option<&str>) -> LogSink {
 /// the harness sees a `TomeError` on stderr rather than a silently missing
 /// default log.
 ///
-/// This is the entry point `tome mcp` calls; it replaces the direct
-/// [`open_appender`] call at startup.
+/// This is the entry point `tome mcp` calls to obtain the file sink at
+/// startup, wrapping [`open_appender_at`] with the `TOME_MCP_LOG` policy.
 pub fn open_sink(paths: &Paths) -> Result<Option<File>, TomeError> {
     let env = std::env::var(LOG_ENV).ok();
     match resolve_sink(&paths.mcp_log, env.as_deref()) {
         LogSink::Off => Ok(None),
+        // Deliberate asymmetry: an explicit `TOME_MCP_LOG` set to the EXACT
+        // default path routes here to the fail-LOUD branch (it *is* the
+        // default location, so a failure there is as fatal as it always
+        // was), while any OTHER override path falls through to the
+        // fail-soft branch below.
         LogSink::File(path) if path == paths.mcp_log => {
             // Default path: fail loud, exactly as before the override existed.
             open_appender_at(&path).map(Some)
@@ -158,17 +163,6 @@ pub fn rotate_if_oversized(current: &Path, prev: &Path) -> Result<(), TomeError>
         }
         _ => Ok(()),
     }
-}
-
-/// Open the default MCP log file (`paths.mcp_log`) in append mode,
-/// rotating and creating the parent directory as needed. Thin wrapper
-/// over [`open_appender_at`] with the default `.1` rotation sibling.
-///
-/// Prefer [`open_sink`] at startup — it honours the [`LOG_ENV`] override.
-/// [`open_appender`] is retained for callers/tests that always want the
-/// default sink.
-pub fn open_appender(paths: &Paths) -> Result<File, TomeError> {
-    open_appender_at(&paths.mcp_log)
 }
 
 /// Open a rotating log-file appender at an arbitrary path.
