@@ -173,6 +173,24 @@ install skills into the right place. You rarely write it yourself — `tome
 harness sync` stamps it into the spawned server's arguments. See the
 [MCP server](../using-tome/mcp-server.md).
 
+The server writes a rotating JSON-lines log to `~/.tome/logs/mcp.log`
+(10 MiB cap, one `mcp.log.1` backup). The `TOME_MCP_LOG` environment
+variable overrides the file sink — useful in ephemeral CI containers where
+the log is wasted IO and a surprise artifact. It is distinct from `TOME_LOG`
+/ `RUST_LOG`, which tune verbosity; `TOME_MCP_LOG` controls the file
+destination only. stdout stays protocol-only and stderr stays error-only in
+every case.
+
+- unset → default path (`~/.tome/logs/mcp.log`, 10 MiB rotation).
+- `TOME_MCP_LOG=off` (case-insensitive) or an empty value → no file log is
+  opened; nothing is created on disk.
+- `TOME_MCP_LOG=<path>` → write the rotating log to `<path>` instead, creating
+  parent directories and rotating `<path>.1` with the same 10 MiB cap.
+
+If an override path cannot be opened (bad path, no permission, or a
+directory), the server prints one warning to stderr and continues with no
+file log rather than failing to start.
+
 ## Global behaviour
 
 - `--json` is available on the read-only inspection commands and emits
