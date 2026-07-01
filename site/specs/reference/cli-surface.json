@@ -151,6 +151,9 @@
     },
     "workspace": {
       "subcommands": {
+        "current": [
+          "--verbose"
+        ],
         "info": [
           "--verbose"
         ],
@@ -326,6 +329,11 @@
       "code": 9,
       "category": "plugin_data_dir_write_failed",
       "meaning": "Failed to write a plugin's data directory."
+    },
+    {
+      "code": 12,
+      "category": "workspace_not_bound",
+      "meaning": "No workspace is bound to the current directory (`tome workspace current`)."
     },
     {
       "code": 13,

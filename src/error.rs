@@ -70,6 +70,24 @@ pub enum TomeError {
         projects: Vec<String>,
     },
 
+    /// No workspace resolves to the current directory. Distinct from
+    /// [`Self::WorkspaceNotFound`] (a *named* workspace that is absent from
+    /// the central registry): here the resolver reached `GlobalFallback`
+    /// with no `--workspace` flag, no `TOME_WORKSPACE`, no `[workspace]
+    /// default`, and no project-marker binding — so there is nothing to
+    /// name. Surfaced by `tome workspace current` for shell prompts /
+    /// scripting; its message must be actionable (bind, or select), which
+    /// `WorkspaceNotFound`'s registry-oriented "create it with `init`"
+    /// wording is not. Exit code 12 — the free slot immediately below the
+    /// 13–16 workspace name/binding cluster, keeping the variant in the
+    /// workspace family (a genuinely new failure class gets a new code per
+    /// constitution principle II; the strict 1:1 closed set forbids sharing
+    /// code 13).
+    #[error(
+        "no workspace is bound to the current directory\nhint: bind one with `tome workspace use <name>`, or select one with `--workspace <name>`"
+    )]
+    WorkspaceNotBound,
+
     // -----------------------------------------------------------------------
     // Phase 4 — harness composition + integration (codes 17–19).
     // -----------------------------------------------------------------------
@@ -586,6 +604,10 @@ impl TomeError {
             // on the inner `path` field. Lowest free slot in Phase 1's
             // 1–8 cluster; semantically I/O-adjacent.
             Self::PluginDataDirWriteFailed { .. } => 9,
+            // 12 — no workspace bound to CWD (the free slot immediately
+            // below the 13–16 workspace name/binding cluster; kept in the
+            // workspace family).
+            Self::WorkspaceNotBound => 12,
             // 13–16 — Phase 4 workspace name + project binding
             Self::WorkspaceNotFound { .. } => 13,
             Self::WorkspaceAlreadyExists { .. } => 14,
@@ -710,6 +732,7 @@ impl TomeError {
             // Phase 5 / US1.d (R-M1): plugin data dir write failure.
             Self::PluginDataDirWriteFailed { .. } => ErrorCategory::PluginDataDirWriteFailed,
             // Phase 4 — workspace name + project binding
+            Self::WorkspaceNotBound => ErrorCategory::WorkspaceNotBound,
             Self::WorkspaceNotFound { .. } => ErrorCategory::WorkspaceNotFound,
             Self::WorkspaceAlreadyExists { .. } => ErrorCategory::WorkspaceAlreadyExists,
             Self::WorkspaceNameInvalid { .. } => ErrorCategory::WorkspaceNameInvalid,
@@ -807,6 +830,7 @@ pub enum ErrorCategory {
     Io,
     Interrupted,
     PluginDataDirWriteFailed,
+    WorkspaceNotBound,
     WorkspaceNotFound,
     WorkspaceAlreadyExists,
     WorkspaceNameInvalid,
@@ -882,6 +906,7 @@ impl ErrorCategory {
             Self::Io => "io",
             Self::Interrupted => "interrupted",
             Self::PluginDataDirWriteFailed => "plugin_data_dir_write_failed",
+            Self::WorkspaceNotBound => "workspace_not_bound",
             Self::WorkspaceNotFound => "workspace_not_found",
             Self::WorkspaceAlreadyExists => "workspace_already_exists",
             Self::WorkspaceNameInvalid => "workspace_name_invalid",
@@ -1241,6 +1266,7 @@ mod tests {
             (Io, "io"),
             (Interrupted, "interrupted"),
             (PluginDataDirWriteFailed, "plugin_data_dir_write_failed"),
+            (WorkspaceNotBound, "workspace_not_bound"),
             (WorkspaceNotFound, "workspace_not_found"),
             (WorkspaceAlreadyExists, "workspace_already_exists"),
             (WorkspaceNameInvalid, "workspace_name_invalid"),
@@ -1361,6 +1387,7 @@ mod tests {
             Io => assert_covered(Io),
             Interrupted => assert_covered(Interrupted),
             PluginDataDirWriteFailed => assert_covered(PluginDataDirWriteFailed),
+            WorkspaceNotBound => assert_covered(WorkspaceNotBound),
             WorkspaceNotFound => assert_covered(WorkspaceNotFound),
             WorkspaceAlreadyExists => assert_covered(WorkspaceAlreadyExists),
             WorkspaceNameInvalid => assert_covered(WorkspaceNameInvalid),

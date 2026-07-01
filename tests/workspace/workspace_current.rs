@@ -34,19 +34,29 @@ fn bound_scope(name: &str, source: ScopeSource) -> ResolvedScope {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn unbound_global_fallback_errors_with_exit_13() {
+fn unbound_global_fallback_errors_with_exit_12() {
     // The GlobalFallback source is the ONLY "not bound" case: no flag, no
     // env, no config default, no project marker.
     let scope = ResolvedScope::global_fallback();
     let err = current::run(&scope, Mode::Human).expect_err("unbound must fail");
     assert!(
-        matches!(err, TomeError::WorkspaceNotFound { .. }),
-        "expected WorkspaceNotFound, got {err:?}",
+        matches!(err, TomeError::WorkspaceNotBound),
+        "expected WorkspaceNotBound, got {err:?}",
     );
-    assert_eq!(
-        err.exit_code(),
-        13,
-        "not-bound reuses WorkspaceNotFound(13)"
+    assert_eq!(err.exit_code(), 12, "not-bound uses WorkspaceNotBound(12)");
+    // The diagnostic must be actionable — it points at how to bind/select,
+    // not the registry-oriented `init` hint of WorkspaceNotFound.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no workspace is bound to the current directory")
+            && msg.contains("tome workspace use")
+            && msg.contains("--workspace"),
+        "message must be actionable; got {msg:?}",
+    );
+    // And it must NOT leak the misleading `workspace init` hint.
+    assert!(
+        !msg.contains("tome workspace init"),
+        "message must not carry the registry `init` hint; got {msg:?}",
     );
 }
 
@@ -54,7 +64,8 @@ fn unbound_global_fallback_errors_with_exit_13() {
 fn unbound_global_fallback_errors_in_json_too() {
     let scope = ResolvedScope::global_fallback();
     let err = current::run(&scope, Mode::Json).expect_err("unbound must fail");
-    assert_eq!(err.exit_code(), 13);
+    assert_eq!(err.exit_code(), 12);
+    assert_eq!(err.category().as_str(), "workspace_not_bound");
 }
 
 #[test]
@@ -111,27 +122,35 @@ fn cli_bound_prints_only_the_name() {
 }
 
 /// Unbound (a scratch dir with no marker, no flag, no env): exit non-zero
-/// (13), EMPTY stdout, and a diagnostic on stderr — the
+/// (12), EMPTY stdout, and a diagnostic on stderr — the
 /// `$(tome workspace current 2>/dev/null)` prompt contract.
 #[test]
-fn cli_unbound_exits_13_with_empty_stdout() {
+fn cli_unbound_exits_12_with_empty_stdout() {
     let env = ToolEnv::new();
     let scratch = TempDir::new().unwrap();
     let output = env
         .cmd()
+        // Clear any ambient TOME_WORKSPACE (resolver step 2) so the resolver
+        // is guaranteed to reach GlobalFallback — the test must not depend on
+        // the host env. `ToolEnv::cmd()` isolates $HOME but not this var.
+        .env_remove("TOME_WORKSPACE")
         .current_dir(scratch.path())
         .args(["workspace", "current"])
         .output()
         .expect("spawn tome");
-    assert_eq!(output.status.code(), Some(13), "unbound must exit 13");
+    assert_eq!(output.status.code(), Some(12), "unbound must exit 12");
     assert!(
         output.stdout.is_empty(),
         "stdout must be empty so `2>/dev/null` yields nothing; got {:?}",
         String::from_utf8_lossy(&output.stdout),
     );
-    // The message lands on stderr, not stdout.
+    // The actionable message lands on stderr, not stdout.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.is_empty(), "a diagnostic must reach stderr");
+    assert!(
+        stderr.contains("no workspace is bound to the current directory")
+            && stderr.contains("tome workspace use"),
+        "stderr must carry the actionable diagnostic; got {stderr:?}",
+    );
 }
 
 /// `--json` emits a stable single-line record with the documented fields.
@@ -159,22 +178,31 @@ fn cli_json_shape_is_stable() {
 }
 
 /// `--json` on the unbound case emits the structured error envelope (never a
-/// success record) and exits 13.
+/// success record) and exits 12.
 #[test]
 fn cli_json_unbound_emits_error_envelope() {
     let env = ToolEnv::new();
     let scratch = TempDir::new().unwrap();
     let output = env
         .cmd()
+        // Clear ambient TOME_WORKSPACE so the resolver reaches GlobalFallback
+        // regardless of the host env (see the human-mode test above).
+        .env_remove("TOME_WORKSPACE")
         .current_dir(scratch.path())
         .args(["--json", "workspace", "current"])
         .output()
         .expect("spawn tome");
-    assert_eq!(output.status.code(), Some(13), "unbound must exit 13");
+    assert_eq!(output.status.code(), Some(12), "unbound must exit 12");
     assert!(output.stdout.is_empty(), "no success record on stdout");
     let stderr = String::from_utf8(output.stderr).unwrap();
     let parsed: serde_json::Value =
         serde_json::from_str(stderr.trim()).expect("stderr is the json error envelope");
-    assert_eq!(parsed["error"]["category"], "workspace_not_found");
-    assert_eq!(parsed["error"]["exit_code"], 13);
+    assert_eq!(parsed["error"]["category"], "workspace_not_bound");
+    assert_eq!(parsed["error"]["exit_code"], 12);
+    // The clean, actionable message rides in the envelope for scripts.
+    let msg = parsed["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("no workspace is bound to the current directory"),
+        "envelope message must be the actionable one; got {msg:?}",
+    );
 }

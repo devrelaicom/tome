@@ -24,6 +24,7 @@ enforced against the CLI contract in CI.
 | `7` | `io` | I/O error. |
 | `8` | `interrupted` | Interrupted (SIGINT / Ctrl-C). |
 | `9` | `plugin_data_dir_write_failed` | Failed to write a plugin's data directory. |
+| `12` | `workspace_not_bound` | No workspace is bound to the current directory (`tome workspace current`). |
 | `13` | `workspace_not_found` | Workspace not found. |
 | `14` | `workspace_already_exists` | Workspace already exists. |
 | `15` | `workspace_name_invalid` | Invalid workspace name. |
