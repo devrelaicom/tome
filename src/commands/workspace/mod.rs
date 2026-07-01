@@ -37,7 +37,7 @@ pub fn run(
             emit_on_ok(&r, crate::telemetry::event::WorkspaceAction::Init);
             r
         }
-        WorkspaceCommand::List(args) => list::run(args, &paths, mode),
+        WorkspaceCommand::List(args) => list::run(args, scope, &paths, mode),
         WorkspaceCommand::Remove(args) => {
             let r = remove::run(args, &paths, mode);
             emit_on_ok(&r, crate::telemetry::event::WorkspaceAction::Remove);

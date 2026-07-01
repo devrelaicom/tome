@@ -140,7 +140,7 @@ Per-project scopes and composition.
 | --- | --- | --- |
 | `use <name>` | `--force` | Bind the current project directory to a workspace (writes `<cwd>/.tome/config.toml`). `--force` bypasses the refusal when CWD is your home directory or the filesystem root. |
 | `init <name>` | `--inherit-global` | Create a workspace. `--inherit-global` seeds its catalogs from the global workspace's enrolments at creation time. |
-| `list` | | List workspaces with catalog, plugin, skill, and bound-project counts. |
+| `list` | `--absolute` | List workspaces with catalog, plugin, skill, and bound-project counts. The workspace resolved for the current directory is marked with `*` in the `Cur` column. `Last used` renders as a relative time (e.g. `2 days ago`) by default; `--absolute` forces the RFC 3339 timestamp. `--json` adds a per-row `current` boolean and always emits the absolute `last_used_at` (the relative rendering is human-only). |
 | `current` | | Print the workspace bound to the current directory on one line, with no decoration — for shell prompts / scripting (`$(tome workspace current 2>/dev/null)`). Read-only. Exits `12` (`workspace_not_bound`) with a clear stderr message and no stdout when nothing is bound. |
 | `info [<name>]` | | Report a workspace's details. Read-only; never acquires the advisory lock. Defaults to the resolved workspace. |
 | `rename <old> <new>` | | Rename a workspace, updating every bound project's marker atomically. Refuses either side of `global`. |
