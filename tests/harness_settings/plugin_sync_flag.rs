@@ -221,3 +221,120 @@ fn sync_bound_projects_empty_when_no_bindings() {
         "no bindings → empty report: {report:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 4. Failure ordering (R3): when the follow-up sync FAILS, the returned error
+//    carries the underlying `sync_project` exit code. Combined with the code
+//    ordering in `enable`/`disable::run` (the state change + success line run
+//    BEFORE the `?` on `sync_bound_projects`), this proves the enable/disable
+//    is already committed and the sync error surfaces with the right code.
+//
+//    A symlinked native-agent sink is refused by `sync_project` (exit 45,
+//    AgentTranslationFailed) — the same seam `harness_sync_stub` uses. This is
+//    the exact propagation path `--sync` takes.
+// ---------------------------------------------------------------------------
+
+/// Seed a manifest-less catalog enrolment plus an on-disk source agent so the
+/// native-agent sink has something to emit. Returns the catalog URL.
+fn seed_agent_source(paths: &Paths, plugin: &str, name: &str, body: &str) -> String {
+    let url = format!("https://example.test/{plugin}.git");
+    let cache = paths.cache_dir_for(&url);
+    let agent_dir = cache.join(plugin).join("agents");
+    std::fs::create_dir_all(&agent_dir).expect("create agent source dir");
+    std::fs::write(agent_dir.join(format!("{name}.md")), body).expect("write source agent");
+    url
+}
+
+/// Insert an enabled `agent`-kind row for `(catalog, plugin, name)` in `workspace`.
+fn insert_enabled_agent_row(
+    paths: &Paths,
+    workspace: &str,
+    catalog: &str,
+    plugin: &str,
+    name: &str,
+) {
+    let conn = rusqlite::Connection::open(&paths.index_db).expect("open rw");
+    conn.execute(
+        "INSERT INTO skills
+            (catalog, plugin, name, kind, description, plugin_version,
+             path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+         VALUES (?1, ?2, ?3, 'agent', 'desc', '0.0.0', ?4, 'h', 0, 0, NULL, '1970-01-01T00:00:00Z')",
+        rusqlite::params![catalog, plugin, name, format!("agents/{name}.md")],
+    )
+    .expect("insert agent row");
+    let skill_id: i64 = conn
+        .query_row(
+            "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind='agent' AND name=?3",
+            rusqlite::params![catalog, plugin, name],
+            |r| r.get(0),
+        )
+        .expect("agent id");
+    let ws_id: i64 = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE name = ?1",
+            rusqlite::params![workspace],
+            |r| r.get(0),
+        )
+        .expect("ws id");
+    conn.execute(
+        "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+        rusqlite::params![ws_id, skill_id],
+    )
+    .expect("enrol agent");
+}
+
+#[test]
+#[cfg(unix)]
+fn sync_bound_projects_failure_surfaces_sync_exit_code() {
+    use tome::harness::AgentFormat;
+
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // A native-agent-capable stub so the agents sink runs (and can be made to
+    // refuse a symlinked target).
+    let _guard = HarnessModulesGuard::install(vec![Box::new(
+        StubHarness::default().with_native_agents(AgentFormat::MarkdownYaml),
+    )]);
+    let fx = build("ws-fail");
+    let _home = HomeGuard::install(fx.home.path());
+
+    // Seed an enabled agent so the sink has a file to write.
+    let url = seed_agent_source(
+        &fx.paths,
+        "plugin-a",
+        "reviewer",
+        "---\nname: reviewer\ndescription: Reviews code\n---\nYou review.\n",
+    );
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    tome::index::workspace_catalogs::insert(&conn, "ws-fail", "cat-a", &url, "main")
+        .expect("enrol catalog");
+    drop(conn);
+    insert_enabled_agent_row(&fx.paths, "ws-fail", "cat-a", "plugin-a", "reviewer");
+
+    // Plant a symlink at the agent target — `sync_project` refuses to follow it.
+    let agent_dir = fx.project.join(".stub/agents");
+    std::fs::create_dir_all(&agent_dir).expect("create agent dir");
+    let decoy = fx.project.join("decoy.md");
+    std::fs::write(&decoy, "ORIGINAL DECOY\n").expect("write decoy");
+    let target = agent_dir.join("plugin-a__reviewer.md");
+    std::os::unix::fs::symlink(&decoy, &target).expect("plant symlink");
+
+    // The `--sync` propagation path surfaces the underlying `sync_project` exit
+    // code (45, AgentTranslationFailed) — the caller then reports enable/disable
+    // done + sync failed with this code.
+    let err = tome::commands::sync::sync_bound_projects(&fx.workspace, &fx.paths)
+        .expect_err("symlinked agent sink must make the sync fail");
+    assert_eq!(
+        err.exit_code(),
+        45,
+        "the sync failure must carry the sync_project exit code (45); got {err:?}",
+    );
+
+    // The symlink's target is untouched (writer safety inherited from sync_project).
+    assert_eq!(
+        std::fs::read_to_string(&decoy).expect("read decoy"),
+        "ORIGINAL DECOY\n",
+        "the symlink target must not be overwritten",
+    );
+}

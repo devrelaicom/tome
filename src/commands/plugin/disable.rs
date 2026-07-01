@@ -123,8 +123,8 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
 
     match (mode, projects_synced) {
         // --sync succeeded: the success line already printed above; now confirm
-        // what was applied (human) / carry the count (json).
-        (Mode::Human, Some(n)) => emit_synced_confirmation(n),
+        // what was applied (human, via the shared SSOT) / carry the count (json).
+        (Mode::Human, Some(n)) => super::emit_synced_confirmation(n),
         (Mode::Json, Some(n)) => emit_json(&id, &outcome, Some(n)),
         // No --sync: normal success emit with the "run `tome sync`" reminder.
         (Mode::Human, None) => emit_disable_success(&id, &outcome, mode, false),
@@ -173,19 +173,6 @@ fn write_disable_human<W: Write>(
     if !sync_will_run {
         writeln!(out, "  next:     `tome sync` to apply to your harnesses",)?;
     }
-    Ok(())
-}
-
-/// Human-mode confirmation printed after a successful `--sync`: mirrors
-/// `tier set`'s post-sync "applied" messaging rather than the "run `tome sync`"
-/// reminder.
-fn emit_synced_confirmation(projects: usize) -> Result<(), TomeError> {
-    let mut out = std::io::stdout().lock();
-    writeln!(
-        out,
-        "  synced:   applied to harnesses in {} bound project(s)",
-        projects,
-    )?;
     Ok(())
 }
 

@@ -273,6 +273,18 @@ pub fn sync_all(
 /// `sync_project` error (and its exit code, e.g. 43/44/45/19/7) but does NOT
 /// undo the committed enable/disable — the caller reports the state change as
 /// done and the sync as failed.
+///
+/// Why the FULL sync (both halves), not `harness_only: true`: the enable/disable
+/// caller has already written RULES.md before this runs (`regenerate_for_trigger`
+/// → `write_workspace_rules` fans RULES.md out to bound projects). So this
+/// function's RULES.md half is a REDUNDANT-but-idempotent re-run — writing bytes
+/// that already match is a no-op (`sync_rules_to_project` classifies it
+/// `unchanged` and skips the write). It is deliberately kept, NOT optimised to
+/// `harness_only: true`: routing through the ONE `sync_all` SSOT (the exact path
+/// `tome sync --all` takes) guarantees this reaches EVERY project the walk finds
+/// — including any that the trigger's fan-out reached. A future reader must NOT
+/// "optimise away" the rules half; the duplication is free (idempotent) and the
+/// single-SSOT guarantee is the point.
 pub fn sync_bound_projects(ws: &WorkspaceName, paths: &Paths) -> Result<SyncReport, TomeError> {
     let args = SyncArgs {
         all: true,

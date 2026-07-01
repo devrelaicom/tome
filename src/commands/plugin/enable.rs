@@ -209,8 +209,8 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
 
     match (mode, projects_synced) {
         // --sync succeeded: the success line already printed above; now confirm
-        // what was applied (human) / carry the count (json).
-        (Mode::Human, Some(n)) => emit_synced_confirmation(n),
+        // what was applied (human, via the shared SSOT) / carry the count (json).
+        (Mode::Human, Some(n)) => super::emit_synced_confirmation(n),
         (Mode::Json, Some(n)) => emit_json(&id, &outcome, Some(n)),
         // No --sync: normal success emit with the "run `tome sync`" reminder.
         (Mode::Human, None) => emit_enable_success(&id, &outcome, mode, false),
@@ -232,19 +232,6 @@ fn emit_enable_success(
         let mut out = std::io::stdout().lock();
         write_enable_human(&mut out, id, outcome, sync_will_run)?;
     }
-    Ok(())
-}
-
-/// Human-mode confirmation printed after a successful `--sync`: mirrors
-/// `tier set`'s post-sync "applied" messaging (state → confirmation of the
-/// propagation) rather than the "run `tome sync`" reminder.
-fn emit_synced_confirmation(projects: usize) -> Result<(), TomeError> {
-    let mut out = std::io::stdout().lock();
-    writeln!(
-        out,
-        "  synced:   applied to harnesses in {} bound project(s)",
-        projects,
-    )?;
     Ok(())
 }
 
@@ -490,9 +477,10 @@ mod tests {
     }
 
     /// #281: the `--json` success record has no `next` field — the hint is
-    /// human-mode only, so JSON stdout stays byte-stable. #280: with no
-    /// `--sync`, `projects_synced` is `None` and omitted, so the wire shape is
-    /// byte-identical to the pre-#280 record.
+    /// human-mode only. #280: with no `--sync`, `projects_synced` is `None` and
+    /// OMITTED, so the wire shape is byte-identical to the pre-#280 record.
+    /// Full-string pin (not `contains`) so a field reorder / accidental
+    /// inclusion is caught (mirrors disable's pins).
     #[test]
     fn json_record_has_no_next_hint() {
         let outcome = sample_outcome();
@@ -505,19 +493,16 @@ mod tests {
             projects_synced: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
-        assert!(
-            !json.contains("next"),
-            "JSON must carry no `next` hint: {json}"
-        );
-        // No `--sync` → `projects_synced` omitted; the wire shape is unchanged.
-        assert!(
-            !json.contains("projects_synced"),
-            "projects_synced must be omitted without --sync: {json}",
+        assert_eq!(
+            json,
+            r#"{"plugin":"acme/widgets","status":"enabled","skills_indexed":3,"skills_newly_embedded":3,"duration_ms":1234}"#,
         );
     }
 
     /// #280: with `--sync`, the JSON record carries the additive
-    /// `projects_synced` count as a trailing field.
+    /// `projects_synced` count as the LAST field. Full-string byte-stable pin
+    /// enforces the field order (trailing `projects_synced`) so a reorder
+    /// regression fails the test.
     #[test]
     fn json_record_carries_projects_synced_with_sync() {
         let outcome = sample_outcome();
@@ -530,9 +515,9 @@ mod tests {
             projects_synced: Some(2),
         };
         let json = serde_json::to_string(&record).expect("serialize");
-        assert!(
-            json.contains("\"projects_synced\":2"),
-            "projects_synced count missing: {json}",
+        assert_eq!(
+            json,
+            r#"{"plugin":"acme/widgets","status":"enabled","skills_indexed":3,"skills_newly_embedded":3,"duration_ms":1234,"projects_synced":2}"#,
         );
     }
 }
