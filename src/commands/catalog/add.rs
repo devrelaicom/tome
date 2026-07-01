@@ -264,6 +264,14 @@ fn emit(mode: Mode, rec: &EmittedCatalog) -> Result<(), TomeError> {
             {
                 writeln!(out, "  Cached at: {}", formatted)?;
             }
+            // Onboarding step hint (#281) — human mode only, mirroring the
+            // `workspace init` `next:` line. Points the user at the next
+            // command in the happy path: browse then enable a plugin.
+            writeln!(
+                out,
+                "  next:      `tome plugin list` to browse plugins, then `tome plugin enable {}/<plugin>` to enable one",
+                rec.name,
+            )?;
         }
         Mode::Json => {
             let env = AddedEnvelope {

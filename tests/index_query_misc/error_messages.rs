@@ -437,3 +437,41 @@ fn summariser_failure_output_empty_names_which() {
     assert!(m.contains("empty"), "{m}");
     assert!(m.contains("long"), "{m}");
 }
+
+// ---- #281 first-run recovery `hint:` lines --------------------------------
+// CatalogNotFound / PluginNotFound / the invalid-plugin-id format error now
+// carry a recovery `hint:` in their Display, mirroring WorkspaceNotFound's
+// existing hint. We assert the salient substrings (not exact whitespace) and
+// that every referenced command is a real CLI surface.
+
+#[test]
+fn catalog_not_found_names_catalog_and_recovery_hint() {
+    let err = TomeError::CatalogNotFound("ghost".into());
+    let m = err.to_string();
+    assert!(m.contains("`ghost`"), "{m}");
+    assert!(m.contains("not registered"), "{m}");
+    assert!(m.contains("hint:"), "{m}");
+    assert!(m.contains("tome catalog list"), "{m}");
+    assert!(m.contains("tome catalog add"), "{m}");
+}
+
+#[test]
+fn plugin_not_found_names_plugin_and_recovery_hint() {
+    let err = TomeError::PluginNotFound("acme/widgets".into());
+    let m = err.to_string();
+    assert!(m.contains("`acme/widgets`"), "{m}");
+    assert!(m.contains("not installed"), "{m}");
+    assert!(m.contains("hint:"), "{m}");
+    assert!(m.contains("tome plugin list"), "{m}");
+}
+
+#[test]
+fn invalid_plugin_id_format_states_expected_shape_hint() {
+    use tome::plugin::identity::PluginIdParseError;
+    let err = PluginIdParseError::Format("no-slash".into());
+    let m = err.to_string();
+    assert!(m.contains("`no-slash`"), "{m}");
+    assert!(m.contains("<catalog>/<plugin>"), "{m}");
+    assert!(m.contains("hint:"), "{m}");
+    assert!(m.contains("tome plugin list"), "{m}");
+}
