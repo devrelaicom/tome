@@ -1120,3 +1120,100 @@ fn remote_fetch_honours_a_ref_pin_and_degrades_on_a_missing_ref() {
         d.rule_id == "convert/remote-plugin-fetch-failed" && d.message.contains("missing-ref")
     }));
 }
+
+// ---------------------------------------------------------------------------
+// FR #298 — the post-convert "what next" bridge is rendered on the HUMAN emit
+// path only. These drive the real binary (the bridge lives in the command
+// layer, not `authoring::convert::run`), asserting the `Next:` line's presence,
+// its `<level> lint <target> --autofix` + `harness use` content, and its
+// suppression under `--dry-run` and `--json`.
+// ---------------------------------------------------------------------------
+
+/// Run `tome plugin convert <src>` with the given extra args in an isolated
+/// `$HOME`, returning `(stdout, stderr, success)`.
+fn run_plugin_convert(src: &Path, extra: &[&str]) -> (String, String, bool) {
+    let home = tempfile::tempdir().unwrap();
+    let mut args = vec!["plugin", "convert", src.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tome"))
+        .args(&args)
+        .env("HOME", home.path())
+        .env("TOME_TELEMETRY", "0")
+        .env_remove("TOME_LOG")
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("spawn tome");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
+}
+
+#[test]
+fn human_convert_with_warnings_prints_the_next_bridge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    // `--output <out>` lands the copy at `<out>/demo-tome`; the fixture carries
+    // a `monitors/` unsupported component + a tool restriction ⇒ warnings.
+    let target = out.join("demo-tome");
+    let (stdout, stderr, ok) = run_plugin_convert(&src, &["--output", out.to_str().unwrap()]);
+    assert!(ok, "convert succeeds; stderr: {stderr}");
+
+    // The bridge points into the iteration loop with the real convert level and
+    // the actual output target, then `harness use`.
+    let expected = format!(
+        "Next: run `tome plugin lint {} --autofix`, then `tome harness use <harness>`",
+        target.display()
+    );
+    assert!(
+        stdout.contains(&expected),
+        "human output should carry the Next bridge.\nexpected substring: {expected}\ngot:\n{stdout}"
+    );
+    assert!(stdout.contains("Done:"), "summary still present:\n{stdout}");
+}
+
+#[test]
+fn dry_run_convert_prints_no_bridge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let (stdout, stderr, ok) =
+        run_plugin_convert(&src, &["--output", out.to_str().unwrap(), "--dry-run"]);
+    assert!(ok, "dry-run succeeds; stderr: {stderr}");
+    assert!(
+        stdout.contains("Dry run:"),
+        "dry-run summary present:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Next:"),
+        "a --dry-run wrote nothing, so no lint bridge:\n{stdout}"
+    );
+}
+
+#[test]
+fn json_convert_has_no_bridge_in_the_stream() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let (stdout, stderr, ok) =
+        run_plugin_convert(&src, &["--output", out.to_str().unwrap(), "--json"]);
+    assert!(ok, "json convert succeeds; stderr: {stderr}");
+    // The JSONL stream is machine wire only — the bridge is human-mode text.
+    assert!(
+        !stdout.contains("Next:"),
+        "the --json stream must not carry the human bridge:\n{stdout}"
+    );
+    // Sanity: it IS the JSON result stream (unchanged wire shape).
+    assert!(
+        stdout.contains("\"type\":\"result\"") || stdout.contains("\"type\": \"result\""),
+        "json result line present:\n{stdout}"
+    );
+}
