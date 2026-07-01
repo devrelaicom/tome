@@ -104,7 +104,9 @@ pub struct HarnessInfoOutcome {
     /// explains that those hooks are rendered as `GUARDRAILS.md` prose only, not
     /// enforced natively — the hooks analogue of `unrepresented_agents_notice`.
     /// `None` for hook-capable harnesses (claude-code / the five `#318`
-    /// harnesses), opt-in targets, or when no enabled plugin ships hooks.
+    /// harnesses), for the opt-in targets `generic` / `generic-op`, or when no
+    /// enabled plugin ships hooks. `goose` DOES show the notice — it is a
+    /// detectable harness with no native hook path (rules-only for hooks).
     ///
     /// Appended after `hook_translation_notice` + `skip_serializing_if`-gated so
     /// byte-stable pins are additive.

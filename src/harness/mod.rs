@@ -968,10 +968,11 @@ pub trait HarnessModule: Send + Sync {
 
     /// Whether this module is an OPT-IN target — lookup-able by name but NEVER
     /// auto-detected and NEVER included in `--all` (data-model §Registry
-    /// partition). Default `false`; only the US4 modules (`generic`,
-    /// `generic-op`, `goose`) — registered in [`OPT_IN_TARGETS`] — return
-    /// `true`. (`goose` is detectable, so it stays in
-    /// [`SUPPORTED_HARNESSES`] and keeps the default `false`.)
+    /// partition). Default `false`; ONLY the two US4 modules `generic` and
+    /// `generic-op` — registered in [`OPT_IN_TARGETS`] — return `true`.
+    /// `goose` is NOT opt-in: it is detectable (`~/.config/goose`), so it lives
+    /// in [`SUPPORTED_HARNESSES`] and keeps the default `false` (asserted in
+    /// `goose_is_detectable_supported_not_opt_in`).
     fn is_opt_in_target(&self) -> bool {
         false
     }
@@ -987,10 +988,16 @@ pub trait HarnessModule: Send + Sync {
     /// *unrepresented* (the fidelity loss surfaced by
     /// [`crate::doctor::report::UnrepresentedHooksReport`]).
     ///
-    /// Opt-in targets (`generic` / `generic-op` / `goose`) are excluded from the
+    /// The opt-in targets `generic` / `generic-op` are excluded from the
     /// unrepresented report the same way they are excluded from the
     /// unrepresented-*agents* report, so this predicate mirrors the "rules-only"
-    /// definition used there (`!supports_native_agents() && !is_opt_in_target()`).
+    /// definition used there (`!supports_native_agents() && !is_opt_in_target()`),
+    /// only swapping the native-*agents* test for the native-*hooks* test.
+    /// `goose` is NOT excluded: it is a detectable harness that delivers agents +
+    /// the `tome-op` bundle natively but has NO native hook path
+    /// (`hooks_strategy() == GuardrailsOnly`, `hook_support() == None`,
+    /// `is_opt_in_target() == false`), so its plugin hooks genuinely fall to
+    /// GUARDRAILS and it IS correctly reported here.
     /// This is the SSOT for the definition — doctor, status, and `harness info`
     /// all resolve "rules-only for hooks" through this one method.
     fn is_rules_only_for_hooks(&self) -> bool {

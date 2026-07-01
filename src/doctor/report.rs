@@ -640,11 +640,13 @@ pub struct UnrepresentedHookEntry {
 /// `GUARDRAILS.md` prose (or are dropped entirely). Mirrors
 /// [`UnrepresentedAgentsReport`]: `rules_only_harnesses` are the in-scope
 /// harnesses that render prose only (Claude Code's `RealJson` sink and the five
-/// `#318` dispatcher harnesses are excluded — they DO translate hooks), and
-/// `hooks` are the distinct `(catalog, plugin, event)` tuples those harnesses
-/// cannot enforce. Empty `hooks` when no rules-only-for-hooks harness is in
-/// scope or no enabled plugin ships hooks — keeps the byte-stable wire shape
-/// minimal.
+/// `#318` dispatcher harnesses are excluded — they DO translate hooks; the
+/// opt-in targets `generic` / `generic-op` are excluded too, mirroring the
+/// agents report). `goose` IS included: it is a detectable harness with no
+/// native hook path, so its plugin hooks genuinely fall to GUARDRAILS. `hooks`
+/// are the distinct `(catalog, plugin, event)` tuples those harnesses cannot
+/// enforce. Empty `hooks` when no rules-only-for-hooks harness is in scope or no
+/// enabled plugin ships hooks — keeps the byte-stable wire shape minimal.
 ///
 /// Informational only (no auto-fix): the fidelity loss is intrinsic to the
 /// harness. Authors can move the guarded behaviour into `GUARDRAILS.md` prose or
