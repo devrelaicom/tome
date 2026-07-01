@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use crate::common::mcp_harness::open_index;
 use crate::common::{ToolEnv, paths_for};
+use rmcp::ServerHandler;
 use tokio::sync::OnceCell;
 use tome::embedding::Reranker;
 use tome::embedding::registry::{ModelKind, lookup};
@@ -84,6 +85,31 @@ fn router_advertises_exactly_four_tools() {
         ],
         "expected exactly the four contract-required tools, got {:?}",
         names,
+    );
+}
+
+#[test]
+fn instructions_describe_the_three_step_flow() {
+    // #295: the server instructions must name the canonical THREE-step flow
+    // (search_skills → get_skill_info → get_skill), so an agent uses the
+    // cheaper middle tier before paying the full-body cost — not the pre-#295
+    // two-step flow that omitted get_skill_info entirely.
+    let env = ToolEnv::new();
+    let state = build_state(&env);
+    let info = Server::new(state).get_info();
+    let instructions = info.instructions.expect("server advertises instructions");
+
+    for tool in ["search_skills", "get_skill_info", "get_skill"] {
+        assert!(
+            instructions.contains(tool),
+            "instructions must name the middle tier + both ends of the flow; \
+             missing `{tool}` in:\n{instructions}",
+        );
+    }
+    // The middle tier must be framed as avoiding the full body (its whole point).
+    assert!(
+        instructions.contains("without loading the full body"),
+        "instructions must explain get_skill_info avoids the full body; got:\n{instructions}",
     );
 }
 

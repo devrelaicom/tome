@@ -209,8 +209,9 @@ pub fn build_directive(
         }
     }
     s.push_str(
-        "Before any task in these areas, call search_skills(query=\"<the task>\") then \
-         get_skill the top hit (or, for a command result, invoke its prompt_name).\n",
+        "Before any task in these areas, call search_skills(query=\"<the task>\"), then \
+         get_skill_info the top hit for details, then get_skill it for the full body \
+         (or, for a command result, invoke its prompt_name).\n",
     );
 
     s
@@ -587,6 +588,59 @@ mod tests {
         );
         // The routing tail after the summary is still present.
         assert!(out.contains("search_skills(query="));
+    }
+
+    #[test]
+    fn tier3_routing_tail_names_get_skill_info_as_middle_step() {
+        // #295: the Tier-3 routing tail must insert get_skill_info as the middle
+        // step between search_skills and get_skill, so an agent inspects metadata
+        // before paying the full-body cost. It must keep BOTH ends of the flow.
+        let e = vec![entry("notes", true, 3, "Release notes")];
+        let out = build_directive(&e, None, &PromptRegistry::default());
+        assert!(
+            out.contains("search_skills(query="),
+            "Tier-3 tail must still start at search_skills; got:\n{out}",
+        );
+        assert!(
+            out.contains("get_skill_info the top hit"),
+            "Tier-3 tail must name get_skill_info as the middle step; got:\n{out}",
+        );
+        assert!(
+            out.contains("get_skill it for the full body"),
+            "Tier-3 tail must keep get_skill for the full body; got:\n{out}",
+        );
+        // The command-result branch is preserved unchanged.
+        assert!(
+            out.contains("invoke its prompt_name"),
+            "Tier-3 tail must preserve the command→prompt fallback; got:\n{out}",
+        );
+    }
+
+    #[test]
+    fn tier3_routing_tail_stayed_tight() {
+        // #295: the middle-step insertion must be MINIMAL — #294 slimmed this
+        // directive, so guard against re-inflation. The whole Tier-3 routing
+        // tail is one sentence on a single line; pin it to that shape so a
+        // future edit that pads it with extra prose trips this test.
+        let e = vec![entry("notes", true, 3, "Release notes")];
+        let out = build_directive(&e, None, &PromptRegistry::default());
+        let tail_line = out
+            .lines()
+            .find(|l| l.contains("get_skill_info the top hit"))
+            .expect("Tier-3 routing tail line present");
+        // A single, tight instruction sentence — one leading "Before any task"
+        // clause, ending with the prompt_name fallback. Bound its length so a
+        // padded rewrite is caught (the current line is ~200 chars).
+        assert!(
+            tail_line.starts_with("Before any task in these areas"),
+            "the tail must remain the single 'Before any task' sentence; got:\n{tail_line}",
+        );
+        assert!(
+            tail_line.chars().count() <= 240,
+            "Tier-3 routing tail must stay tight (#294 slimmed it) — the \
+             get_skill_info insertion must be minimal; {} chars:\n{tail_line}",
+            tail_line.chars().count(),
+        );
     }
 
     #[test]

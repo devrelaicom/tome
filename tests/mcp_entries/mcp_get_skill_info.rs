@@ -15,7 +15,9 @@
 //! - Subdir cap: per-subdir, NOT just top-level.
 //! - Default `kind` parameter selects `skill`.
 //! - Same name across both kinds → `kind` disambiguator selects.
-//! - Unknown entry surfaces `entry_not_found`.
+//! - #295: not-found surfaces `get_skill`'s three-code surface —
+//!   `unknown_catalog` / `unknown_plugin` / `unknown_skill` — with the same
+//!   codes + messages get_skill emits (no more collapsed `entry_not_found`).
 //! - Alphabetical ordering by basename.
 
 use std::fs;
@@ -447,7 +449,10 @@ skill body
 }
 
 #[test]
-fn unknown_entry_surfaces_entry_not_found() {
+fn unknown_entry_surfaces_unknown_skill() {
+    // #295: a real catalog + real plugin but an entry name that doesn't exist
+    // now surfaces `unknown_skill` (matching `get_skill`), not the pre-#295
+    // collapsed `entry_not_found`.
     let body = "---\nname: real\ndescription: ok.\n---\nbody\n";
     let (_tmp, paths) = stage_workspace(&[("real", body, &[])], &[]);
     let state = build_state(&paths);
@@ -466,21 +471,29 @@ fn unknown_entry_surfaces_entry_not_found() {
     let data = err.data.expect("structured error data");
     assert_eq!(
         data.get("code").and_then(|c| c.as_str()),
-        Some("entry_not_found"),
-        "expected entry_not_found code, got: {}",
+        Some("unknown_skill"),
+        "expected unknown_skill code (matching get_skill), got: {}",
         data,
     );
+    // The `unknown_skill` envelope carries catalog + plugin + name (byte-
+    // identical to `get_skill`'s), NOT the pre-#295 `kind` field.
+    assert_eq!(data.get("catalog").and_then(|c| c.as_str()), Some("acme"));
+    assert_eq!(data.get("plugin").and_then(|c| c.as_str()), Some("plug"));
     assert_eq!(
-        data.get("kind").and_then(|c| c.as_str()),
-        Some("skill"),
-        "kind should round-trip in error data",
+        data.get("name").and_then(|c| c.as_str()),
+        Some("does-not-exist"),
+    );
+    // The message matches get_skill's exact wording for the same case.
+    assert_eq!(
+        err.message,
+        "skill `acme/plug/does-not-exist` is not enabled in the resolved scope",
     );
 }
 
 #[test]
-fn unknown_catalog_collapses_to_entry_not_found() {
-    // The contract collapses `unknown_catalog` and `unknown_plugin` onto
-    // `entry_not_found` for get_skill_info — only get_skill splits them.
+fn unknown_catalog_surfaces_unknown_catalog() {
+    // #295: get_skill_info now splits not-found the same way get_skill does —
+    // an unenrolled catalog surfaces `unknown_catalog`, not `entry_not_found`.
     let body = "---\nname: real\ndescription: ok.\n---\nbody\n";
     let (_tmp, paths) = stage_workspace(&[("real", body, &[])], &[]);
     let state = build_state(&paths);
@@ -499,7 +512,53 @@ fn unknown_catalog_collapses_to_entry_not_found() {
     let data = err.data.expect("structured error data");
     assert_eq!(
         data.get("code").and_then(|c| c.as_str()),
-        Some("entry_not_found"),
+        Some("unknown_catalog"),
+        "expected unknown_catalog code (matching get_skill), got: {data}",
+    );
+    assert_eq!(
+        data.get("catalog").and_then(|c| c.as_str()),
+        Some("nonexistent"),
+    );
+    assert_eq!(
+        err.message,
+        "catalog `nonexistent` is not enabled in the resolved scope",
+    );
+}
+
+#[test]
+fn unknown_plugin_surfaces_unknown_plugin() {
+    // #295: a real, enrolled catalog but a plugin with zero rows surfaces
+    // `unknown_plugin` (matching get_skill's split), not the collapsed
+    // `entry_not_found`.
+    let body = "---\nname: real\ndescription: ok.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("real", body, &[])], &[]);
+    let state = build_state(&paths);
+
+    let err = invoke(
+        state,
+        Input {
+            catalog: "acme".into(),
+            plugin: "no-such-plugin".into(),
+            name: "real".into(),
+            kind: EntryKind::Skill,
+        },
+    )
+    .expect_err("unknown plugin must reject");
+
+    let data = err.data.expect("structured error data");
+    assert_eq!(
+        data.get("code").and_then(|c| c.as_str()),
+        Some("unknown_plugin"),
+        "expected unknown_plugin code (matching get_skill), got: {data}",
+    );
+    assert_eq!(data.get("catalog").and_then(|c| c.as_str()), Some("acme"));
+    assert_eq!(
+        data.get("plugin").and_then(|c| c.as_str()),
+        Some("no-such-plugin"),
+    );
+    assert_eq!(
+        err.message,
+        "plugin `acme/no-such-plugin` is not enabled in the resolved scope",
     );
 }
 
