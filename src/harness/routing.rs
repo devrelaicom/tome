@@ -18,7 +18,64 @@ use crate::workspace::WorkspaceName;
 /// hook / plugin envelope identically. A blank line separates it from the
 /// existing `# Tome — Skill Routing` header. Keep these bytes stable: changing
 /// them moves every byte-stable directive / rules-region pin.
-pub const SELF_HEAL_PREAMBLE: &str = "Before doing anything else, verify the Tome MCP tools (search_skills, get_skill, get_skill_info) are available.\nIf they are NOT available, tell the user to run `tome harness use <their harness>` — or run\n`tome harness info <their harness>` to get the MCP config to paste into their harness — and then restart this session.\nDo not proceed with skill routing until the Tome tools are present.";
+///
+/// #294: this is injected on EVERY sink, EVERY session, so it must be cheap.
+/// It is now framed as a NO-OP for the common case (the Tome tools ARE
+/// present): "if available, proceed" reads first so a false negative can't
+/// make the agent self-block when the tools are actually there. The
+/// recovery instruction (the `tome harness use` / `info` steps) is preserved
+/// verbatim for the genuinely-absent case — it is only made conditional in
+/// wording, not gutted.
+pub const SELF_HEAL_PREAMBLE: &str = "If the Tome MCP tools (search_skills, get_skill, get_skill_info) are available, proceed normally.\nOnly if they are ABSENT: tell the user to run `tome harness use <their harness>` (or `tome harness info <their harness>` for the MCP config to paste in), restart the session, and skip the skill routing below until they are present.";
+
+/// Soft character budget for the Tier-3 workspace summary substituted into the
+/// directive (#294). The directive is injected on every sink, every session,
+/// so an unbounded long summary is token cost paid everywhere; this caps it,
+/// mirroring the tool-description path's bounded-walk truncation. Sized to sit
+/// between the summariser's `LONG_TARGET_MIN` (1500) floor and its
+/// `LONG_MAX_CHARS` (2500) default so a typical summary passes through
+/// verbatim while a maxed-out one is trimmed with a "call search_skills"
+/// pointer to the full body.
+pub const TIER3_SUMMARY_MAX_CHARS: usize = 1500;
+
+/// Tail appended to a Tier-3 summary that was truncated at
+/// [`TIER3_SUMMARY_MAX_CHARS`] — points the agent at `search_skills` for the
+/// portion that was trimmed. Kept a `const` so the byte-stable directive pins
+/// have a single source to reference.
+const TIER3_TRUNCATION_TAIL: &str = " …(call search_skills for the rest)";
+
+/// Apply the Tier-3 soft char budget to a workspace summary (#294).
+///
+/// Returns the summary verbatim when it already fits within
+/// [`TIER3_SUMMARY_MAX_CHARS`] Unicode scalar values; otherwise slices at the
+/// `max`-th char boundary (never mid-`char`) and appends
+/// [`TIER3_TRUNCATION_TAIL`]. Uses the codebase's bounded `char_indices` walk
+/// (mirrors `mcp::tools::search_skills::truncate_description`): at most `max +
+/// 1` chars are inspected regardless of input size — no `chars().count()` over
+/// the full input, no `take().collect()` allocation. UTF-8 safe: the slice
+/// point is always a `char` byte offset from `char_indices`.
+fn truncate_tier3_summary(summary: &str) -> std::borrow::Cow<'_, str> {
+    let max = TIER3_SUMMARY_MAX_CHARS;
+    let mut iter = summary.char_indices();
+    // Walk past `max` chars; exhausting the iterator within them means the
+    // input already fits — return it verbatim (no allocation).
+    for _ in 0..max {
+        if iter.next().is_none() {
+            return std::borrow::Cow::Borrowed(summary);
+        }
+    }
+    // The (max+1)-th char decides: present → truncate at its byte offset and
+    // append the tail; absent → the input was exactly `max` chars, no trim.
+    match iter.next() {
+        None => std::borrow::Cow::Borrowed(summary),
+        Some((byte_idx, _)) => {
+            let mut out = String::with_capacity(byte_idx + TIER3_TRUNCATION_TAIL.len());
+            out.push_str(&summary[..byte_idx]);
+            out.push_str(TIER3_TRUNCATION_TAIL);
+            std::borrow::Cow::Owned(out)
+        }
+    }
+}
 
 /// First line of a description, trimmed — keeps the directive scannable when a
 /// description is multi-line.
@@ -138,7 +195,10 @@ pub fn build_directive(
     s.push_str("\n## Search before related work (Tier 3)\nThis workspace's skills cover:\n");
     match long_summary.map(str::trim).filter(|t| !t.is_empty()) {
         Some(summary) => {
-            s.push_str(summary);
+            // #294: soft-cap the summary — it is injected on every sink, every
+            // session, so an unbounded long summary is token cost paid
+            // everywhere. Truncation appends a "call search_skills" pointer.
+            s.push_str(&truncate_tier3_summary(summary));
             s.push('\n');
         }
         None => {
@@ -326,8 +386,9 @@ mod tests {
         );
         // The preamble is followed by a blank line then the routing header.
         assert!(out.contains(&format!("{SELF_HEAL_PREAMBLE}\n\n# Tome — Skill Routing")));
-        // The verbatim self-heal guidance is present.
-        assert!(out.contains("verify the Tome MCP tools"));
+        // #294: the reframed self-heal guidance is present — the no-op-when-
+        // present clause plus the preserved absent-case recovery command.
+        assert!(out.contains("are available, proceed normally"));
         assert!(out.contains("tome harness use <their harness>"));
     }
 
@@ -404,6 +465,113 @@ mod tests {
             !out.contains(r#"get_skill(catalog="acme", plugin="db", name="deploy")"#),
             "a Tier-2 command must NOT be pointed at get_skill; got:\n{out}",
         );
+    }
+
+    #[test]
+    fn preamble_reads_as_no_op_when_tools_present() {
+        // #294: the common case (tools ARE present) must read as a no-op so a
+        // false negative can't make the agent self-block. The "if available,
+        // proceed" clause leads; the recovery is conditional ("Only if …
+        // ABSENT").
+        assert!(
+            SELF_HEAL_PREAMBLE.contains("are available, proceed normally"),
+            "preamble must lead with a proceed-when-present no-op; got:\n{SELF_HEAL_PREAMBLE}",
+        );
+        assert!(
+            SELF_HEAL_PREAMBLE.contains("Only if they are ABSENT"),
+            "recovery must be framed as conditional on absence; got:\n{SELF_HEAL_PREAMBLE}",
+        );
+    }
+
+    #[test]
+    fn preamble_preserves_absent_case_recovery_instruction() {
+        // #294: shortening must NOT gut the recovery. The genuinely-absent case
+        // still names both recovery commands and the restart step.
+        assert!(
+            SELF_HEAL_PREAMBLE.contains("Tome MCP tools"),
+            "recovery must still reference the Tome MCP tools; got:\n{SELF_HEAL_PREAMBLE}",
+        );
+        assert!(
+            SELF_HEAL_PREAMBLE.contains("tome harness use <their harness>"),
+            "recovery must still name `tome harness use`; got:\n{SELF_HEAL_PREAMBLE}",
+        );
+        assert!(
+            SELF_HEAL_PREAMBLE.contains("tome harness info <their harness>"),
+            "recovery must still name `tome harness info`; got:\n{SELF_HEAL_PREAMBLE}",
+        );
+        assert!(
+            SELF_HEAL_PREAMBLE.contains("restart"),
+            "recovery must still tell the user to restart the session; got:\n{SELF_HEAL_PREAMBLE}",
+        );
+    }
+
+    #[test]
+    fn tier3_summary_under_budget_passes_through_verbatim() {
+        let short = "This workspace covers DB + release ops.";
+        assert!(short.chars().count() < TIER3_SUMMARY_MAX_CHARS);
+        match truncate_tier3_summary(short) {
+            std::borrow::Cow::Borrowed(s) => assert_eq!(s, short),
+            std::borrow::Cow::Owned(s) => panic!("under-budget summary must not allocate; got {s}"),
+        }
+    }
+
+    #[test]
+    fn tier3_summary_at_exact_budget_passes_through_verbatim() {
+        let exact: String = "a".repeat(TIER3_SUMMARY_MAX_CHARS);
+        let out = truncate_tier3_summary(&exact);
+        assert_eq!(
+            out, exact,
+            "a summary of exactly the budget must not be trimmed"
+        );
+        assert!(!out.contains(TIER3_TRUNCATION_TAIL));
+    }
+
+    #[test]
+    fn tier3_summary_over_budget_is_truncated_with_tail() {
+        let over: String = "b".repeat(TIER3_SUMMARY_MAX_CHARS + 500);
+        let out = truncate_tier3_summary(&over);
+        assert!(
+            out.ends_with(TIER3_TRUNCATION_TAIL),
+            "over-budget summary must end with the search_skills tail; got tail:\n{}",
+            &out[out.len().saturating_sub(60)..],
+        );
+        assert!(
+            out.contains("(call search_skills for the rest)"),
+            "tail must point the agent at search_skills",
+        );
+        // Exactly `max` content chars precede the tail.
+        let content = out.strip_suffix(TIER3_TRUNCATION_TAIL).unwrap();
+        assert_eq!(content.chars().count(), TIER3_SUMMARY_MAX_CHARS);
+    }
+
+    #[test]
+    fn tier3_summary_truncates_on_char_boundary_for_multibyte() {
+        // A summary of multi-byte chars must be cut on a `char` boundary — never
+        // mid-scalar (which would panic on the slice / produce invalid UTF-8).
+        // '界' is 3 bytes; build one longer than the budget.
+        let over: String = "界".repeat(TIER3_SUMMARY_MAX_CHARS + 10);
+        let out = truncate_tier3_summary(&over);
+        // Reaching here (no panic) proves the slice landed on a boundary; assert
+        // the content is exactly `max` scalar values and the string is valid.
+        let content = out.strip_suffix(TIER3_TRUNCATION_TAIL).unwrap();
+        assert_eq!(content.chars().count(), TIER3_SUMMARY_MAX_CHARS);
+        assert!(content.chars().all(|c| c == '界'));
+    }
+
+    #[test]
+    fn build_directive_applies_tier3_budget_and_tail() {
+        // End-to-end through the pure builder: an over-budget summary reaches the
+        // directive truncated, with the tail, and NOT verbatim.
+        let e = vec![entry("notes", true, 3, "Release notes")];
+        let long: String = "z".repeat(TIER3_SUMMARY_MAX_CHARS + 200);
+        let out = build_directive(&e, Some(&long), &PromptRegistry::default());
+        assert!(out.contains(TIER3_TRUNCATION_TAIL));
+        assert!(
+            !out.contains(&long),
+            "the full over-budget summary must not appear verbatim",
+        );
+        // The routing tail after the summary is still present.
+        assert!(out.contains("search_skills(query="));
     }
 
     #[test]

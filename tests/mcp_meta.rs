@@ -392,9 +392,16 @@ fn self_heal_preamble_surfaces_recovery_instruction_in_directive() {
         directive.starts_with(SELF_HEAL_PREAMBLE),
         "directive must begin with the self-heal preamble; got:\n{directive}",
     );
+    // #294: the preamble is now framed as a no-op when the tools ARE present
+    // ("if available, proceed") with the recovery gated on absence, so a false
+    // negative can't self-block. The recovery content itself is preserved.
     assert!(
-        directive.contains("verify the Tome MCP tools"),
-        "directive instructs verifying the tools: {directive}",
+        directive.contains("are available, proceed normally"),
+        "directive reads as a no-op when tools are present: {directive}",
+    );
+    assert!(
+        directive.contains("Tome MCP tools"),
+        "directive still references the Tome MCP tools: {directive}",
     );
     assert!(
         directive.contains("tome harness use <their harness>")
