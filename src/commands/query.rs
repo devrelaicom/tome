@@ -94,6 +94,15 @@ pub struct QueryOutcome {
     /// reindex" and `> 0` ⇔ "no semantic match → rephrase". Best-effort: a
     /// count failure yields `0`.
     pub scope_searchable_count: u64,
+    /// #304: the score floor that was ACTUALLY applied to drop rows, or `None`
+    /// when no floor was enforced. A floor is only applied under `--strict`
+    /// (non-strict mode never filters), so this is `Some(threshold)` iff
+    /// `args.strict` and `None` otherwise. The value is the resolved threshold
+    /// — the explicit `--min-score` when given, else the scoring-mode default
+    /// (0.0 reranked / 0.5 cosine). Surfaced ONLY in the human knobs header
+    /// (#304); the `--json` envelope is unchanged. This is the SSOT the header
+    /// reads so it never prints a floor that was not in effect.
+    pub applied_min_score: Option<f32>,
 }
 
 /// Scoring source for a `QueryOutcome`.
@@ -403,13 +412,32 @@ pub fn run_with_deps(
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
     match mode {
-        Mode::Human => emit_human(
-            &outcome.results,
-            outcome.scoring.as_str(),
-            outcome.reranker_drift.as_deref(),
-            outcome.scope_searchable_count,
-            home.as_deref(),
-        )?,
+        Mode::Human => {
+            // #304: the effective knobs that produced these results, for the
+            // dim TTY-only header. `top_k` is `args.top_k` (resolved to `Some`
+            // by `resolve_query_args` on the CLI path; the `DEFAULT_TOP_K`
+            // fallback covers direct library callers). `rerank` is whether the
+            // reranker stage actually ran (`reranker_used`, captured above).
+            // `applied_min_score` is the outcome's SSOT — `Some` only when a
+            // `--strict` floor filtered rows. The header is gated to a TTY at
+            // this call site; the pure formatter (`render_knobs_header`) takes
+            // the resolved `show` bool so it is testable both ways.
+            let knobs = KnobsHeader {
+                top_k: args.top_k.unwrap_or(DEFAULT_TOP_K),
+                rerank: reranker_used,
+                applied_min_score: outcome.applied_min_score,
+                result_count: outcome.results.len(),
+            };
+            emit_human(
+                &outcome.results,
+                outcome.scoring.as_str(),
+                outcome.reranker_drift.as_deref(),
+                outcome.scope_searchable_count,
+                home.as_deref(),
+                &knobs,
+                crate::output::stdout_is_tty(),
+            )?
+        }
         Mode::Json => emit_json(
             &outcome.results,
             outcome.scoring.as_str(),
@@ -530,6 +558,12 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
         }
     }
 
+    // #304: the floor that actually dropped rows. A floor is applied ONLY under
+    // `--strict` — non-strict mode computes `threshold_passed` below but never
+    // filters, so no floor is "in effect". The human knobs header reads this so
+    // it prints `min_score=<t>` iff a floor really ran, and `none` otherwise.
+    let applied_min_score = if args.strict { Some(threshold) } else { None };
+
     // Even without `--strict`, the JSON `threshold_passed` field reflects
     // whether every returned row meets the (possibly default) threshold.
     let threshold_passed = trimmed.iter().all(|s| s.score >= threshold);
@@ -570,6 +604,7 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
         reranker_drift,
         corpus_size,
         scope_searchable_count,
+        applied_min_score,
     })
 }
 
@@ -689,12 +724,60 @@ fn empty_query_message(scope_searchable_count: u64) -> &'static str {
     }
 }
 
+/// The effective query knobs surfaced in the human-mode header (#304).
+///
+/// Every field is the ACTUAL value that produced the results, not a default:
+/// `top_k` and `rerank` are the resolved effective knobs, `applied_min_score`
+/// is [`QueryOutcome::applied_min_score`] (the floor that really filtered rows,
+/// or `None`), and `result_count` is the real row count.
+struct KnobsHeader {
+    top_k: u32,
+    rerank: bool,
+    applied_min_score: Option<f32>,
+    result_count: usize,
+}
+
+/// Format the effective-knobs header line (#304), or `None` when it must be
+/// omitted (`show` is false — i.e. stdout is not a TTY / output is piped).
+///
+/// Pure so it is unit-testable for both TTY states without touching global
+/// terminal state (mirrors [`resolve_query_args`] / [`empty_query_message`]).
+/// The caller passes the already-resolved `show` bool; the styling (dim) is
+/// applied here via [`colour::dim`], which is itself a no-op when colour is
+/// disabled — so a non-colour TTY still gets the (plain) header text.
+///
+/// Shape: `top_k=<N>  rerank=<bool>  min_score=<floor|none>  (<n> results)`.
+/// `min_score` shows the applied `--strict` floor (formatted like a score) or
+/// `none` when no floor was in effect — it never prints a floor that was not
+/// applied.
+fn render_knobs_header(knobs: &KnobsHeader, show: bool) -> Option<String> {
+    if !show {
+        return None;
+    }
+    let min_score = match knobs.applied_min_score {
+        Some(t) => format_score(t),
+        None => "none".to_owned(),
+    };
+    let noun = if knobs.result_count == 1 {
+        "result"
+    } else {
+        "results"
+    };
+    let line = format!(
+        "top_k={}  rerank={}  min_score={}  ({} {})",
+        knobs.top_k, knobs.rerank, min_score, knobs.result_count, noun
+    );
+    Some(colour::dim(&line))
+}
+
 fn emit_human(
     results: &[Scored],
     scoring: &str,
     reranker_drift: Option<&str>,
     scope_searchable_count: u64,
     home: Option<&std::path::Path>,
+    knobs: &KnobsHeader,
+    is_tty: bool,
 ) -> Result<(), TomeError> {
     // Stderr-only notices first so structured stdout stays clean even when
     // a banner / warning is rendered.
@@ -712,17 +795,36 @@ fn emit_human(
     }
 
     let mut out = std::io::stdout().lock();
+
+    // #304: dim TTY-only effective-knobs header, printed before the table (or
+    // the empty-state line). Omitted entirely when stdout is not a terminal so
+    // piped / redirected output stays clean to grep.
+    if let Some(header) = render_knobs_header(knobs, is_tty) {
+        writeln!(out, "{header}")?;
+    }
+
     if results.is_empty() {
         writeln!(out, "{}", empty_query_message(scope_searchable_count))?;
         return Ok(());
     }
 
+    writeln!(out, "{}", render_results_table(results, home))?;
+    Ok(())
+}
+
+/// Render the results table (#304: `Name` column + a dedicated `Type` column)
+/// to a `String`. Pure over the rows so the column contract is unit-testable
+/// without capturing process stdout.
+fn render_results_table(results: &[Scored], home: Option<&std::path::Path>) -> String {
     let mut table = tables::new_table();
     table.set_header(vec![
         Cell::new("Score").set_alignment(CellAlignment::Right),
         Cell::new("Catalog"),
         Cell::new("Plugin"),
-        Cell::new("Skill"),
+        // #304: `Name` (was `Skill`) — the column holds skills, commands, AND
+        // agents. The kind lives in the dedicated `Type` column beside it.
+        Cell::new("Name"),
+        Cell::new("Type"),
         Cell::new("Version"),
         Cell::new("Path"),
     ]);
@@ -734,13 +836,15 @@ fn emit_human(
             Cell::new(&c.catalog),
             Cell::new(&c.plugin),
             Cell::new(&c.name),
+            // #304: `skill` / `command` / `agent` from the `EntryKind` already
+            // carried in every result row (and already in the `--json` output).
+            Cell::new(c.kind.as_str()),
             Cell::new(&c.plugin_version),
             Cell::new(shorten_home(&c.path, home)),
         ]);
     }
 
-    writeln!(out, "{table}")?;
-    Ok(())
+    table.to_string()
 }
 
 fn emit_json(
@@ -888,6 +992,127 @@ mod tests {
             msg.contains("tome plugin enable"),
             "empty-corpus nudge must point at `tome plugin enable`, got: {msg}",
         );
+    }
+
+    // #304: the effective-knobs header. The pure formatter is tested for both
+    // TTY states and both `min_score` cases (applied floor vs none). Colour is
+    // off in the test harness (non-TTY), so `colour::dim` is a no-op and the
+    // header text is asserted verbatim.
+    #[test]
+    fn knobs_header_omitted_when_not_a_tty() {
+        let knobs = KnobsHeader {
+            top_k: 10,
+            rerank: true,
+            applied_min_score: None,
+            result_count: 7,
+        };
+        assert_eq!(
+            render_knobs_header(&knobs, false),
+            None,
+            "header must be omitted entirely when stdout is not a TTY",
+        );
+    }
+
+    #[test]
+    fn knobs_header_shows_effective_knobs_and_result_count_on_tty() {
+        let knobs = KnobsHeader {
+            top_k: 10,
+            rerank: true,
+            applied_min_score: None,
+            result_count: 7,
+        };
+        // No `--strict` floor in effect → `min_score=none` (never a floor that
+        // was not applied).
+        assert_eq!(
+            render_knobs_header(&knobs, true).as_deref(),
+            Some("top_k=10  rerank=true  min_score=none  (7 results)"),
+        );
+    }
+
+    #[test]
+    fn knobs_header_shows_applied_strict_floor() {
+        let knobs = KnobsHeader {
+            top_k: 5,
+            rerank: false,
+            // A cosine `--strict` run applies the 0.5 default floor.
+            applied_min_score: Some(0.5),
+            result_count: 3,
+        };
+        assert_eq!(
+            render_knobs_header(&knobs, true).as_deref(),
+            Some("top_k=5  rerank=false  min_score=0.5000  (3 results)"),
+        );
+    }
+
+    #[test]
+    fn knobs_header_singularises_one_result() {
+        let knobs = KnobsHeader {
+            top_k: 10,
+            rerank: true,
+            applied_min_score: None,
+            result_count: 1,
+        };
+        assert_eq!(
+            render_knobs_header(&knobs, true).as_deref(),
+            Some("top_k=10  rerank=true  min_score=none  (1 result)"),
+        );
+    }
+
+    // #304: the `Type` column renders each `EntryKind` via `as_str()` — the
+    // exact `skill`/`command`/`agent` labels the table cell uses. Guards the
+    // label contract the header + table depend on.
+    #[test]
+    fn entry_kind_labels_match_type_column() {
+        use crate::plugin::identity::EntryKind;
+        assert_eq!(EntryKind::Skill.as_str(), "skill");
+        assert_eq!(EntryKind::Command.as_str(), "command");
+        assert_eq!(EntryKind::Agent.as_str(), "agent");
+    }
+
+    // #304: the results table gains a `Name` column (renamed from `Skill`) and
+    // a dedicated `Type` column. Render one row per kind and assert both the
+    // new headers and each kind label appear.
+    #[test]
+    fn results_table_has_name_and_type_columns() {
+        use crate::embedding::Scored;
+        use crate::index::query::Candidate;
+        use crate::plugin::identity::EntryKind;
+
+        let mk = |name: &str, kind: EntryKind| Scored {
+            candidate: Candidate {
+                skill_id: 1,
+                catalog: "acme".to_owned(),
+                plugin: "plug".to_owned(),
+                name: name.to_owned(),
+                kind,
+                description: String::new(),
+                plugin_version: "1.0.0".to_owned(),
+                path: "/abs/SKILL.md".to_owned(),
+                distance: 0.1,
+            },
+            score: 0.9,
+        };
+        let rows = vec![
+            mk("a-skill", EntryKind::Skill),
+            mk("a-command", EntryKind::Command),
+            mk("an-agent", EntryKind::Agent),
+        ];
+
+        let rendered = render_results_table(&rows, None);
+
+        assert!(rendered.contains("Name"), "table must have a `Name` column");
+        assert!(rendered.contains("Type"), "table must have a `Type` column");
+        // The old header must be gone.
+        assert!(
+            !rendered.contains("Skill "),
+            "the `Skill` column header must be renamed to `Name`, got:\n{rendered}",
+        );
+        for kind in ["skill", "command", "agent"] {
+            assert!(
+                rendered.contains(kind),
+                "`Type` column must render `{kind}`, got:\n{rendered}",
+            );
+        }
     }
 
     #[test]
