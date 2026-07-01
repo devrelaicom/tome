@@ -77,6 +77,33 @@ Run this before tagging a release, and unconverted content never reaches your
 users. The full code table lives in the
 [exit code reference](../reference/exit-codes.md).
 
+## Scripting with `--json`
+
+`--json` emits a single object — `{ "findings": [...], "summary": {...} }` —
+suitable for `jq`. Every finding carries the same fields:
+
+```json
+{
+  "rule": "lint/description-too-long",
+  "severity": "warning",
+  "message": "entry `compact-dev` description is 2557 characters (max 1024)",
+  "file": "compact-core/agents/compact-dev.md",
+  "line": null,
+  "autofixable": false
+}
+```
+
+`file` and `line` come from the finding's location: `file` is the offending
+path (or `null` when the finding has no location), and `line` is a 1-based line
+number (or `null` when the location has no line). `autofixable` is `true` when
+`--autofix` can apply the fix mechanically.
+
+The per-finding shape is identical to a `convert --json` diagnostic line — see
+[converting](./convert.md#scripting-with---json) for the shared contract. A
+script that reads lint findings can read convert diagnostics with the same
+parser; convert only adds a `"type": "diagnostic"` discriminator and wraps the
+stream as JSONL.
+
 ## Pitfalls
 
 - **Warnings don't fail by default.** A pipeline that gates on lint's exit

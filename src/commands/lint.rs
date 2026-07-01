@@ -144,21 +144,14 @@ fn emit_report(
 }
 
 /// Build the `--json` report object: a single `{ findings[], summary }`
-/// (distinct from `convert`'s JSONL stream).
+/// (distinct from `convert`'s JSONL stream). Each finding uses the shared
+/// [`crate::authoring::ir::finding_json`] serializer that `convert --json` also
+/// calls, so the two verbs' per-finding fields cannot drift (issue #299).
 fn lint_json(report: &LintReport, fixed: usize) -> serde_json::Value {
     let findings: Vec<_> = report
         .diagnostics
         .iter()
-        .map(|d| {
-            json!({
-                "rule": d.rule_id,
-                "severity": d.severity.as_str(),
-                "message": d.message,
-                "file": d.location.as_ref().map(|l| l.file.display().to_string()),
-                "line": d.location.as_ref().and_then(|l| l.line),
-                "autofixable": d.autofix.is_some(),
-            })
-        })
+        .map(crate::authoring::ir::finding_json)
         .collect();
     json!({
         "findings": findings,

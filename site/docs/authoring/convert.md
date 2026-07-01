@@ -164,6 +164,26 @@ your users never see exit `80`. Publish the converted tree; see
 [Distributing](./distributing.md). For the manifest itself, see
 the [authoring overview](./overview.md).
 
+## Scripting with `--json`
+
+`--json` emits a JSONL stream — one JSON object per line. Each diagnostic
+carries a `"type": "diagnostic"` discriminator, and the run ends with one
+`"type": "result"` summary line:
+
+```json
+{"rule":"convert/unsupported-component","severity":"warning","message":"`monitors/` (monitors) is not representable in Tome; dropped from the conversion","file":null,"line":null,"autofixable":false,"type":"diagnostic"}
+{"type":"result","harness":"claude-code","level":"plugin","source_name":"demo","final_name":"demo-tome","target":"/out/demo-tome","dry_run":false,"written":42,"errors":0,"warnings":1,"infos":1,"strict_blocked":null}
+```
+
+Every diagnostic line carries the same finding fields as a `lint --json`
+finding — `rule`, `severity`, `message`, `file`, `line`, `autofixable` — with
+identical value semantics: `file`/`line` are the diagnostic's location (or
+`null` when absent) and `autofixable` is `true` when `lint --autofix` can fix
+it mechanically. The only difference is convert's `"type": "diagnostic"`
+discriminator and its JSONL envelope. A script that parses
+[lint findings](./lint.md#scripting-with---json) can parse convert diagnostic
+lines with the same code.
+
 ## Run the workflow with your agent
 
 Tome includes a bundled meta skill, `convert-marketplace`, that teaches your
