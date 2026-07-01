@@ -124,6 +124,7 @@ Per-project scopes and composition.
 | `use <name>` | `--force` | Bind the current project directory to a workspace (writes `<cwd>/.tome/config.toml`). `--force` bypasses the refusal when CWD is your home directory or the filesystem root. |
 | `init <name>` | `--inherit-global` | Create a workspace. `--inherit-global` seeds its catalogs from the global workspace's enrolments at creation time. |
 | `list` | | List workspaces with catalog, plugin, skill, and bound-project counts. |
+| `current` | | Print the workspace bound to the current directory on one line, with no decoration — for shell prompts / scripting (`$(tome workspace current 2>/dev/null)`). Read-only. Exits `12` (`workspace_not_bound`) with a clear stderr message and no stdout when nothing is bound. |
 | `info [<name>]` | | Report a workspace's details. Read-only; never acquires the advisory lock. Defaults to the resolved workspace. |
 | `rename <old> <new>` | | Rename a workspace, updating every bound project's marker atomically. Refuses either side of `global`. |
 | `regen-summary <name>` | | Force regeneration of a workspace's cached summaries and rules file. |

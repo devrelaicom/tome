@@ -3,6 +3,7 @@
 //! exposes the new Phase 4 fields; `init` creates a named workspace in
 //! the central registry; `list` lists every workspace with counts.
 
+pub mod current;
 pub mod info;
 mod init;
 pub mod list;
@@ -25,6 +26,9 @@ pub fn run(
 ) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
     match cmd {
+        // Read-only; the scope was already resolved (and membership-checked)
+        // before dispatch, so `current` needs neither `paths` nor a DB read.
+        WorkspaceCommand::Current => current::run(scope, mode),
         WorkspaceCommand::Info(args) => info::run(args, scope, &paths, mode),
         WorkspaceCommand::Init(args) => {
             let r = init::run(args, &paths, mode);

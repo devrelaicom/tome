@@ -26,6 +26,8 @@ mod paths_phase3;
 mod summariser_disabled;
 #[path = "workspace/workspace_commands.rs"]
 mod workspace_commands;
+#[path = "workspace/workspace_current.rs"]
+mod workspace_current;
 #[path = "workspace/workspace_default_config.rs"]
 mod workspace_default_config;
 #[path = "workspace/workspace_info.rs"]

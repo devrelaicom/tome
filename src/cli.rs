@@ -481,6 +481,13 @@ pub struct WorkspaceArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
+    /// Print the workspace bound to the current directory on one line, with
+    /// no decoration — the lightweight companion to `info`/`status` for
+    /// shell prompts and scripting (`$(tome workspace current 2>/dev/null)`).
+    /// `--json` emits `{"workspace","scope","source"}`. Read-only. Exits
+    /// non-zero (12, `WorkspaceNotBound`) with a clear, actionable stderr
+    /// message and no stdout when nothing is bound to the current directory.
+    Current,
     /// Report one workspace's details (catalogs, enabled plugins, bound
     /// projects, cached summary state). Read-only; never acquires the
     /// advisory lock. `<name>` defaults to the resolved workspace.

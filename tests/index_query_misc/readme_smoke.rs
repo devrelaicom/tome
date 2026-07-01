@@ -216,6 +216,22 @@ fn getting_started_workspace_and_harness_flow_resolves() {
         "workspace use must write the project marker",
     );
 
+    // `tome workspace current` — from inside the now-bound project dir it
+    // prints JUST the bound name on one line and exits 0 (the prompt/script
+    // contract documented in the README).
+    let current = env
+        .cmd()
+        .current_dir(&project)
+        .args(["workspace", "current"])
+        .output()
+        .expect("spawn workspace current");
+    assert_ok("workspace current", &current);
+    assert_eq!(
+        String::from_utf8_lossy(&current.stdout),
+        "my-project\n",
+        "workspace current must print the bare bound name",
+    );
+
     // `tome harness` (bare) — list the supported harnesses.
     let harness_bare = env
         .cmd()

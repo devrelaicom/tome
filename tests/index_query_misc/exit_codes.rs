@@ -68,6 +68,7 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
         // wiring yet; see specs/004-phase-4-refactor-harnesses/tasks.md T032).
         // Note: `SummariserFailure` is mapped to exit 24 (not 20 as the
         // contract states) to avoid colliding with `PluginNotFound` (20).
+        (TomeError::WorkspaceNotBound, 12, "workspace_not_bound"),
         (
             TomeError::WorkspaceNotFound {
                 name: "shared".into(),
@@ -583,6 +584,7 @@ fn exhaustive_match_compile_check() {
             TomeError::Io(_) => 7,
             TomeError::Interrupted => 8,
             TomeError::PluginDataDirWriteFailed { .. } => 9,
+            TomeError::WorkspaceNotBound => 12,
             TomeError::WorkspaceNotFound { .. } => 13,
             TomeError::WorkspaceAlreadyExists { .. } => 14,
             TomeError::WorkspaceNameInvalid { .. } => 15,
