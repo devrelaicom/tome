@@ -1106,6 +1106,73 @@ fn workspace_default_overriding_project_marker_prints_stderr_note() {
     );
 }
 
+/// Issue #302 (`--json` gate): the override `note:` is a human-mode affordance
+/// only — in `--json` mode the note is suppressed so structured-stdout consumers
+/// aren't handed an unstructured stderr line. This exercises the SAME shadowing
+/// scenario as the positive test (config `[workspace] default` set + a `.tome`
+/// project marker in the CWD ancestry, so the Config-wins branch DOES populate
+/// `overridden_project_marker`) — proving the `--json` gate, not an unpopulated
+/// field, is what suppresses the note. Exit status is unchanged (exit 0).
+#[test]
+fn workspace_default_overriding_project_marker_in_json_mode_prints_no_note() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    // Seed "work" so the config default passes the membership check — the field
+    // IS populated, and only the `--json` gate suppresses the note.
+    let out = env
+        .cmd()
+        .args(["workspace", "init", "work"])
+        .output()
+        .expect("spawn workspace init work");
+    assert!(
+        out.status.success(),
+        "workspace init work stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    fs::write(
+        &paths.global_config_file,
+        "[workspace]\ndefault = \"work\"\n",
+    )
+    .expect("write global config");
+
+    // A project dir UNDER $HOME with its OWN `.tome/config.toml` marker — the
+    // exact shadowing scenario that populates the field.
+    let project = env.home_path().join("json-bound-project");
+    fs::create_dir_all(project.join(".tome")).expect("create marker dir");
+    fs::write(project.join(".tome/config.toml"), "workspace = \"work\"\n")
+        .expect("write project marker");
+
+    // Same foreground command, in `--json` mode. The pre-dispatch resolve still
+    // populates the field; the `main.rs` note guard skips it because `mode ==
+    // Json`.
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["harness", "list", "--json"])
+        .output()
+        .expect("spawn harness list --json from bound project");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Exit status unchanged.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the --json gate must not change the exit status; got {:?}, stdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code(),
+    );
+
+    // The note must NOT appear on stderr in `--json` mode.
+    assert!(
+        !stderr.contains("is overriding the project binding"),
+        "the override note must be suppressed in --json mode; stderr:\n{stderr}",
+    );
+}
+
 /// Issue #302 (negative): with `[workspace] default` set but NO project marker
 /// in the CWD ancestry, nothing is shadowed → no `note:` is printed.
 #[test]

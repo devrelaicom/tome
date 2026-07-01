@@ -77,6 +77,12 @@ A project bound to a workspace carries a marker directory at the project root:
 This is how working inside a project activates the right
 [workspace](../using-tome/workspaces.md) composition automatically.
 
+A global `[workspace] default` takes priority over a project marker. If you set
+one while a project marker is present, the default wins and the project binding
+goes inactive — so Tome prints a one-line `note:` on stderr saying per-project
+workspace/harness sync is inactive. To restore the per-project binding, unset
+`[workspace] default` or run `tome workspace use` in the project.
+
 ## Models
 
 Downloaded models live under `~/.tome/models/`, each with its own
