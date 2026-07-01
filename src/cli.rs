@@ -15,9 +15,15 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// #293: a concise getting-started block appended to `tome`/`tome --help`.
-/// The flat command list is a dead end for a first-time user; these three
-/// steps are the actual happy path (add a catalog → enable a plugin → query).
+/// #293: a concise getting-started block appended to clap's help text. The
+/// flat command list is a dead end for a first-time user; these three steps are
+/// the actual happy path (add a catalog → enable a plugin → query).
+///
+/// clap renders this on BOTH surfaces that show help, but they differ in the
+/// clap convention this respects: `tome --help` prints help to STDOUT and exits
+/// 0, while bare `tome` (missing the required subcommand) prints help to STDERR
+/// and exits 2 (a usage error, per constitution principle II). Either way the
+/// user sees the quickstart.
 const QUICKSTART: &str = "\
 Getting started:
   1. tome catalog add <source>              Register a catalog (a git URL or local path)

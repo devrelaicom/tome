@@ -73,9 +73,10 @@ fn assert_ok(label: &str, out: &std::process::Output) {
 }
 
 /// Build a fixture catalog + isolated env with fabricated models and a
-/// registry-seeded DB, then register the catalog via the real `catalog add`.
-/// Returns the env + fixture (both must outlive the test) and the project dir
-/// used for workspace/harness commands.
+/// registry-seeded DB. Does NOT enrol the catalog — callers that need one
+/// registered run `catalog add` themselves (the fixture is returned so its
+/// `url` is available). Returns the env + fixture (both must outlive the test)
+/// and the project dir used for workspace/harness commands.
 fn setup() -> (ToolEnv, Fixture, std::path::PathBuf) {
     let fix = Fixture::build_from(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-plugin-catalog"),
@@ -143,15 +144,62 @@ fn getting_started_catalog_flow_resolves() {
 
 #[test]
 fn getting_started_plugin_list_resolves() {
-    // `tome plugin list` (bare) — with a catalog enrolled, lists its plugins
-    // (all disabled) before any enable, which is the documented exit-0 outcome.
-    let (env, _fix, _project) = setup();
+    // `tome plugin list` after `catalog add` but before any `plugin enable`.
+    // The fixture's plugins ARE enrolled but none are enabled, so the bare
+    // `plugin list` lists them (all disabled) — the documented exit-0 outcome.
+    let (env, fix, _project) = setup();
+    let add = env
+        .cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .expect("spawn catalog add");
+    assert_ok("catalog add", &add);
+
     let out = env
         .cmd()
         .args(["plugin", "list"])
         .output()
         .expect("spawn plugin list");
     assert_ok("plugin list", &out);
+    // With the catalog enrolled the fixture's plugins are listed (disabled),
+    // so the table renders the plugin id — not the empty-state nudge.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(PLUGIN),
+        "plugin list must show enrolled plugin `{PLUGIN}`; got:\n{stdout}",
+    );
+}
+
+#[test]
+fn plugin_list_empty_state_with_catalog_but_nothing_matching_nudges_to_enable() {
+    // #293 end-to-end through the real binary: a catalog IS enrolled but
+    // `--enabled-only` filters out every (disabled) plugin, so the human
+    // empty-state must nudge toward `tome plugin enable`, NOT `tome catalog
+    // add`. This exercises the catalogs-present branch of the nudge across the
+    // full CLI path (not just the unit-tested message helper).
+    let (env, fix, _project) = setup();
+    let add = env
+        .cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .expect("spawn catalog add");
+    assert_ok("catalog add", &add);
+
+    let out = env
+        .cmd()
+        .args(["plugin", "list", "--enabled-only"])
+        .output()
+        .expect("spawn plugin list --enabled-only");
+    assert_ok("plugin list --enabled-only", &out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("tome plugin enable"),
+        "empty state with a catalog enrolled must nudge to enable a plugin; got:\n{stdout}",
+    );
+    assert!(
+        !stdout.contains("tome catalog add"),
+        "empty state with a catalog enrolled must NOT suggest adding a catalog; got:\n{stdout}",
+    );
 }
 
 #[test]
@@ -270,24 +318,61 @@ fn getting_started_workspace_and_harness_flow_resolves() {
     assert_ok("sync", &sync);
 }
 
-#[test]
-fn bare_tome_help_shows_getting_started_quickstart() {
-    // #293: bare `tome --help` must surface a 3-step getting-started block so a
-    // first-time user has an order to follow, not just a flat command list.
-    let env = ToolEnv::new();
-    let out = env.cmd().args(["--help"]).output().expect("spawn --help");
-    assert_ok("--help", &out);
-    let stdout = String::from_utf8_lossy(&out.stdout);
+/// Assert the three quickstart steps appear somewhere in `text`.
+fn assert_quickstart_present(surface: &str, text: &str) {
     assert!(
-        stdout.contains("Getting started:"),
-        "expected a getting-started block in `tome --help`, got:\n{stdout}",
+        text.contains("Getting started:"),
+        "expected a getting-started block on {surface}, got:\n{text}",
     );
     for needle in ["tome catalog add", "tome plugin enable", "tome query"] {
         assert!(
-            stdout.contains(needle),
-            "quickstart must mention `{needle}`, got:\n{stdout}",
+            text.contains(needle),
+            "quickstart on {surface} must mention `{needle}`, got:\n{text}",
         );
     }
+}
+
+#[test]
+fn tome_help_flag_shows_getting_started_quickstart_on_stdout() {
+    // #293: `tome --help` prints help to STDOUT and exits 0 (clap convention),
+    // and the help must carry the 3-step getting-started block so a first-time
+    // user has an order to follow, not just a flat command list.
+    let env = ToolEnv::new();
+    let out = env.cmd().args(["--help"]).output().expect("spawn --help");
+    assert_ok("--help", &out);
+    assert!(
+        out.stderr.is_empty(),
+        "`tome --help` must not write to stderr, got:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_quickstart_present(
+        "`tome --help` stdout",
+        &String::from_utf8_lossy(&out.stdout),
+    );
+}
+
+#[test]
+fn bare_tome_prints_help_with_quickstart_to_stderr_and_exits_2() {
+    // #293: bare `tome` (missing the required subcommand) is a usage error —
+    // clap prints help to STDERR and exits 2 (constitution principle II), which
+    // is DIFFERENT from `--help` (stdout, exit 0). Either way the quickstart is
+    // visible; this pins the actual bare-invocation behavior so the `cli.rs`
+    // comment claiming both surfaces show it stays honest.
+    let env = ToolEnv::new();
+    let out = env.cmd().output().expect("spawn bare tome");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "bare `tome` must exit 2 (usage error), got {:?}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "bare `tome` must not write help to stdout, got:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert_quickstart_present("bare `tome` stderr", &String::from_utf8_lossy(&out.stderr));
 }
 
 #[test]
@@ -363,6 +448,49 @@ fn getting_started_plugin_enable_and_query_with_real_models() {
         .output()
         .expect("spawn query");
     assert_ok("query", &query);
+}
+
+/// #293 end-to-end: `tome query` on an EMPTY corpus (models present, no plugin
+/// enabled) must print the empty-corpus enable-nudge, NOT the no-match line —
+/// proving the real binary threads `scope_searchable_count` (0 here) into
+/// `emit_human`. Needs the real embedder/reranker to load, so it downloads the
+/// active-profile models (~325 MB: embedder + reranker; not the summariser).
+/// Excluded from the default run; opt in with:
+///
+/// ```sh
+/// cargo test --test index_query_misc -- --ignored
+/// ```
+#[test]
+#[ignore = "downloads the active-profile models (~325 MB embedder + reranker); run explicitly with --ignored"]
+fn query_empty_corpus_with_real_models_prints_enable_nudge() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("tome root");
+
+    // Fetch the real active-profile models so the embedder can load. No catalog
+    // is enrolled and no plugin is enabled, so the searchable scope is empty.
+    let dl = env
+        .cmd()
+        .args(["models", "download"])
+        .output()
+        .expect("spawn models download");
+    assert_ok("models download", &dl);
+
+    let query = env
+        .cmd()
+        .args(["query", "anything at all"])
+        .output()
+        .expect("spawn query");
+    assert_ok("query", &query);
+    let stdout = String::from_utf8_lossy(&query.stdout);
+    assert!(
+        stdout.contains("No skills indexed for this scope"),
+        "empty-corpus query must print the enable-nudge, got:\n{stdout}",
+    );
+    assert!(
+        stdout.contains("tome plugin enable"),
+        "empty-corpus nudge must point at `tome plugin enable`, got:\n{stdout}",
+    );
 }
 
 /// Content-addressed cache dir for a catalog URL (sha256 hex), matching the
