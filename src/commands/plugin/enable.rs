@@ -277,7 +277,7 @@ fn ensure_models_or_prompt(
         return Ok(());
     }
 
-    let confirmed = if args.yes {
+    let confirmed = if args.yes || prompt::non_interactive() {
         true
     } else if output::stdin_is_tty() && output::stdout_is_tty() {
         let mut prompt_text = String::from("Tome needs to download:\n");

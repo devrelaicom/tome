@@ -3,7 +3,7 @@ use clap::Parser;
 use tome::catalog::git;
 use tome::cli::{Cli, Command};
 use tome::paths;
-use tome::presentation::{colour, progress};
+use tome::presentation::{colour, progress, prompt};
 use tome::workspace;
 use tome::{commands, logging, output};
 
@@ -55,6 +55,12 @@ fn main() {
     }
 
     let mode = cli.mode();
+
+    // Forward the global `--non-interactive` flag to the single confirmation
+    // SSOT before any command dispatch, mirroring `colour::set_disabled`. Every
+    // prompt-bearing command reads `prompt::non_interactive()` (which also
+    // honours `TOME_NONINTERACTIVE`) alongside its per-command `--force`/`--yes`.
+    prompt::set_non_interactive(cli.non_interactive);
 
     // Phase 4 / F10: Paths::resolve runs first so the workspace
     // resolver can consult the central index for membership. Both can

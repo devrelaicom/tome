@@ -90,6 +90,122 @@ fn unregistered_name_exits_3() {
     assert_eq!(out.status.code(), Some(3));
 }
 
+/// Issue #305 — the global `--non-interactive` flag suppresses the
+/// confirmation prompt, so a non-TTY `catalog remove` succeeds without the
+/// per-command `--force` (baseline: `non_tty_without_force_exits_2`).
+#[test]
+fn non_interactive_flag_suppresses_prompt() {
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    env.cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .unwrap();
+
+    let out = env
+        .cmd()
+        .args(["catalog", "remove", "sample-experts", "--non-interactive"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "--non-interactive should skip the prompt; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let paths = paths_for(&env);
+    assert!(
+        !has_global_enrolment(&paths, "sample-experts"),
+        "enrolment should be removed",
+    );
+}
+
+/// Issue #305 — `TOME_NONINTERACTIVE=1` does the same as `--non-interactive`.
+/// Env vars are process-global, but each spawned `tome` gets its own env map
+/// via `ToolEnv::cmd().env(...)`, so no in-process serialization is needed.
+#[test]
+fn tome_noninteractive_env_var_suppresses_prompt() {
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    env.cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .unwrap();
+
+    let out = env
+        .cmd()
+        .env("TOME_NONINTERACTIVE", "1")
+        .args(["catalog", "remove", "sample-experts"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "TOME_NONINTERACTIVE=1 should skip the prompt; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let paths = paths_for(&env);
+    assert!(
+        !has_global_enrolment(&paths, "sample-experts"),
+        "enrolment should be removed",
+    );
+}
+
+/// Issue #305 — a falsey `TOME_NONINTERACTIVE=0` must NOT suppress the prompt;
+/// the non-TTY refusal (exit 2) still applies. Guards the truthy-token parse.
+#[test]
+fn tome_noninteractive_env_var_falsey_still_refuses() {
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    env.cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .unwrap();
+
+    let out = env
+        .cmd()
+        .env("TOME_NONINTERACTIVE", "0")
+        .args(["catalog", "remove", "sample-experts"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "falsey env value must not suppress the prompt; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Issue #305 — `--yes` is a hidden alias on `catalog remove` (which only
+/// documented `--force`), so both non-interactive spellings work everywhere.
+#[test]
+fn yes_alias_is_accepted() {
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    env.cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .unwrap();
+
+    let out = env
+        .cmd()
+        .args(["catalog", "remove", "sample-experts", "--yes"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "--yes alias should behave like --force; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let paths = paths_for(&env);
+    assert!(
+        !has_global_enrolment(&paths, "sample-experts"),
+        "enrolment should be removed",
+    );
+}
+
 #[test]
 fn cache_already_missing_still_succeeds() {
     let fix = Fixture::build_sample();

@@ -29,7 +29,7 @@ pub fn run(args: ModelsRemoveArgs, mode: Mode) -> Result<(), TomeError> {
         });
     }
 
-    if !args.force {
+    if !args.force && !prompt::non_interactive() {
         // Non-TTY without --force → exit 54 with the documented pointer.
         // Same pattern as `plugin disable`.
         if !(output::stdin_is_tty() && output::stdout_is_tty()) {
