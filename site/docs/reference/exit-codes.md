@@ -46,6 +46,11 @@ The fields are:
   it never contains a path, credential, or other instance-specific value (those
   stay in `message`).
 
+When a failure carries **both** `retryable: true` and a `remediation` (today
+only `harness_clash`), the two are sequenced: apply the `remediation` **first**,
+*then* retry. Re-running the identical command without applying the fix just
+reproduces the same error.
+
 Branch on `retryable` / `remediation` rather than string-matching `message`:
 
 ```sh

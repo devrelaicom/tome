@@ -1016,8 +1016,14 @@ impl ErrorCategory {
             // Contended: another `tome` process holds the index lock. The
             // canonical retry case (`IndexBusy` — "retry once it has finished").
             Self::IndexBusy => true,
-            // Contended: a harness MCP config clash. Resolve the clashing entry
-            // (or rerun with `--force`), then retry — the state clears.
+            // Contended: a harness MCP config clash. This is the sole member of
+            // the `retryable && remediation.is_some()` quadrant — BOTH signals
+            // are set deliberately, and they are SEQUENCED: `retryable` here
+            // means "retry AFTER applying the `remediation`", not "retry the
+            // identical command". A naive agent that honours `retryable` by
+            // re-running the same command verbatim will loop forever, because the
+            // clash clears only once the `--force` remediation overwrites the
+            // clashing entry. Honour `remediation` first, then retry.
             Self::HarnessClash => true,
             // Network / remote: a git fetch, a BYOK/BYOM provider call, or the
             // telemetry endpoint failed for a reason (rate-limit, timeout,
@@ -1129,7 +1135,13 @@ impl ErrorCategory {
             Self::PluginNotConverted => Some("tome plugin convert"),
 
             // A harness MCP config clash clears once the clashing entry is
-            // overwritten with the expected shape.
+            // overwritten with the expected shape. `HarnessClash` is reachable
+            // from several commands (`harness use`/`harness sync`/`workspace
+            // use`/`plugin enable --sync`/`doctor --fix`); this is ONE
+            // representative coarse class-fix — the human `message` names the
+            // command(s) applicable to the surface the clash actually came from.
+            // This is the only category where both `retryable` and `remediation`
+            // are set (see the sequencing note on the `retryable()` arm).
             Self::HarnessClash => Some("tome harness use --force"),
 
             // No workspace named / bound → create or select one.

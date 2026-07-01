@@ -703,7 +703,11 @@ fn cli_and_mcp_agree_on_code_retryable_remediation() {
     use tome::mcp::tools::common::error_data;
     use tome::output::ErrorRecord;
 
-    // A remediation case and a retryable case, checked on both surfaces.
+    // One case per retryable×remediation quadrant, checked on both surfaces:
+    //   drift       → [retryable:false, remediation:Some]
+    //   IndexBusy   → [retryable:true,  remediation:None]
+    //   Usage       → [retryable:false, remediation:None]
+    //   HarnessClash→ [retryable:true,  remediation:Some]  (the only member)
     let cases = [
         TomeError::EmbedderNameDrift {
             stored: "a".into(),
@@ -711,6 +715,11 @@ fn cli_and_mcp_agree_on_code_retryable_remediation() {
         },
         TomeError::IndexBusy,
         TomeError::Usage("x".into()),
+        TomeError::HarnessClash {
+            path: std::path::PathBuf::from("/x/.mcp.json"),
+            command: "tome".into(),
+            first_arg: "mcp".into(),
+        },
     ];
     for err in cases {
         let cat = err.category();
@@ -731,6 +740,46 @@ fn cli_and_mcp_agree_on_code_retryable_remediation() {
             "remediation parity for {cat:?}",
         );
     }
+}
+
+/// The `[retryable:true, remediation:Some]` quadrant on the SERIALIZED wire —
+/// its only member is `HarnessClash`. Both the CLI envelope and the MCP `data`
+/// carry `retryable == true` AND `remediation == "tome harness use --force"`,
+/// and agree with each other. (The sequencing — retry AFTER the remediation —
+/// is documented on the `ErrorCategory::retryable` arm.)
+#[test]
+fn harness_clash_wire_carries_retryable_true_and_force_remediation() {
+    use tome::mcp::tools::common::error_data;
+    use tome::output::ErrorRecord;
+
+    let err = TomeError::HarnessClash {
+        path: std::path::PathBuf::from("/x/.mcp.json"),
+        command: "tome".into(),
+        first_arg: "mcp".into(),
+    };
+
+    // CLI `--json` envelope.
+    let cli = serde_json::to_value(ErrorRecord::from_error(&err)).unwrap();
+    assert_eq!(cli["category"], serde_json::json!("harness_clash"));
+    assert_eq!(cli["retryable"], serde_json::json!(true));
+    assert_eq!(
+        cli["remediation"],
+        serde_json::json!("tome harness use --force"),
+    );
+
+    // MCP tool error `data` (via the shared SSOT).
+    let mcp = error_data(err.category());
+    assert_eq!(mcp["code"], serde_json::json!("harness_clash"));
+    assert_eq!(mcp["retryable"], serde_json::json!(true));
+    assert_eq!(
+        mcp["remediation"],
+        serde_json::json!("tome harness use --force"),
+    );
+
+    // The two surfaces agree.
+    assert_eq!(cli["category"], mcp["code"]);
+    assert_eq!(cli["retryable"], mcp["retryable"]);
+    assert_eq!(cli.get("remediation"), mcp.get("remediation"));
 }
 
 /// The MCP `data` payload (via the shared SSOT helper) carries the structured
