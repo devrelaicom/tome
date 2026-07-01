@@ -339,6 +339,56 @@ fn bare_sync_no_marker_no_db_is_detect_and_suggest_error() {
 }
 
 // ---------------------------------------------------------------------------
+// #303-e. `run()` with a resolved project marker (project_root: Some) syncs
+//         EXACTLY that project, never a fan-out — proves the refactored
+//         in-project `else if let Some(..)` branch end to end.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn in_project_run_syncs_only_that_project_not_a_fanout() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    init_with_rules(&paths, "ws-a", "ws-a rules\n");
+
+    // Two bound projects; the scope marker resolves to project_a only.
+    let project_a = tmp.path().join("proj-a");
+    let project_b = tmp.path().join("proj-b");
+    seed_bound_project(&paths, "ws-a", &project_a);
+    seed_bound_project(&paths, "ws-a", &project_b);
+
+    // Stale both so a reconcile is observable; only proj-a must change.
+    std::fs::write(project_a.join(".tome/RULES.md"), b"STALE_A\n").unwrap();
+    std::fs::write(project_b.join(".tome/RULES.md"), b"STALE_B\n").unwrap();
+
+    let scope = tome::workspace::ResolvedScope {
+        scope: tome::workspace::Scope(parse("ws-a")),
+        source: tome::workspace::ScopeSource::ProjectMarker,
+        project_root: Some(project_a.clone()),
+        overridden_project_marker: None,
+    };
+
+    // Bare `tome sync` (no --all) with a resolved marker → in-project branch.
+    let args = rules_only_args();
+    tome::commands::sync::run(args, &scope, &paths, tome::output::Mode::Json)
+        .expect("in-project sync succeeds");
+
+    // proj-a reconciled to the workspace body...
+    assert_eq!(
+        std::fs::read(project_a.join(".tome/RULES.md")).unwrap(),
+        b"ws-a rules\n",
+        "the resolved project was not synced",
+    );
+    // ...and proj-b UNTOUCHED — no fan-out happened.
+    assert_eq!(
+        std::fs::read(project_b.join(".tome/RULES.md")).unwrap(),
+        b"STALE_B\n",
+        "in-project sync must NOT fan out to other bound projects",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 3. Unknown --harness (not rules-only) errors with HarnessNotSupported.
 // ---------------------------------------------------------------------------
 
