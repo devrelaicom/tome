@@ -192,6 +192,74 @@ fn list_unknown_catalog_filter_exits_with_catalog_not_found_code() {
 }
 
 #[test]
+fn list_with_no_catalogs_human_mode_nudges_to_add_a_catalog() {
+    // #293: catalog-aware empty state. No catalogs enrolled → the fix is to
+    // add one, mirroring the `catalog list` nudge.
+    let env = ToolEnv::new();
+    let out = env.cmd().args(["plugin", "list"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("tome catalog add"),
+        "expected an add-catalog nudge, got: {stdout}",
+    );
+}
+
+#[test]
+fn list_enabled_only_with_nothing_enabled_nudges_to_enable_a_plugin() {
+    // #293: a catalog IS enrolled (its plugins show up in the default list),
+    // but `--enabled-only` filters everything out because nothing is enabled.
+    // With catalogs present, the empty state must nudge toward enabling a
+    // plugin, NOT adding a catalog.
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let paths = setup_with_alpha_enabled(&env, &fixture_tmp, "sample-plugin-catalog");
+
+    // Disable the pre-enabled plugin so `--enabled-only` yields zero rows
+    // while the catalog stays enrolled.
+    let out = env
+        .cmd()
+        .args([
+            "plugin",
+            "disable",
+            "sample-plugin-catalog/plugin-alpha",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "disable failed: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let _ = &paths; // keep the isolated root alive for the second invocation.
+
+    let out = env
+        .cmd()
+        .args(["plugin", "list", "--enabled-only"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("tome plugin enable"),
+        "expected an enable-plugin nudge, got: {stdout}",
+    );
+    assert!(
+        !stdout.contains("tome catalog add"),
+        "with a catalog enrolled the nudge must not suggest adding a catalog, got: {stdout}",
+    );
+}
+
+#[test]
 fn list_with_no_catalogs_registered_emits_nothing_in_json_mode() {
     // Sanity check: the empty-config baseline is well-behaved even without
     // a fabricated index DB. Establishes the "zero state" the other tests

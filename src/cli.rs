@@ -15,11 +15,29 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+/// #293: a concise getting-started block appended to clap's help text. The
+/// flat command list is a dead end for a first-time user; these three steps are
+/// the actual happy path (add a catalog → enable a plugin → query).
+///
+/// clap renders this on BOTH surfaces that show help, but they differ in the
+/// clap convention this respects: `tome --help` prints help to STDOUT and exits
+/// 0, while bare `tome` (missing the required subcommand) prints help to STDERR
+/// and exits 2 (a usage error, per constitution principle II). Either way the
+/// user sees the quickstart.
+const QUICKSTART: &str = "\
+Getting started:
+  1. tome catalog add <source>              Register a catalog (a git URL or local path)
+  2. tome plugin enable <catalog>/<plugin>  Enable a plugin and index its skills
+  3. tome query \"<what you need>\"            Search enabled skills by intent
+
+Run `tome <command> --help` for details on any command.";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "tome",
     about,
     long_about = None,
+    after_help = QUICKSTART,
     // `--version` is intercepted by a pre-parse hook in `main.rs` so the
     // output can include embedder + reranker identities and honour
     // `--json`. clap's auto handler can't do either, hence the override.

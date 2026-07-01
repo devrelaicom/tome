@@ -120,6 +120,42 @@ fn open_conn(env: &QueryEnv) -> rusqlite::Connection {
     .unwrap()
 }
 
+/// Bootstrap an env whose index is stamped with STUB seeds but has NO plugin
+/// enabled — an empty searchable scope. Used to prove the empty-corpus signal
+/// (`scope_searchable_count == 0`) that the human empty-state branches on.
+fn build_empty_query_env() -> QueryEnv {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    // Stamp `meta` with STUB seeds so `run_with_deps`'s drift check passes
+    // against the stub-seeded deps below (a registry-seeded meta would hard-fail
+    // with EmbedderNameDrift). No catalog enrolled, no plugin enabled → the KNN
+    // universe is empty.
+    drop(
+        index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: stub_embedder_seed(),
+                reranker: stub_reranker_seed(),
+                summariser: stub_summariser_seed(),
+                profile: None,
+            },
+        )
+        .expect("bootstrap empty index meta with stub seeds"),
+    );
+
+    // The `config` field is vestigial for validation (resolved from the DB) but
+    // must exist; build it before moving `tmp` into the struct.
+    let config = config_with_catalog("sample-plugin-catalog", tmp.path());
+    QueryEnv {
+        _tmp: tmp,
+        paths,
+        config,
+    }
+}
+
 #[test]
 fn knn_top_one_matches_self_embedded_skill() {
     let env = build_query_env();
@@ -332,6 +368,73 @@ fn run_with_deps_returns_scored_results_without_reranker() {
         (top.score - 1.0).abs() < 1e-3,
         "top-1 score should be ~1.0, got {}",
         top.score,
+    );
+}
+
+#[test]
+fn run_with_deps_human_mode_on_empty_scope_reports_zero_searchable_count() {
+    // #293 wiring proof: `run_with_deps` in Mode::Human runs the whole pipeline
+    // through `emit_human`, which now consumes `scope_searchable_count`. On an
+    // empty scope (no plugin enabled) the pipeline must return zero results AND
+    // `scope_searchable_count == 0` — the exact value `emit_human` branches on
+    // to print the "No skills indexed for this scope yet" enable-nudge (vs the
+    // "No match — rephrase" line when the count is > 0). Deterministic with the
+    // stub embedder; the real-binary end-to-end is the `#[ignore]`d
+    // `getting_started_plugin_enable_and_query_with_real_models`-class test.
+    let env = build_empty_query_env();
+    let embedder = StubEmbedder::new();
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope(WorkspaceName::global()),
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    // Mode::Human exercises the `emit_human` call site (empty-state branch);
+    // it writes to process stdout, which we don't capture — the assertion
+    // target is the returned outcome that feeds that branch.
+    let outcome = run_with_deps(args_for("anything at all", 5), deps, Mode::Human)
+        .expect("empty-scope query must succeed (non-strict) and reach emit_human");
+
+    assert!(
+        outcome.results.is_empty(),
+        "empty scope must yield zero results, got {}",
+        outcome.results.len(),
+    );
+    assert_eq!(
+        outcome.scope_searchable_count, 0,
+        "empty scope must report scope_searchable_count == 0 (the empty-corpus signal)",
+    );
+}
+
+#[test]
+fn run_with_deps_populated_scope_reports_nonzero_searchable_count() {
+    // The complement of the empty-scope test: a populated scope must report a
+    // non-zero `scope_searchable_count`, so the human empty-state (on a genuine
+    // no-match) takes the "rephrase" branch, not the "nothing indexed" one.
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope(WorkspaceName::global()),
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let outcome = run_with_deps(args_for("anything at all", 5), deps, Mode::Json)
+        .expect("populated-scope query must succeed");
+    assert!(
+        outcome.scope_searchable_count > 0,
+        "populated scope must report a non-zero searchable count, got {}",
+        outcome.scope_searchable_count,
     );
 }
 
