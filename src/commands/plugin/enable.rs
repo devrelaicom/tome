@@ -288,8 +288,23 @@ fn ensure_models_or_prompt(
 }
 
 fn emit_human(id: &PluginId, outcome: &lifecycle::EnableOutcome) -> Result<(), TomeError> {
-    let secs = outcome.duration.as_secs_f64();
     let mut out = std::io::stdout().lock();
+    write_enable_human(&mut out, id, outcome)?;
+    Ok(())
+}
+
+/// Write the human-mode success lines for `plugin enable` to `out`.
+///
+/// Split out from [`emit_human`] (which owns the locked stdout) so the
+/// `next:` onboarding hint (#281) is unit-testable against an in-memory sink
+/// without a real index / model download — the `write<W: Write>` seam already
+/// used by `plugin show`'s `write_entry_line`.
+fn write_enable_human<W: Write>(
+    out: &mut W,
+    id: &PluginId,
+    outcome: &lifecycle::EnableOutcome,
+) -> std::io::Result<()> {
+    let secs = outcome.duration.as_secs_f64();
     writeln!(
         out,
         "{} {} skills indexed ({} newly embedded) in {:.1}s",
@@ -297,6 +312,13 @@ fn emit_human(id: &PluginId, outcome: &lifecycle::EnableOutcome) -> Result<(), T
         outcome.summary.total_skills,
         outcome.summary.newly_embedded,
         secs,
+    )?;
+    // Onboarding step hint (#281) — human mode only, mirroring the
+    // `workspace init` `next:` line. Points the user at searching the freshly
+    // indexed skills and at propagating the change to bound harnesses.
+    writeln!(
+        out,
+        "  next:     `tome query <text>` to search these skills, or `tome sync` to apply to your harnesses",
     )?;
     let _ = id; // referenced for consistency / future formatting
     Ok(())
@@ -321,4 +343,70 @@ fn emit_json(id: &PluginId, outcome: &lifecycle::EnableOutcome) -> Result<(), To
         duration_ms,
     };
     output::write_json(&record)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    use super::write_enable_human;
+    use crate::index::skills::EnableSummary;
+    use crate::plugin::PluginId;
+    use crate::plugin::lifecycle::EnableOutcome;
+
+    fn sample_outcome() -> EnableOutcome {
+        EnableOutcome {
+            plugin: PluginId::from_str("acme/widgets").expect("valid id"),
+            summary: EnableSummary {
+                total_skills: 3,
+                newly_embedded: 3,
+            },
+            duration: Duration::from_millis(1234),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// #281: the human success output carries the onboarding `next:` hint and
+    /// every command it names actually exists on the CLI surface.
+    #[test]
+    fn human_output_includes_onboarding_next_hint() {
+        let outcome = sample_outcome();
+        let mut buf: Vec<u8> = Vec::new();
+        write_enable_human(&mut buf, &outcome.plugin, &outcome).expect("write");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            text.contains("skills indexed"),
+            "success line missing: {text}"
+        );
+        assert!(text.contains("next:"), "onboarding hint missing: {text}");
+        assert!(
+            text.contains("tome query"),
+            "`tome query` not referenced: {text}",
+        );
+        assert!(
+            text.contains("tome sync"),
+            "`tome sync` not referenced: {text}",
+        );
+    }
+
+    /// #281: the `--json` success record has no `next` field — the hint is
+    /// human-mode only, so JSON stdout stays byte-stable.
+    #[test]
+    fn json_record_has_no_next_hint() {
+        let outcome = sample_outcome();
+        let record = super::EnableRecord {
+            plugin: outcome.plugin.to_string(),
+            status: "enabled",
+            skills_indexed: outcome.summary.total_skills,
+            skills_newly_embedded: outcome.summary.newly_embedded,
+            duration_ms: outcome.duration.as_millis() as u64,
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(
+            !json.contains("next"),
+            "JSON must carry no `next` hint: {json}"
+        );
+    }
 }

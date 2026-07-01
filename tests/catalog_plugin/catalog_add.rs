@@ -29,6 +29,12 @@ fn happy_path_human_mode() {
         stdout
     );
     assert!(stdout.contains("plugins: 2"), "stdout: {}", stdout);
+    // #281: onboarding `next:` hint points at the next command in the flow.
+    assert!(
+        stdout.contains("next:") && stdout.contains("tome plugin list"),
+        "expected onboarding `next:` hint in human stdout: {}",
+        stdout
+    );
 
     let paths = paths_for(&env);
     assert!(
@@ -62,6 +68,14 @@ fn happy_path_json_mode() {
     assert_eq!(v["added"]["plugin_count"], 2);
     assert_eq!(v["added"]["url"], fix.url);
     assert!(v["added"]["last_synced"].is_string());
+    // #281: the onboarding `next:` hint is human-mode only — JSON stdout must
+    // stay byte-stable (parses cleanly above and carries no `next:` marker).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("next:"),
+        "`next:` hint must not appear in --json stdout: {}",
+        stdout
+    );
 }
 
 #[test]

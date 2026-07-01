@@ -5,7 +5,6 @@
 //!
 //! Filename is `use_.rs` because `use` is a Rust keyword.
 
-use std::io::Write;
 use std::path::PathBuf;
 
 use crate::cli::WorkspaceUseArgs;
@@ -89,6 +88,16 @@ fn emit(outcome: &BindOutcome, mode: Mode) -> Result<(), TomeError> {
 
 fn emit_human(outcome: &BindOutcome) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
+    write_use_human(&mut out, outcome)?;
+    Ok(())
+}
+
+/// Write the human-mode success lines for `workspace use` to `out`.
+///
+/// Split out from [`emit_human`] (which owns the locked stdout) so the
+/// `next:` onboarding hint (#281) is unit-testable against an in-memory sink,
+/// matching the `write<W: Write>` seam used by `plugin show`/`plugin enable`.
+fn write_use_human<W: std::io::Write>(out: &mut W, outcome: &BindOutcome) -> std::io::Result<()> {
     if let Some(prior) = outcome.rebind_from.as_ref() {
         writeln!(
             out,
@@ -112,5 +121,49 @@ fn emit_human(outcome: &BindOutcome) -> Result<(), TomeError> {
             Paths::project_marker_dir(&outcome.project_root).display(),
         )?;
     }
+    // Onboarding step hint (#281) — human mode only, mirroring the
+    // `workspace init` `next:` line. A freshly-bound workspace has no
+    // catalogs until one is added; point the user there.
+    writeln!(
+        out,
+        "  next:      `tome catalog add <source>` to enrol a catalog in workspace `{}`",
+        outcome.workspace.as_str(),
+    )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BindOutcome, write_use_human};
+    use crate::workspace::name::WorkspaceName;
+
+    fn outcome(created_marker: bool, rebind: bool) -> BindOutcome {
+        BindOutcome {
+            workspace: WorkspaceName::parse("my-workspace").expect("valid name"),
+            project_root: std::path::PathBuf::from("/tmp/project"),
+            created_marker,
+            rebind_from: rebind.then(|| WorkspaceName::parse("old-ws").expect("valid name")),
+            sync: None,
+        }
+    }
+
+    fn render(outcome: &BindOutcome) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_use_human(&mut buf, outcome).expect("write");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    /// #281: the human success output carries the onboarding `next:` hint,
+    /// pointing at `tome catalog add`, on both first-bind and rebind.
+    #[test]
+    fn human_output_includes_onboarding_next_hint() {
+        for (created, rebind) in [(true, false), (false, false), (true, true)] {
+            let text = render(&outcome(created, rebind));
+            assert!(text.contains("next:"), "onboarding hint missing: {text}");
+            assert!(
+                text.contains("tome catalog add"),
+                "`tome catalog add` not referenced: {text}",
+            );
+        }
+    }
 }

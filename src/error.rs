@@ -19,7 +19,9 @@ pub enum TomeError {
     #[error("invalid usage: {0}")]
     Usage(String),
 
-    #[error("catalog `{0}` is not registered")]
+    #[error(
+        "catalog `{0}` is not registered\nhint: list enrolled catalogs with `tome catalog list`, or enrol one with `tome catalog add <source>`"
+    )]
     CatalogNotFound(String),
 
     #[error("catalog `{0}` is already registered")]
@@ -209,7 +211,9 @@ pub enum TomeError {
     // -----------------------------------------------------------------------
     // Phase 2 — plugin lifecycle (codes 20–23).
     // -----------------------------------------------------------------------
-    #[error("plugin `{0}` is not installed under any registered catalog")]
+    #[error(
+        "plugin `{0}` is not installed under any registered catalog\nhint: list valid plugin ids with `tome plugin list`"
+    )]
     PluginNotFound(String),
 
     #[error("plugin `{plugin}` is already {state}")]
