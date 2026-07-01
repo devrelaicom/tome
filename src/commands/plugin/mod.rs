@@ -125,17 +125,22 @@ pub(crate) use crate::presentation::format::human_mb;
 ///
 /// Falls back to "—" on a parse failure for the input timestamp string.
 pub(crate) fn human_relative(then_rfc3339: &str) -> String {
+    human_relative_at(then_rfc3339, time::OffsetDateTime::now_utc())
+}
+
+/// [`human_relative`] with the reference "now" supplied by the caller so the
+/// bucketing is deterministically testable (production calls pass
+/// `OffsetDateTime::now_utc()` via `human_relative`). A `then` in the future
+/// relative to `now` collapses to "just now" rather than emitting a negative
+/// duration.
+pub(crate) fn human_relative_at(then_rfc3339: &str, now: time::OffsetDateTime) -> String {
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;
     let Ok(then) = OffsetDateTime::parse(then_rfc3339, &Rfc3339) else {
         return "—".to_owned();
     };
-    let now = OffsetDateTime::now_utc();
     let delta = now - then;
     let secs = delta.whole_seconds();
-    if secs < 0 {
-        return "just now".to_owned();
-    }
     if secs < 60 {
         return "just now".to_owned();
     }
@@ -155,6 +160,69 @@ pub(crate) fn human_relative(then_rfc3339: &str) -> String {
 /// truth lives in [`crate::plugin::lifecycle::resolve_plugin_dir`] — re-exported
 /// here so the CLI handlers don't reach across module boundaries for it.
 pub(crate) use crate::plugin::lifecycle::resolve_plugin_dir;
+
+/// Best-effort "last upstream change" timestamp for a plugin, computed at
+/// DISPLAY time (never stored → no schema/migration cost) by asking the
+/// catalog's content-addressed clone for the committer date of the most
+/// recent commit that touched the plugin's subtree.
+///
+/// `clone_dir` is the catalog checkout root (`paths.cache_dir_for(url)`);
+/// `rel_source` is the plugin's manifest-declared `source` sub-path relative
+/// to that root (the same value `plugin list` joins to build `plugin_dir`).
+/// The `git log` runs against `clone_dir` scoped to `rel_source` so the
+/// timestamp reflects that plugin's history, not the whole catalog's.
+///
+/// Returns `None` — degrade to the `indexed_at` fallback — when the clone
+/// isn't present / isn't a git repo, the subtree has no history (a shallow
+/// clone whose single commit didn't touch it, or an unpublished local
+/// catalog), or `git` fails for any reason. Failures never propagate: this
+/// mirrors the read-only, no-lock contract of `list`/`show` and must not
+/// change the command's exit code. All captured `git` output is scrubbed for
+/// credentials inside `catalog::git` before it could reach any surface.
+pub(crate) fn last_upstream_change_at_display(
+    clone_dir: &std::path::Path,
+    catalog: &str,
+    rel_source: &str,
+) -> Option<time::OffsetDateTime> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    // A missing `.git` means this is not a real clone (e.g. a fixture or a
+    // local-path catalog) — skip the shell-out entirely rather than let `git`
+    // walk up to some ancestor repository.
+    if !clone_dir.join(".git").exists() {
+        return None;
+    }
+    let git = crate::catalog::git::Git::new(catalog);
+    // `Ok(None)` = no history for the subtree; `Err` = git blew up. Both
+    // degrade to `None` here (best-effort display field).
+    let iso = git.last_commit_iso(clone_dir, rel_source).ok().flatten()?;
+    OffsetDateTime::parse(&iso, &Rfc3339).ok()
+}
+
+/// [`last_upstream_change_at_display`] for callers that already hold the fully
+/// resolved `plugin_dir` (e.g. `plugin show`, whose `resolve_plugin_dir`
+/// returns `clone_dir.join(source)` directly). Runs `git log` from inside
+/// `plugin_dir` scoped to `.`, letting `git` discover the enclosing repository
+/// upward — so a plugin subtree deeper than the clone root is handled without
+/// re-reading the catalog manifest to recover the `(clone_dir, source)` split.
+///
+/// Same best-effort contract: `None` when `plugin_dir` isn't inside a git
+/// working tree, has no history, or `git` fails. Never propagates.
+pub(crate) fn last_upstream_change_for_plugin_dir(
+    plugin_dir: &std::path::Path,
+    catalog: &str,
+) -> Option<time::OffsetDateTime> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    let git = crate::catalog::git::Git::new(catalog);
+    // `rel_path` empty → the helper substitutes `.`, i.e. "this directory's
+    // history"; `git` walks up to find `.git`. A non-repo `plugin_dir` makes
+    // `git` exit non-zero → `Err` → `None`.
+    let iso = git.last_commit_iso(plugin_dir, "").ok().flatten()?;
+    OffsetDateTime::parse(&iso, &Rfc3339).ok()
+}
 
 /// Open the index DB read-only-ish using the registry-derived seeds. We
 /// re-use [`crate::index::open`] which is idempotent on a re-open.
@@ -338,6 +406,62 @@ pub(crate) use crate::catalog::manifest::read_catalog_manifest;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    /// Fixed reference "now" so the relative-time bucketing is deterministic.
+    /// Parsed via the same `Rfc3339` path production uses (the `time` crate's
+    /// `macros` feature is not enabled, so `datetime!` is unavailable).
+    fn now() -> OffsetDateTime {
+        OffsetDateTime::parse("2026-01-15T12:00:00Z", &Rfc3339).expect("fixed reference now")
+    }
+
+    #[test]
+    fn human_relative_buckets_by_elapsed_time() {
+        let n = now();
+        // < 60s → "just now"
+        assert_eq!(
+            human_relative_at("2026-01-15T11:59:30Z", n),
+            "just now",
+            "30s ago",
+        );
+        assert_eq!(
+            human_relative_at("2026-01-15T12:00:00Z", n),
+            "just now",
+            "exactly now",
+        );
+        // < 60m → "Xm ago"
+        assert_eq!(
+            human_relative_at("2026-01-15T11:57:00Z", n),
+            "3m ago",
+            "3 minutes ago",
+        );
+        // < 24h → "Xh ago"
+        assert_eq!(
+            human_relative_at("2026-01-15T07:00:00Z", n),
+            "5h ago",
+            "5 hours ago",
+        );
+        // ≥ 24h → "Xd ago"
+        assert_eq!(
+            human_relative_at("2026-01-12T12:00:00Z", n),
+            "3d ago",
+            "3 days ago",
+        );
+    }
+
+    #[test]
+    fn human_relative_future_timestamp_is_just_now() {
+        // A `then` after `now` (clock skew) collapses to "just now", never a
+        // negative duration.
+        assert_eq!(human_relative_at("2026-01-15T12:05:00Z", now()), "just now");
+    }
+
+    #[test]
+    fn human_relative_unparsable_is_dash() {
+        assert_eq!(human_relative_at("not-a-timestamp", now()), "—");
+    }
 
     /// `registry_seeds()` must yield the DEFAULT (Medium) profile's embedder
     /// and reranker names, not the first embedder/reranker in registry order.

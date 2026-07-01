@@ -103,7 +103,14 @@ fn collect_rows(
             };
             let plugin_dir = clone_dir.join(&plugin.source);
 
-            let row = build_row(&id, &plugin_dir, conn, workspace_name)?;
+            let row = build_row(
+                &id,
+                &plugin_dir,
+                &clone_dir,
+                &plugin.source,
+                conn,
+                workspace_name,
+            )?;
             out.push(row);
         }
     }
@@ -119,6 +126,8 @@ fn collect_rows(
 fn build_row(
     id: &PluginId,
     plugin_dir: &std::path::Path,
+    clone_dir: &std::path::Path,
+    rel_source: &str,
     conn: &rusqlite::Connection,
     workspace_name: &str,
 ) -> Result<Row, TomeError> {
@@ -145,13 +154,15 @@ fn build_row(
     };
 
     // Build the JSON record alongside the table row so both surfaces share
-    // a single source of truth. `last_upstream_change` is left as None
-    // pending git log integration in a follow-up.
+    // a single source of truth. `last_upstream_change` is populated at DISPLAY
+    // time from the catalog clone's git history (best-effort, degrades to None).
     let last_indexed_at_dt = agg.last_indexed_at.as_deref().and_then(|s| {
         use time::OffsetDateTime;
         use time::format_description::well_known::Rfc3339;
         OffsetDateTime::parse(s, &Rfc3339).ok()
     });
+    let last_upstream_change =
+        super::last_upstream_change_at_display(clone_dir, &id.catalog, rel_source);
     let record = PluginRecord {
         id: id.clone(),
         version: version.clone().unwrap_or_default(),
@@ -159,7 +170,7 @@ fn build_row(
             .as_ref()
             .and_then(|m| m.author.as_ref().and_then(|a| a.display())),
         description: manifest.as_ref().and_then(|m| m.description.clone()),
-        last_upstream_change: None,
+        last_upstream_change,
         status,
         component_counts,
         last_indexed_at: last_indexed_at_dt,
@@ -191,6 +202,10 @@ fn emit_human(rows: &[Row]) -> Result<(), TomeError> {
         // Phase 5 / US5.b: was "Skills"; now reports both kinds.
         Cell::new("Entries"),
         Cell::new("Last indexed"),
+        // #309: the upstream committer date for the plugin's subtree, computed
+        // at display time from the catalog clone (best-effort; `—` when the
+        // clone has no history for it / isn't a git repo).
+        Cell::new("Last upstream change"),
     ]);
 
     for r in rows {
@@ -209,6 +224,18 @@ fn emit_human(rows: &[Row]) -> Result<(), TomeError> {
             .as_deref()
             .map(human_relative)
             .unwrap_or_else(|| "—".to_owned());
+        // #309: render the upstream change relative too, falling back to `—`.
+        // The stored value is an `OffsetDateTime`; format it back to RFC3339
+        // so it flows through the shared `human_relative` bucketer.
+        let last_upstream = r
+            .record
+            .last_upstream_change
+            .and_then(|dt| {
+                dt.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .map(|s| human_relative(&s))
+            .unwrap_or_else(|| "—".to_owned());
 
         table.add_row(vec![
             Cell::new(&r.id.catalog),
@@ -217,6 +244,7 @@ fn emit_human(rows: &[Row]) -> Result<(), TomeError> {
             Cell::new(status_cell),
             Cell::new(entries),
             Cell::new(last_indexed),
+            Cell::new(last_upstream),
         ]);
     }
     writeln!(out, "{table}")?;
