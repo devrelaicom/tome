@@ -166,12 +166,12 @@ the [authoring overview](./overview.md).
 
 ## Scripting with `--json`
 
-`--json` emits a JSONL stream — one JSON object per line. Each diagnostic is a
-`"type": "diagnostic"` line, and the run ends with one `"type": "result"`
-summary line:
+`--json` emits a JSONL stream — one JSON object per line. Each diagnostic
+carries a `"type": "diagnostic"` discriminator, and the run ends with one
+`"type": "result"` summary line:
 
 ```json
-{"type":"diagnostic","rule":"convert/dropped-manifest-field","severity":"info","message":"plugin.json `homepage` is not modelled by Tome; dropping it","file":null,"line":null,"autofixable":false}
+{"rule":"convert/unsupported-component","severity":"warning","message":"`monitors/` (monitors) is not representable in Tome; dropped from the conversion","file":null,"line":null,"autofixable":false,"type":"diagnostic"}
 {"type":"result","harness":"claude-code","level":"plugin","source_name":"demo","final_name":"demo-tome","target":"/out/demo-tome","dry_run":false,"written":42,"errors":0,"warnings":1,"infos":1,"strict_blocked":null}
 ```
 
