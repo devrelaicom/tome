@@ -200,6 +200,7 @@ tome workspace init my-project              # creates ~/.tome/workspaces/my-proj
 tome workspace list                         # all workspaces + their counts
 tome workspace use my-project               # bind the current project; writes .tome/config.toml + runs sync
 tome workspace info                         # the resolved workspace for the current directory
+tome workspace current                      # just the bound name, one line (for prompts/scripts)
 
 # Target a workspace explicitly with the global --workspace flag:
 tome --workspace my-project plugin enable midnight-expert/midnight-verify
