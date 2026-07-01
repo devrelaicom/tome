@@ -104,7 +104,7 @@ pub(crate) fn open_plugins_name_ok(s: &str) -> bool {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PluginIdParseError {
     #[error(
-        "plugin id `{0}` must be `<catalog>/<plugin>`\nhint: use the form `<catalog>/<plugin>` (e.g. `my-catalog/my-plugin`); run `tome plugin list` to see valid ids"
+        "plugin id `{0}` must be `<catalog>/<plugin>`\nhint: use the form `<catalog>/<plugin>` (e.g. `my-catalog/my-plugin`); run `tome plugin list` to see valid ids, or `tome plugin` to browse and enable interactively"
     )]
     Format(String),
 
