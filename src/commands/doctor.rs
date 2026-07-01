@@ -771,12 +771,14 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
             // Issue #291: when no credential resolves, NAME the exact expected
             // env var (`TOME_<NAME>_API_KEY`, derived via the shared SSOT — never
             // hardcoded) so the fix is obvious inline. The credential VALUE is
-            // never printed — only the env-var NAME (Principle XIII).
-            let missing_cred_env = crate::provider::config::derive_env_var_name(&p.name);
+            // never printed — only the env-var NAME (Principle XIII). The
+            // derivation is gated inside the no-credential branch so it isn't
+            // computed-and-discarded for every provider row that resolves fine.
             let cred = if p.credential_resolvable {
                 "credential resolved".to_owned()
             } else {
-                format!("no credential (set {missing_cred_env})")
+                let env_var = crate::provider::config::derive_env_var_name(&p.name);
+                format!("no credential (set {env_var})")
             };
             let reach = match p.reachable {
                 Some(true) => format!("  {ok} reachable"),

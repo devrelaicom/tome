@@ -521,6 +521,15 @@ pub(crate) fn apply_provider_credential_findings(
 ) {
     for finding in checks::build_provider_credential_findings(cfg) {
         // Escalate `overall` monotonically per the finding's severity.
+        // DELIBERATE divergence from `classify`'s bundled-summariser rule: a
+        // broken *bundled* summariser is Unhealthy there (its model files are
+        // missing/corrupt — the rules pipeline can't run at all), but a missing
+        // summariser-*provider credential* is only Degraded here (it's a remote
+        // config nudge; summarisation is optional to search, which still serves
+        // on the bundled/absent-summary path). Do NOT "fix" this into false
+        // consistency with `classify` — the two conditions are genuinely
+        // different severities. Only embedding is critical (search cannot run
+        // without a working embedder).
         let severity = if finding.critical {
             DoctorClassification::Unhealthy
         } else {
@@ -1566,6 +1575,85 @@ mod tests {
             fixes[0].diagnosis.contains("embedding"),
             "diagnosis names the capability: {}",
             fixes[0].diagnosis,
+        );
+    }
+
+    /// R3: ONE provider serving 2+ capabilities with a missing credential. A
+    /// single `[providers.shared]` (kind `voyage`, legal for BOTH embedding and
+    /// reranker per the FR-005 matrix) referenced by both → TWO findings for
+    /// `provider:shared`, and the embedding-critical finding must win the
+    /// monotone escalation (→ Unhealthy) regardless of the (provider,capability)
+    /// sort order — "embedding" sorts before "reranker", but the test asserts the
+    /// max is taken, not the last-seen.
+    #[test]
+    fn provider_credential_finding_shared_provider_two_caps_embedding_wins() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX. `shared` derives
+        // `TOME_SHARED_API_KEY`.
+        unsafe {
+            std::env::remove_var("TOME_SHARED_API_KEY");
+        }
+        let mut cfg = crate::config::Config::default();
+        cfg.providers.insert(
+            "shared".to_string(),
+            crate::config::ProviderEntry {
+                kind: crate::config::ProviderKind::Voyage,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        // Voyage is legal for BOTH embedding and reranker.
+        cfg.embedding.provider = Some("shared".to_string());
+        cfg.embedding.model = Some("voyage-3".to_string());
+        cfg.reranker.provider = Some("shared".to_string());
+        cfg.reranker.model = Some("rerank-2".to_string());
+
+        let mut fixes = Vec::new();
+        let mut overall = DoctorClassification::Ok;
+        apply_provider_credential_findings(&mut fixes, &mut overall, &cfg);
+
+        // Two findings, both for the shared provider.
+        assert_eq!(fixes.len(), 2, "one finding per referenced capability");
+        assert!(
+            fixes
+                .iter()
+                .all(|f| f.subsystem == Subsystem::Provider("shared".to_owned())),
+            "both findings must target `provider:shared`",
+        );
+        // One per capability (sorted: embedding, reranker).
+        let caps: Vec<&str> = fixes
+            .iter()
+            .map(|f| {
+                if f.diagnosis.contains("embedding") {
+                    "embedding"
+                } else if f.diagnosis.contains("reranker") {
+                    "reranker"
+                } else {
+                    "?"
+                }
+            })
+            .collect();
+        assert!(
+            caps.contains(&"embedding"),
+            "embedding finding present: {caps:?}"
+        );
+        assert!(
+            caps.contains(&"reranker"),
+            "reranker finding present: {caps:?}"
+        );
+        // Both name the exact env var.
+        assert!(
+            fixes
+                .iter()
+                .all(|f| f.diagnosis.contains("TOME_SHARED_API_KEY")),
+            "both findings must name TOME_SHARED_API_KEY",
+        );
+        // The embedding-critical finding wins the monotone escalation → Unhealthy,
+        // independent of the (provider, capability) sort order.
+        assert_eq!(
+            overall,
+            DoctorClassification::Unhealthy,
+            "the embedding-critical finding must drive Unhealthy even alongside a reranker (Degraded) finding",
         );
     }
 
