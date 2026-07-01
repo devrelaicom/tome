@@ -211,7 +211,12 @@ pub(crate) fn reconcile_agents(
 /// failure is recorded on the forward-progress `first_error` path; the
 /// prior-sync file (if any) is left in place — loud-but-isolated. The US5
 /// `doctor --fix` removes orphaned `<plugin>__*` files.
-fn prepare_agent(
+///
+/// SSOT: shared with the read-only `harness preview` (issue #288) so the preview
+/// parses each enabled agent identically to the sync pass — same
+/// `resolve_entry_body_path`, same bounded read, same `CanonicalAgent::parse` —
+/// and therefore feeds `translate_agent` the same input, matching sync's output.
+pub(crate) fn prepare_agent(
     conn: &rusqlite::Connection,
     paths: &Paths,
     workspace: &str,

@@ -214,6 +214,10 @@
         "info": [
           "--verbose"
         ],
+        "preview": [
+          "--plugin",
+          "--verbose"
+        ],
         "sync": [
           "--verbose"
         ]

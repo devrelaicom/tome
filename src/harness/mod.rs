@@ -117,6 +117,11 @@ pub mod pi;
 /// the `include!` target shapes and exposes the `build.rs`-generated
 /// `HARNESS_PLUGINS` slice. Harness-runtime-executed — the sync boundary holds.
 pub mod plugin_assets;
+/// Per-harness fidelity preview (issue #288). A pure, read-only computation
+/// that reuses the sync translation SSOTs (`translate_agent`, the canonical hook
+/// enumeration, the tiered-entry query, the guardrails reader) to report — per
+/// enabled entry — what `harness sync` would deliver vs drop for one harness.
+pub mod preview;
 /// Per-sink reconcilers (hooks / guardrails / agents) extracted from `sync`
 /// in Phase 7 (FR-011). Crate-internal: the orchestrator and the doctor are
 /// the only callers.
