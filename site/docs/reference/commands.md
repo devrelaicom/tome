@@ -292,6 +292,20 @@ file log rather than failing to start.
 - `--workspace <name>` runs the command against a named workspace. When
   omitted, the resolver consults `TOME_WORKSPACE` and the project-marker walk
   before falling back to the privileged `global` workspace.
+- `--non-interactive` auto-confirms every prompt-bearing command
+  (`catalog remove`, `plugin enable`/`disable`, `models remove`,
+  `telemetry reset`), equivalent to passing that command's `--force` / `--yes`.
+  The environment variable `TOME_NONINTERACTIVE=1` (any truthy value — set,
+  non-empty, and not `0`/`false`/`no`/`off`) does the same. Either lets a
+  scripted caller drive Tome without knowing each command's skip flag. A
+  persistently-exported `TOME_NONINTERACTIVE=1` also auto-confirms the prompts
+  inside the otherwise-interactive `tome plugin` TUI — intended, since the env
+  var auto-confirms *every* prompt. It does **not** bypass non-prompt safety
+  refusals such as `catalog remove`'s enabled-plugin cascade guard (exit `53`)
+  or `workspace remove`'s bound-project guard (exit `16`), which still require
+  the per-command `--force`. For consistency every prompt-bearing command also
+  accepts both `--force` and `--yes` (the non-canonical spelling is a hidden
+  alias).
 - `-v` / `--verbose` raises log verbosity to info; `-vv` to debug
   (env: `TOME_LOG`).
 - On `SIGINT` (Ctrl-C), Tome exits with code `8`.

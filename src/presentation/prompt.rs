@@ -9,11 +9,51 @@
 //! equivalent exposed elsewhere (FR-052) — `--force`, an explicit selector
 //! flag, etc. This module's `Err(NotATerminal)` is the signpost that points
 //! callers there.
+//!
+//! The global `--non-interactive` flag (and the `TOME_NONINTERACTIVE` env var)
+//! auto-confirm every prompt-bearing command. Rather than sprinkle the check
+//! through each command, the decision lands in one place: [`non_interactive`].
+//! Confirmation-gated commands read it alongside their per-command skip flag
+//! (`--force` / `--yes`), so any of the three independently suppresses the
+//! prompt. See the module `set_non_interactive` / `non_interactive` pair,
+//! which mirrors `presentation::colour::{set_disabled, is_enabled}`.
+
+use std::sync::OnceLock;
 
 use inquire::{Confirm, MultiSelect, Select};
 
 use crate::error::TomeError;
 use crate::output;
+
+/// Set by the CLI when `--non-interactive` is passed. Forwarded from `main.rs`
+/// before dispatch, mirroring `colour::set_disabled`. `None` until set.
+static NON_INTERACTIVE: OnceLock<bool> = OnceLock::new();
+
+/// Forward the global `--non-interactive` flag from the CLI parser. Idempotent:
+/// only the first call wins, so a later dispatch can't flip the decision.
+pub fn set_non_interactive(enabled: bool) {
+    let _ = NON_INTERACTIVE.set(enabled);
+}
+
+/// Whether the caller wants every prompt auto-confirmed. True when the global
+/// `--non-interactive` flag was passed OR the `TOME_NONINTERACTIVE` env var is
+/// truthy (set, non-empty, and not one of `0`/`false`/`no`/`off`,
+/// case-insensitive — the shared [`crate::util::env_truthy`] convention, the
+/// same one `telemetry::config`'s CI detection uses). The env var is read live
+/// so a caller that only sets the environment (never the flag) is honoured; a
+/// persistently-exported `TOME_NONINTERACTIVE=1` therefore also auto-confirms
+/// the otherwise-interactive `tome plugin` TUI prompts — intended per the
+/// "env auto-confirms every prompt" semantics.
+///
+/// Confirmation-gated commands combine this with their per-command skip flag:
+/// `if !args.force && !prompt::non_interactive() { … prompt … }`. Any of the
+/// three suppresses the prompt.
+pub fn non_interactive() -> bool {
+    if *NON_INTERACTIVE.get().unwrap_or(&false) {
+        return true;
+    }
+    crate::util::env_truthy("TOME_NONINTERACTIVE")
+}
 
 /// Hard-require both ends of the user interaction to be a terminal. Used at
 /// the entry of every prompt function below and at the entry of the
@@ -108,4 +148,11 @@ mod tests {
         let r = confirm("are you sure?", false);
         assert!(matches!(r, Err(TomeError::NotATerminal)));
     }
+
+    // The env-var half of `non_interactive()` is the shared
+    // `crate::util::env_truthy`; its truthy/falsey token parse is covered
+    // lock-free (no process-env mutation) in `crate::util::env`'s own tests.
+    // `NON_INTERACTIVE` is a process-global OnceLock (like `colour::ENABLED`),
+    // so the flag half + the composed CLI behaviour are covered by the
+    // binary-driven integration tests (`catalog_remove` / telemetry `identity`).
 }

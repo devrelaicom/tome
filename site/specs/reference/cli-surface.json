@@ -309,6 +309,7 @@
   },
   "globalFlags": [
     "--json",
+    "--non-interactive",
     "--workspace"
   ],
   "exitCodes": [

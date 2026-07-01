@@ -219,6 +219,88 @@ fn reset_without_yes_on_non_tty_is_exit_54() {
     );
 }
 
+/// Issue #305 — the global `--non-interactive` flag suppresses the reset
+/// confirmation prompt just like the per-command `--yes` (baseline:
+/// `reset_without_yes_on_non_tty_is_exit_54`). `telemetry reset` is a second,
+/// distinct prompt-bearing command exercising the `--yes` flag family.
+#[test]
+fn reset_non_interactive_flag_suppresses_prompt() {
+    let env = ToolEnv::new();
+    assert!(run(&env, &["telemetry", "on"]).status.success());
+    let before = status_json(&env)["install_uuid"]
+        .as_str()
+        .expect("uuid after on")
+        .to_string();
+
+    let out = run(&env, &["telemetry", "reset", "--non-interactive"]);
+    assert!(
+        out.status.success(),
+        "--non-interactive should skip the reset prompt; stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Assert the DURABLE effect, not just exit 0: reset must mint a fresh UUID
+    // (mirrors `reset_yes_changes_the_install_uuid`).
+    let after = status_json(&env)["install_uuid"]
+        .as_str()
+        .expect("uuid after reset")
+        .to_string();
+    assert_ne!(
+        before, after,
+        "--non-interactive reset must actually run and mint a fresh install UUID",
+    );
+}
+
+/// Issue #305 — `TOME_NONINTERACTIVE=1` suppresses the reset prompt too. Built
+/// from `clean_cmd` (which strips telemetry/CI vars) plus the one var under
+/// test; each spawned process carries its own env map.
+#[test]
+fn reset_tome_noninteractive_env_var_suppresses_prompt() {
+    let env = ToolEnv::new();
+    assert!(run(&env, &["telemetry", "on"]).status.success());
+    let before = status_json(&env)["install_uuid"]
+        .as_str()
+        .expect("uuid after on")
+        .to_string();
+
+    let out = clean_cmd(&env)
+        .env("TOME_NONINTERACTIVE", "1")
+        .args(["telemetry", "reset"])
+        .output()
+        .expect("spawn tome binary");
+    assert!(
+        out.status.success(),
+        "TOME_NONINTERACTIVE=1 should skip the reset prompt; stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Durable effect: the reset actually ran (fresh UUID), it didn't merely
+    // exit 0 on a short-circuit.
+    let after = status_json(&env)["install_uuid"]
+        .as_str()
+        .expect("uuid after reset")
+        .to_string();
+    assert_ne!(
+        before, after,
+        "TOME_NONINTERACTIVE reset must actually run and mint a fresh install UUID",
+    );
+}
+
+/// Issue #305 — `--force` is a hidden alias on `telemetry reset` (which only
+/// documented `--yes`), so both non-interactive spellings work everywhere.
+#[test]
+fn reset_force_alias_is_accepted() {
+    let env = ToolEnv::new();
+    assert!(run(&env, &["telemetry", "on"]).status.success());
+
+    let out = run(&env, &["telemetry", "reset", "--force"]);
+    assert!(
+        out.status.success(),
+        "--force alias should behave like --yes on reset; stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // purge — delete the id and switch telemetry off
 // ---------------------------------------------------------------------------

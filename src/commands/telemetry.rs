@@ -318,9 +318,10 @@ fn off(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
 // ---------------------------------------------------------------------------
 
 fn reset(paths: &Paths, args: TelemetryResetArgs, mode: Mode) -> Result<(), TomeError> {
-    if !args.yes {
+    if !args.yes && !prompt::non_interactive() {
         // Confirm-or-refuse. `prompt::confirm` refuses up front on a non-TTY with
-        // `NotATerminal` (exit 54), so a scripted reset MUST pass `--yes`.
+        // `NotATerminal` (exit 54), so a scripted reset MUST pass `--yes` (or the
+        // global `--non-interactive` / `TOME_NONINTERACTIVE`).
         let proceed = prompt::confirm(
             "This severs telemetry continuity (new install UUID, queue cleared). Continue?",
             false,

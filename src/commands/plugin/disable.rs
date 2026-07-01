@@ -35,7 +35,7 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
     let _ = resolve_plugin_dir(&id, &conn, scope.scope.name().as_str(), &paths)?;
     drop(conn);
 
-    if !args.force {
+    if !args.force && !crate::presentation::prompt::non_interactive() {
         // Non-TTY without --force → exit 54 per FR-007 / FR-051. We emit the
         // documented pointer line to stderr before returning so the user
         // sees specific guidance, not just the generic NotATerminal Display.

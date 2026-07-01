@@ -58,6 +58,13 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
+    /// Auto-confirm every prompt-bearing command (equivalent to passing that
+    /// command's `--force` / `--yes`). Also enabled by `TOME_NONINTERACTIVE=1`.
+    /// A non-`global` per-command `--yes` still exists on `plugin enable` and
+    /// `telemetry reset`; this global switch works after any subcommand.
+    #[arg(long = "non-interactive", global = true)]
+    pub non_interactive: bool,
+
     #[command(flatten)]
     pub scope: GlobalScopeArgs,
 
@@ -278,8 +285,9 @@ pub enum TelemetryCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct TelemetryResetArgs {
-    /// Skip the confirmation prompt.
-    #[arg(long)]
+    /// Skip the confirmation prompt. `--force` is accepted as a hidden alias
+    /// so the non-interactive spelling is consistent across commands (FR-021).
+    #[arg(long, alias = "force")]
     pub yes: bool,
 }
 
@@ -785,7 +793,8 @@ pub struct ModelsRemoveArgs {
     /// The registered model name (e.g. `bge-small-en-v1.5`).
     pub name: String,
     /// Skip the confirmation prompt. Required when stdin is not a TTY.
-    #[arg(long)]
+    /// `--yes` is accepted as a hidden alias (FR-021).
+    #[arg(long, alias = "yes")]
     pub force: bool,
 }
 
@@ -836,7 +845,8 @@ pub struct CatalogRemoveArgs {
     /// The catalog display name to remove.
     pub name: String,
     /// Skip the confirmation prompt. Required when stdin is not a TTY.
-    #[arg(long)]
+    /// `--yes` is accepted as a hidden alias (FR-021).
+    #[arg(long, alias = "yes")]
     pub force: bool,
 }
 
@@ -894,8 +904,9 @@ pub struct PluginEnableArgs {
     pub id: String,
     /// Skip the model-download confirmation prompt. Required to enable a
     /// plugin from a non-interactive context (e.g. CI) when models are
-    /// not yet installed.
-    #[arg(long)]
+    /// not yet installed. `--force` is accepted as a hidden alias so the
+    /// non-interactive spelling is consistent across commands (FR-021).
+    #[arg(long, alias = "force")]
     pub yes: bool,
     /// Routing tier (1|2|3) to apply to ALL of this plugin's skills and
     /// commands at enable time. Omitted → the default tier 3. Refine
@@ -916,8 +927,9 @@ pub struct PluginDisableArgs {
     /// The plugin to disable, as `<catalog>/<plugin>`.
     pub id: String,
     /// Skip the confirmation prompt. Required to disable a plugin from a
-    /// non-interactive context (e.g. CI).
-    #[arg(long)]
+    /// non-interactive context (e.g. CI). `--yes` is accepted as a hidden
+    /// alias so both non-interactive spellings work everywhere (FR-021).
+    #[arg(long, alias = "yes")]
     pub force: bool,
     /// Apply the change to your harnesses immediately: after disabling, run the
     /// same propagation `tome sync` performs over every project bound to the

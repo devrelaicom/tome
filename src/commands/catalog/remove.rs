@@ -69,7 +69,12 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
         });
     }
 
-    if !args.force {
+    // The confirmation prompt (distinct from the `CatalogHasEnabledPlugins`
+    // cascade-safety gate above, which `--non-interactive` deliberately does NOT
+    // bypass — silently cascading enabled-plugin teardown would violate the
+    // "explicit opt-in for destructive ops" principle). `--force`, the global
+    // `--non-interactive`, or `TOME_NONINTERACTIVE` each suppresses this prompt.
+    if !args.force && !crate::presentation::prompt::non_interactive() {
         if !output::stdin_is_tty() {
             return Err(TomeError::Usage(
                 "'tome catalog remove' requires --force in non-interactive contexts".into(),
