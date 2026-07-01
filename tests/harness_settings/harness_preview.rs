@@ -700,3 +700,107 @@ fn json_report_shape_is_stable() {
     );
     assert_eq!(hook["has_guardrails_prose"], true);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #292: the doctor unrepresented-hooks report agrees with the preview's
+// GUARDRAILS-fallback events on a rules-only-for-hooks harness (the SSOT reuse
+// + SAME-SET-SAME-RESOLVER guarantee — both call the same canonical-hook
+// enumeration + `hook_support()`/rules-only definition).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn doctor_unrepresented_hooks_agrees_with_preview_guardrails_events() {
+    use tome::doctor::checks::build_unrepresented_hooks_report;
+    use tome::settings::resolver::{EffectiveHarness, EffectiveHarnessList};
+
+    let _lock = lock();
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::cline::CLINE)]);
+    let fx = Fixture::build();
+    seed_full_plugin(&fx.paths, "cat", "plug");
+
+    // Preview side: cline is rules-only for hooks, so the plugin's PreToolUse
+    // hook falls to GUARDRAILS (never native).
+    let preview = fx.preview("cline", None);
+    assert!(
+        !preview.supports_native_hooks,
+        "cline has no native hook translation",
+    );
+    let preview_guardrails: Vec<String> = preview
+        .hooks
+        .iter()
+        .flat_map(|h| h.guardrails_events.clone())
+        .collect();
+    assert!(
+        preview_guardrails.contains(&"PreToolUse".to_string()),
+        "preview must report PreToolUse as a GUARDRAILS-fallback event: {preview_guardrails:?}",
+    );
+
+    // Doctor side: the SAME (harness × enabled plugin hooks) set via the shared
+    // SSOT, scoped to cline.
+    let effective = EffectiveHarnessList {
+        harnesses: vec![EffectiveHarness {
+            name: "cline".to_owned(),
+            source_chain: vec!["project".to_owned()],
+        }],
+        excluded: vec![],
+    };
+    let ws = WorkspaceName::parse(WS).expect("parse ws");
+    let doctor = build_unrepresented_hooks_report(&fx.paths, &ws, fx.home(), Some(&effective))
+        .expect("build_unrepresented_hooks_report");
+
+    assert_eq!(
+        doctor.rules_only_harnesses,
+        vec!["cline".to_owned()],
+        "cline must be the rules-only-for-hooks harness",
+    );
+    let doctor_events: Vec<String> = doctor.hooks.iter().map(|h| h.event.clone()).collect();
+    assert!(
+        doctor_events.contains(&"PreToolUse".to_string()),
+        "doctor must report the same PreToolUse event preview flags as GUARDRAILS: {doctor_events:?}",
+    );
+    // Agreement: every event doctor reports unrepresented is a GUARDRAILS event
+    // in the preview (same native-vs-guardrails decision, single SSOT).
+    for ev in &doctor_events {
+        assert!(
+            preview_guardrails.contains(ev),
+            "doctor event {ev} not in preview guardrails_events {preview_guardrails:?}",
+        );
+    }
+}
+
+/// A hook-capable harness (`codex`) delivers the plugin's supported events
+/// natively, so the doctor unrepresented-hooks report is EMPTY for it — proving
+/// the report excludes the five `#318` dispatcher harnesses (not just the
+/// unit-tested exclusion, but through the seeded canonical-hook enumeration).
+#[test]
+fn doctor_unrepresented_hooks_empty_for_hook_capable_harness() {
+    use tome::doctor::checks::build_unrepresented_hooks_report;
+    use tome::settings::resolver::{EffectiveHarness, EffectiveHarnessList};
+
+    let _lock = lock();
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::codex::CODEX)]);
+    let fx = Fixture::build();
+    seed_full_plugin(&fx.paths, "cat", "plug");
+
+    let effective = EffectiveHarnessList {
+        harnesses: vec![EffectiveHarness {
+            name: "codex".to_owned(),
+            source_chain: vec!["project".to_owned()],
+        }],
+        excluded: vec![],
+    };
+    let ws = WorkspaceName::parse(WS).expect("parse ws");
+    let doctor = build_unrepresented_hooks_report(&fx.paths, &ws, fx.home(), Some(&effective))
+        .expect("build_unrepresented_hooks_report");
+
+    assert!(
+        doctor.rules_only_harnesses.is_empty(),
+        "codex is hook-capable → not rules-only for hooks: {:?}",
+        doctor.rules_only_harnesses,
+    );
+    assert!(
+        doctor.hooks.is_empty(),
+        "no rules-only-for-hooks harness in scope → no unrepresented hooks: {:?}",
+        doctor.hooks,
+    );
+}

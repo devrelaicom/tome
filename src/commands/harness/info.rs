@@ -98,6 +98,20 @@ pub struct HarnessInfoOutcome {
     /// so byte-stable pins are additive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hook_translation_notice: Option<String>,
+    /// Issue #292 (translation-fidelity loss): advisory notice when this harness
+    /// is rules-only for hooks (no `RealJson` sink, no `#318` dispatcher, not an
+    /// opt-in target) AND ≥1 enabled plugin ships hooks in scope. The notice
+    /// explains that those hooks are rendered as `GUARDRAILS.md` prose only, not
+    /// enforced natively — the hooks analogue of `unrepresented_agents_notice`.
+    /// `None` for hook-capable harnesses (claude-code / the five `#318`
+    /// harnesses), for the opt-in targets `generic` / `generic-op`, or when no
+    /// enabled plugin ships hooks. `goose` DOES show the notice — it is a
+    /// detectable harness with no native hook path (rules-only for hooks).
+    ///
+    /// Appended after `hook_translation_notice` + `skip_serializing_if`-gated so
+    /// byte-stable pins are additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks_notice: Option<String>,
 }
 
 /// Per-harness snapshot captured outside the registry's read guard.
@@ -125,6 +139,11 @@ struct ModuleSnapshot {
     /// captured from `hook_support().map(|hs| hs.events)`. `None` when the
     /// harness has no hook translation support.
     module_hook_events: Option<Vec<crate::harness::hooks_ir::PortableEvent>>,
+    /// Issue #292: whether this harness is rules-only for hooks (no `RealJson`
+    /// sink, no `#318` dispatcher, not an opt-in target). Captured from the SSOT
+    /// [`HarnessModule::is_rules_only_for_hooks`] so the hooks notice gate outside
+    /// the read guard mirrors the doctor/status definition exactly.
+    module_is_rules_only_for_hooks: bool,
 }
 
 pub fn run(
@@ -151,6 +170,7 @@ pub fn run(
         module_supports_native_agents: m.supports_native_agents(),
         module_is_opt_in_target: m.is_opt_in_target(),
         module_hook_events: m.hook_support().map(|hs| hs.events.to_vec()),
+        module_is_rules_only_for_hooks: m.is_rules_only_for_hooks(),
     };
     // Phase 11 / US4 (M1): resolve via the effective registry FIRST (so a test
     // override and the supported harnesses both work), then fall back to the
@@ -250,6 +270,46 @@ pub fn run(
         parts.join("; ")
     });
 
+    // Issue #292: hooks notice for a rules-only-for-hooks harness — the hooks
+    // analogue of `unrepresented_agents_notice`. Shown only when THIS harness
+    // cannot deliver hooks natively (SSOT `is_rules_only_for_hooks`) AND ≥1
+    // enabled plugin ships hooks in scope. Counted via the SAME SSOT the doctor
+    // report + status count use (`build_unrepresented_hooks_report`), scoped to
+    // this single harness — so all three surfaces resolve the set identically.
+    let hooks_notice = if snap.module_is_rules_only_for_hooks {
+        let single = crate::settings::resolver::EffectiveHarnessList {
+            harnesses: vec![crate::settings::resolver::EffectiveHarness {
+                name: snap.name.clone(),
+                source_chain: Vec::new(),
+            }],
+            excluded: Vec::new(),
+        };
+        let unrepresented = crate::doctor::checks::build_unrepresented_hooks_report(
+            paths,
+            scope.scope.name(),
+            &home,
+            Some(&single),
+        )
+        .map(|r| r.hooks.len())
+        .unwrap_or(0);
+        if unrepresented > 0 {
+            Some(if unrepresented == 1 {
+                "1 enabled plugin hook has no native form on this harness; \
+                 it is rendered as GUARDRAILS.md prose only, not enforced."
+                    .to_string()
+            } else {
+                format!(
+                    "{unrepresented} enabled plugin hooks have no native form on this \
+                     harness; they are rendered as GUARDRAILS.md prose only, not enforced."
+                )
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Phase 11 / US5 (T063): render the paste-able MCP snippet from the
     // harness's dialect, built with the canonical args the sync writer uses
     // (`mcp --workspace <ws> --harness <name>`, the `--harness` trailing so
@@ -293,6 +353,7 @@ pub fn run(
         mcp_snippet,
         unrepresented_agents_notice,
         hook_translation_notice,
+        hooks_notice,
     };
 
     match mode {
@@ -474,6 +535,12 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
         writeln!(out)?;
         writeln!(out, "  Hook translation: {notice}")?;
     }
+    // Issue #292: hooks advisory notice (for rules-only-for-hooks harnesses with
+    // enabled plugin hooks that fall back to GUARDRAILS prose).
+    if let Some(notice) = &outcome.hooks_notice {
+        writeln!(out)?;
+        writeln!(out, "  Note: {notice}")?;
+    }
     Ok(())
 }
 
@@ -496,6 +563,7 @@ mod tests {
             mcp_snippet: snippet,
             unrepresented_agents_notice: None,
             hook_translation_notice: None,
+            hooks_notice: None,
         }
     }
 
@@ -514,6 +582,7 @@ mod tests {
             mcp_snippet: None,
             unrepresented_agents_notice: notice,
             hook_translation_notice: None,
+            hooks_notice: None,
         }
     }
 

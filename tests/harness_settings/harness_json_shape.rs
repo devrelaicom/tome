@@ -55,6 +55,8 @@ fn harness_info_outcome_serialises_byte_stable_with_references() {
         unrepresented_agents_notice: None,
         // US11: `None` → `skip_serializing_if` omits it; pin UNCHANGED.
         hook_translation_notice: None,
+        // Issue #292: `None` → `skip_serializing_if` omits it; pin UNCHANGED.
+        hooks_notice: None,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
     assert_eq!(
@@ -86,6 +88,8 @@ fn harness_info_outcome_mcp_snippet_appends_last_when_present() {
         unrepresented_agents_notice: None,
         // US11: `None` → `skip_serializing_if` omits it; mcp_snippet stays last.
         hook_translation_notice: None,
+        // Issue #292: `None` → `skip_serializing_if` omits it; mcp_snippet stays last.
+        hooks_notice: None,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
     assert!(

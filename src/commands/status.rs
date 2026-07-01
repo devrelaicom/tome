@@ -49,6 +49,8 @@ pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     fill_unrepresented_agents(&mut report, scope, &paths);
     // US11: populate the hook-translation harness count (read-only, best-effort).
     fill_hook_translation_harnesses(&mut report, scope, &paths);
+    // Issue #292: populate the unrepresented-hooks count (read-only, best-effort).
+    fill_unrepresented_hooks(&mut report, scope, &paths);
     // Issue #287: report a malformed `~/.tome/config.toml` instead of dying.
     // `status` is dispatched through the lenient resolver (see `main.rs`), so it
     // reaches here even when the config won't parse; this surfaces the parse
@@ -163,6 +165,16 @@ pub struct StatusReport {
     /// `"unrepresented_agents":0,"hook_translation_harnesses":0}` when the config
     /// is well-formed (the `config` key below is then omitted).
     pub hook_translation_harnesses: u32,
+    /// Issue #292 (translation-fidelity loss): the number of enabled plugin
+    /// hooks (distinct `(catalog, plugin, event)` tuples) that no rules-only-for-
+    /// hooks harness in the current effective list can deliver natively — they
+    /// fall back to `GUARDRAILS.md` prose. `0` when no rules-only-for-hooks
+    /// harness is in scope, when no enabled plugin ships hooks, or when the DB is
+    /// absent. Always serialised (plain `u32`); the minimal JSON now ends with
+    /// `"hook_translation_harnesses":0,"unrepresented_hooks":0}` (the `config`
+    /// key below is then omitted). Counted via the SAME SSOT the doctor report
+    /// uses ([`crate::doctor::checks::build_unrepresented_hooks_report`]).
+    pub unrepresented_hooks: u32,
     /// Issue #287: global-config health. `None` when `~/.tome/config.toml` is
     /// absent or parses cleanly; `Some` carries the parse diagnosis. Appended
     /// LAST + `skip_serializing_if`-gated so a clean system keeps the pre-existing
@@ -250,6 +262,8 @@ pub fn assemble_report(
         unrepresented_agents: 0,
         // `run` fills this via `fill_hook_translation_harnesses` (read-only).
         hook_translation_harnesses: 0,
+        // `run` fills this via `fill_unrepresented_hooks` (read-only).
+        unrepresented_hooks: 0,
         // `run` fills this via `fill_config_health` (needs the global config
         // path, which `assemble_report` doesn't take). `None` ⇒ JSON omits it.
         config: None,
@@ -359,6 +373,36 @@ fn fill_hook_translation_harnesses(
             .count()
     });
     report.hook_translation_harnesses = u32::try_from(count).unwrap_or(u32::MAX);
+}
+
+/// Issue #292: populate `report.unrepresented_hooks` with the count of enabled
+/// plugin hooks (distinct `(catalog, plugin, event)`) that no rules-only-for-
+/// hooks harness in the effective list can deliver natively. Read-only;
+/// silently leaves 0 on any failure (status must always render).
+///
+/// Routes through the SAME SSOT the doctor report uses
+/// ([`crate::doctor::checks::build_unrepresented_hooks_report`]) — so the two
+/// surfaces resolve "the set of (harness × enabled plugin hooks)" by the same
+/// mechanism (the P9/P11 same-set-same-resolver discipline), rather than a
+/// second independent enumeration.
+fn fill_unrepresented_hooks(report: &mut StatusReport, scope: &ResolvedScope, paths: &Paths) {
+    let Some(effective) = resolve_effective_for_status(scope, paths) else {
+        return;
+    };
+    // Raw home for `SyncDeps` (unused by the canonical-hook enumeration, but the
+    // struct requires it). Best-effort — bail on an unresolvable HOME.
+    let Ok(home) = crate::commands::harness::home_root() else {
+        return;
+    };
+    let ws_name = scope.scope.name();
+    if let Ok(rep) = crate::doctor::checks::build_unrepresented_hooks_report(
+        paths,
+        ws_name,
+        &home,
+        Some(&effective),
+    ) {
+        report.unrepresented_hooks = u32::try_from(rep.hooks.len()).unwrap_or(u32::MAX);
+    }
 }
 
 /// Issue #287: populate `report.config` when `~/.tome/config.toml` cannot be
@@ -748,6 +792,20 @@ fn render_panel(report: &StatusReport) -> Vec<String> {
             .join(", ");
         lines.push(format!("{} {}", key("MCP:"), states));
     }
+    // Issue #292: surface plugin hooks that fall back to GUARDRAILS prose on the
+    // rules-only-for-hooks harnesses in scope (not enforced natively).
+    if report.unrepresented_hooks > 0 {
+        lines.push(format!(
+            "{} {} plugin hook{} not natively representable (GUARDRAILS prose only)",
+            key("Hooks:"),
+            report.unrepresented_hooks,
+            if report.unrepresented_hooks == 1 {
+                ""
+            } else {
+                "s"
+            },
+        ));
+    }
     // Issue #287: when `~/.tome/config.toml` won't parse, status keeps running
     // and reports it here (rather than dying at exit 5). The toml diagnostic
     // names the offending key/section; show its first line in the panel and
@@ -1095,6 +1153,7 @@ mod harness_mcp_status_tests {
             harness_mcp,
             unrepresented_agents: 0,
             hook_translation_harnesses: 0,
+            unrepresented_hooks: 0,
             config: None,
         }
     }
@@ -1110,10 +1169,11 @@ mod harness_mcp_status_tests {
             "empty harness_mcp must be omitted; got: {json}",
         );
         // Task 14: `unrepresented_agents` is a plain u32 — always serialised.
-        // US11: `hook_translation_harnesses` follows as the new last field.
+        // US11: `hook_translation_harnesses` follows. Issue #292:
+        // `unrepresented_hooks` follows as the new last field.
         assert!(
-            json.ends_with("\"models_on_disk_bytes\":0,\"unrepresented_agents\":0,\"hook_translation_harnesses\":0}"),
-            "minimal pin: expected models_on_disk_bytes, unrepresented_agents, hook_translation_harnesses; got: {json}",
+            json.ends_with("\"models_on_disk_bytes\":0,\"unrepresented_agents\":0,\"hook_translation_harnesses\":0,\"unrepresented_hooks\":0}"),
+            "minimal pin: expected models_on_disk_bytes, unrepresented_agents, hook_translation_harnesses, unrepresented_hooks; got: {json}",
         );
     }
 
@@ -1123,24 +1183,28 @@ mod harness_mcp_status_tests {
     /// follows it (appended LAST).
     #[test]
     fn unrepresented_agents_appended_last() {
-        // Zero agents + no harness_mcp → field present with value 0, last.
+        // Zero agents + no harness_mcp → field present with value 0.
         let json_zero = serde_json::to_string(&base_report(Vec::new())).unwrap();
         assert!(
-            json_zero.ends_with("\"unrepresented_agents\":0,\"hook_translation_harnesses\":0}"),
-            "zero unrepresented_agents followed by hook_translation_harnesses must be last; got: {json_zero}",
+            json_zero.ends_with(
+                "\"unrepresented_agents\":0,\"hook_translation_harnesses\":0,\"unrepresented_hooks\":0}"
+            ),
+            "zero unrepresented_agents followed by hook_translation_harnesses + unrepresented_hooks must be last; got: {json_zero}",
         );
         assert!(
             json_zero.contains("\"unrepresented_agents\":0"),
             "zero count must still emit the key; got: {json_zero}",
         );
 
-        // Populated count → last.
+        // Populated count still precedes the trailing count fields.
         let mut rep = base_report(Vec::new());
         rep.unrepresented_agents = 5;
         let json_pop = serde_json::to_string(&rep).unwrap();
         assert!(
-            json_pop.ends_with("\"unrepresented_agents\":5,\"hook_translation_harnesses\":0}"),
-            "populated unrepresented_agents followed by hook_translation_harnesses must be last; got: {json_pop}",
+            json_pop.ends_with(
+                "\"unrepresented_agents\":5,\"hook_translation_harnesses\":0,\"unrepresented_hooks\":0}"
+            ),
+            "populated unrepresented_agents followed by hook_translation_harnesses + unrepresented_hooks must be last; got: {json_pop}",
         );
 
         // With harness_mcp present: unrepresented_agents is after harness_mcp.
@@ -1156,8 +1220,10 @@ mod harness_mcp_status_tests {
             "unrepresented_agents must come after harness_mcp; got: {json_mcp}",
         );
         assert!(
-            json_mcp.ends_with("\"unrepresented_agents\":0,\"hook_translation_harnesses\":0}"),
-            "hook_translation_harnesses must be last even with harness_mcp; got: {json_mcp}",
+            json_mcp.ends_with(
+                "\"unrepresented_agents\":0,\"hook_translation_harnesses\":0,\"unrepresented_hooks\":0}"
+            ),
+            "unrepresented_hooks must be last even with harness_mcp; got: {json_mcp}",
         );
     }
 
@@ -1193,10 +1259,12 @@ mod harness_mcp_status_tests {
             ),
             "harness_mcp must carry the state vocabulary; got: {json}",
         );
-        // hook_translation_harnesses is the actual last key.
+        // unrepresented_hooks is the actual last key (Issue #292).
         assert!(
-            json.ends_with("\"unrepresented_agents\":0,\"hook_translation_harnesses\":0}"),
-            "hook_translation_harnesses must be the last key; got: {json}",
+            json.ends_with(
+                "\"unrepresented_agents\":0,\"hook_translation_harnesses\":0,\"unrepresented_hooks\":0}"
+            ),
+            "unrepresented_hooks must be the last key; got: {json}",
         );
         // The harness_mcp entry appears before unrepresented_agents in the JSON.
         let mcp_pos = json.find("harness_mcp").unwrap();

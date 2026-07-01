@@ -29,7 +29,8 @@ use std::time::SystemTime;
 use crate::catalog::manifest::CatalogManifest;
 use crate::doctor::report::{
     CatalogCacheHealth, CatalogCacheState, EntryCountsByKind, OrphanDataDirReport, PromptsReport,
-    UnrepresentedAgentEntry, UnrepresentedAgentsReport,
+    UnrepresentedAgentEntry, UnrepresentedAgentsReport, UnrepresentedHookEntry,
+    UnrepresentedHooksReport,
 };
 use crate::error::TomeError;
 use crate::index::{self, workspace_catalogs};
@@ -1499,6 +1500,119 @@ pub fn build_unrepresented_agents_report(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Issue #292 (translation-fidelity loss): unrepresented hooks drop-report.
+// ---------------------------------------------------------------------------
+
+/// Build the issue #292 drop-report: enabled plugin hooks (by portable event)
+/// that no rules-only-for-hooks harness in scope can deliver natively. Read-only
+/// (FR-124): never writes, never creates directories.
+///
+/// The hooks analogue of [`build_unrepresented_agents_report`]. It mirrors that
+/// function's shape exactly:
+///
+/// * `rules_only_harnesses` — the in-scope harnesses that render `GUARDRAILS.md`
+///   prose only, resolved through the SSOT predicate
+///   [`crate::harness::HarnessModule::is_rules_only_for_hooks`] (Claude Code's
+///   `RealJson` sink and the five `#318` dispatcher harnesses are excluded — they
+///   DO translate hooks). Resolved through `with_effective_modules` so the
+///   `HARNESS_MODULES_OVERRIDE` test seam is honoured — identical to the
+///   mechanism `build_hook_translation_report` and `status` use.
+///
+/// * `hooks` — the distinct `(catalog, plugin, event)` tuples enumerated by the
+///   dispatch SSOT [`crate::harness::reconcile::hooks::resolve_enabled_canonical_hooks`]
+///   (the SAME enumeration `sync` and `preview` consume), so the report never
+///   re-implements the native-vs-guardrails decision. On a rules-only-for-hooks
+///   harness EVERY declared portable event is unrepresented, so the distinct
+///   canonical events ARE the unrepresented set.
+///
+/// `hooks` is empty (and the caller emits `None`) when no rules-only-for-hooks
+/// harness is in scope OR no enabled plugin ships hooks — keeping the byte-stable
+/// wire shape minimal (like the agents report).
+///
+/// `effective` is the scope's resolved harness list (the same
+/// [`EffectiveHarnessList`](crate::settings::resolver::EffectiveHarnessList)
+/// `harness_mcp`, `status`, and `build_hook_translation_report` use). When it is
+/// `None`, no harness is in scope → an empty report.
+pub fn build_unrepresented_hooks_report(
+    paths: &Paths,
+    workspace: &WorkspaceName,
+    home: &Path,
+    effective: Option<&crate::settings::resolver::EffectiveHarnessList>,
+) -> Result<UnrepresentedHooksReport, TomeError> {
+    use crate::harness::sync::SyncDeps;
+
+    // Which of the in-scope harnesses are rules-only for hooks. Resolved via
+    // `with_effective_modules` (the same override-honouring path status +
+    // doctor's hook-translation surface use), intersected with the effective
+    // (scope) set so a harness a user never declared adds no noise.
+    let effective_names: HashSet<&str> = effective
+        .map(|e| e.harnesses.iter().map(|h| h.name.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut rules_only_harnesses: Vec<String> = Vec::new();
+    crate::harness::with_effective_modules(|mods| {
+        for m in mods {
+            if effective_names.contains(m.name()) && m.is_rules_only_for_hooks() {
+                rules_only_harnesses.push(m.name().to_string());
+            }
+        }
+    });
+    rules_only_harnesses.sort();
+    rules_only_harnesses.dedup();
+
+    // No rules-only-for-hooks harness in scope → nothing is unrepresented.
+    if rules_only_harnesses.is_empty() {
+        return Ok(UnrepresentedHooksReport {
+            rules_only_harnesses,
+            hooks: Vec::new(),
+        });
+    }
+
+    // Enumerate the enabled plugins' canonical hooks via the dispatch SSOT.
+    // `resolve_enabled_canonical_hooks` opens the DB read-only itself and
+    // records (but never propagates) a per-plugin parse error via `first_error`.
+    // A malformed `hooks/hooks.json` is skipped (forward progress) — the report
+    // stays honest about what IS enumerable, matching sync/preview.
+    let deps = SyncDeps {
+        paths,
+        home_root: home,
+        workspace_name: workspace,
+        force: false,
+        only_harness: None,
+    };
+    let mut first_error: Option<TomeError> = None;
+    let canonical =
+        crate::harness::reconcile::hooks::resolve_enabled_canonical_hooks(&deps, &mut first_error)?;
+
+    // Distinct (catalog, plugin, event) tuples, deterministically ordered.
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    let mut hooks: Vec<UnrepresentedHookEntry> = Vec::new();
+    for h in &canonical {
+        let event = h.event.cc_name().to_string();
+        let key = (h.catalog.clone(), h.plugin.clone(), event.clone());
+        if seen.insert(key) {
+            hooks.push(UnrepresentedHookEntry {
+                catalog: h.catalog.clone(),
+                plugin: h.plugin.clone(),
+                event,
+            });
+        }
+    }
+    hooks.sort_by(|a, b| {
+        (a.catalog.as_str(), a.plugin.as_str(), a.event.as_str()).cmp(&(
+            b.catalog.as_str(),
+            b.plugin.as_str(),
+            b.event.as_str(),
+        ))
+    });
+
+    Ok(UnrepresentedHooksReport {
+        rules_only_harnesses,
+        hooks,
+    })
+}
+
 /// A corrupt-remote-index finding: the stored vector dimension (`blob_len/4`)
 /// disagrees with `meta.embedder_dimension`. Carried internally by the
 /// assembler to drive the `corrupt-remote-index` suggested fix; not a
@@ -1811,6 +1925,171 @@ mod tests {
             report.rules_only_harnesses, sorted,
             "rules_only_harnesses must be sorted"
         );
+    }
+
+    // --- Issue #292: unrepresented hooks report ----------------------------
+
+    /// A hook-capable harness (`codex`, which declares `hook_support()`) and
+    /// Claude Code (the `RealJson` sink) are NOT rules-only for hooks → they are
+    /// excluded from `rules_only_harnesses`, so a scope of only those harnesses
+    /// yields an empty report even with hooks enabled.
+    #[test]
+    fn unrepresented_hooks_excludes_hook_capable_and_realjson_harnesses() {
+        use crate::settings::resolver::{EffectiveHarness, EffectiveHarnessList};
+
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        let workspace = crate::workspace::WorkspaceName::parse("test-ws").unwrap();
+
+        // Scope: codex (has hook_support) + claude-code (RealJson sink). Neither
+        // is rules-only for hooks.
+        let effective = EffectiveHarnessList {
+            harnesses: vec![
+                EffectiveHarness {
+                    name: "codex".to_owned(),
+                    source_chain: vec!["project".to_owned()],
+                },
+                EffectiveHarness {
+                    name: "claude-code".to_owned(),
+                    source_chain: vec!["project".to_owned()],
+                },
+            ],
+            excluded: vec![],
+        };
+
+        let report =
+            build_unrepresented_hooks_report(&paths, &workspace, tmp.path(), Some(&effective))
+                .expect("build_unrepresented_hooks_report");
+
+        assert!(
+            report.rules_only_harnesses.is_empty(),
+            "codex (hook_support) + claude-code (RealJson) must not be rules-only for hooks: {:?}",
+            report.rules_only_harnesses,
+        );
+        assert!(
+            report.hooks.is_empty(),
+            "no rules-only-for-hooks harness in scope → no unrepresented hooks",
+        );
+    }
+
+    /// A rules-only-for-hooks harness (`cline`: no `RealJson`, no
+    /// `hook_support()`, not opt-in) in scope with an enabled plugin that ships
+    /// `hooks/hooks.json` → the declared events ARE reported unrepresented. Uses
+    /// the SAME enumeration SSOT (`resolve_enabled_canonical_hooks`) sync/preview
+    /// use, so the report reflects what sync actually delivers.
+    #[test]
+    fn unrepresented_hooks_reports_events_on_rules_only_harness() {
+        use crate::settings::resolver::{EffectiveHarness, EffectiveHarnessList};
+
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        let workspace = crate::workspace::WorkspaceName::global();
+
+        // Enrol a catalog + enable one plugin, and seed its hooks/hooks.json on
+        // disk (no catalog manifest → plugin_root_dir falls back to
+        // <cache>/<plugin>, matching the source seeder below).
+        let url = "https://example.invalid/hookplug";
+        seed_enrolment(&paths, "hookcat", url);
+        let conn = index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: registry_seeds().0,
+                reranker: registry_seeds().1,
+                summariser: registry_seeds().2,
+                profile: None,
+            },
+        )
+        .unwrap();
+        // Enable a skill row so the plugin is "enabled" for the workspace.
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES ('hookcat', 'hookplug', 's1', 'skill', 'd', '0.0.0', 'skills/s1/SKILL.md', 'h', 1, 0, NULL, '1970-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("insert skill");
+        let skill_id: i64 = conn
+            .query_row(
+                "SELECT id FROM skills WHERE catalog='hookcat' AND plugin='hookplug' AND name='s1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("skill id");
+        let ws_id: i64 = conn
+            .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| {
+                r.get(0)
+            })
+            .expect("global ws id");
+        conn.execute(
+            "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+            rusqlite::params![ws_id, skill_id],
+        )
+        .expect("enrol skill");
+
+        // Seed the on-disk hooks source (PreToolUse + Stop).
+        let hooks_dir = paths.cache_dir_for(url).join("hookplug").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).expect("mk hooks dir");
+        std::fs::write(
+            hooks_dir.join("hooks.json"),
+            r#"{ "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/g.sh" } ] } ], "Stop": [ { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/s.sh" } ] } ] }"#,
+        )
+        .expect("write hooks.json");
+
+        let effective = EffectiveHarnessList {
+            harnesses: vec![EffectiveHarness {
+                name: "cline".to_owned(),
+                source_chain: vec!["project".to_owned()],
+            }],
+            excluded: vec![],
+        };
+
+        let report =
+            build_unrepresented_hooks_report(&paths, &workspace, tmp.path(), Some(&effective))
+                .expect("build_unrepresented_hooks_report");
+
+        // Tolerant `contains` (matching the sibling `unrepresented_agents` +
+        // `hook_translation` tests): the harness set is resolved through
+        // `with_effective_modules`, which reads the process-global
+        // `HARNESS_MODULES_OVERRIDE`. The `agents.rs` lib tests in this same
+        // binary install that override without a shared serialization mutex (a
+        // pre-existing latent race, out of scope for #292), so an exact-equality
+        // on the list would narrow the safe window. `cline` must be present.
+        assert!(
+            report.rules_only_harnesses.contains(&"cline".to_owned()),
+            "cline is rules-only for hooks and in scope: {:?}",
+            report.rules_only_harnesses,
+        );
+        // Both declared events must appear, distinct + sorted by (cat, plug, event).
+        let events: Vec<&str> = report.hooks.iter().map(|h| h.event.as_str()).collect();
+        assert_eq!(
+            events,
+            vec!["PreToolUse", "Stop"],
+            "both declared events must be reported unrepresented (sorted): {:?}",
+            report.hooks,
+        );
+        assert!(
+            report
+                .hooks
+                .iter()
+                .all(|h| h.catalog == "hookcat" && h.plugin == "hookplug"),
+            "provenance must be carried: {:?}",
+            report.hooks,
+        );
+    }
+
+    /// No rules-only-for-hooks harness in scope (empty effective) → empty report,
+    /// even if plugins ship hooks. Mirrors the agents report's minimal-shape gate.
+    #[test]
+    fn unrepresented_hooks_empty_when_no_effective_harness() {
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        let workspace = crate::workspace::WorkspaceName::global();
+
+        let report = build_unrepresented_hooks_report(&paths, &workspace, tmp.path(), None)
+            .expect("build_unrepresented_hooks_report");
+        assert!(report.rules_only_harnesses.is_empty());
+        assert!(report.hooks.is_empty());
     }
 
     // --- Phase 12 / US4: provider report (FR-018) --------------------------
