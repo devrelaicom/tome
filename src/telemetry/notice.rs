@@ -15,6 +15,31 @@
 //! anonymous usage data AND the named usage of plugins from allowlisted catalogs
 //! (currently Midnight) shared with that catalog's publisher — plus the opt-out
 //! mechanism and a pointer to `tome telemetry --help` for the full detail.
+//!
+//! Issue #313: the very first stderr a new user sees should lead with "here is
+//! how to begin", not the opt-out disclosure. So on the first run we print a
+//! one-line welcome + quickstart pointer BEFORE the (required, byte-unchanged)
+//! telemetry notice. The welcome is human-only — unlike the required opt-out
+//! disclosure, a conversational greeting has no place in a `--json` run — so the
+//! caller (`cli_startup`) gates it on `Mode::Human`. The notice itself keeps its
+//! prior behaviour: it fires once on first run regardless of mode (stderr, never
+//! `--json` stdout).
+
+/// Print the one-line first-run welcome + quickstart pointer to stderr.
+///
+/// Human-only (the caller gates on `Mode::Human`); paired with — and printed
+/// BEFORE — [`print_first_run_notice`] on the first run so the greeting leads.
+/// Points at real entry points: the bare `tome` quickstart (clap `after_help`),
+/// `tome catalog add` (the canonical first step, per issue #293 / #283), and
+/// `tome status` (which itself renders the fresh-install getting-started block).
+/// Plain text only (no color). Best-effort: a failed write to stderr is not
+/// actionable.
+pub fn print_first_run_welcome() {
+    eprintln!(
+        "Welcome to Tome! To get started, run `tome catalog add <source>` to register a \
+         catalog, then `tome status` (or bare `tome`) for the quickstart."
+    );
+}
 
 /// Print the one-line opt-out notice to stderr.
 ///

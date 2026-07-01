@@ -145,7 +145,7 @@ fn main() {
     // enabled resolver (CI/disabled ⇒ no mint, no notice, no emit) and is
     // best-effort throughout — it never errors out the command.
     if !matches!(cli.command, Command::Mcp(_) | Command::Telemetry(_)) {
-        tome::telemetry::cli_startup(&paths);
+        tome::telemetry::cli_startup(&paths, mode);
     }
 
     // Capture whether this is a `tome telemetry` control-surface command BEFORE
