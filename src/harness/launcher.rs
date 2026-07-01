@@ -336,36 +336,69 @@ fn is_shell_safe_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/')
 }
 
+/// Test-only serialisation seam for the process-global `$TOME_BIN` launcher
+/// env var, shared across the whole lib-test binary (SSOT — #337 flaky-test
+/// fix). Every lib test that reads OR mutates `$TOME_BIN` (this module's
+/// `tome_command` tests AND `reconcile::hooks`'s launcher-change tests, which
+/// invoke [`tome_command`] transitively through the reconcilers) MUST hold
+/// [`test_support::ENV_MUTEX`] for its whole duration — otherwise one test's
+/// mutation of `$TOME_BIN` between another test's two reconciler runs makes
+/// [`tome_command`] return different launchers on the two runs, breaking the
+/// idempotence assertions.
+///
+/// `cargo test` runs a binary's tests on multiple threads, so `$TOME_BIN`
+/// (process-global) is a shared resource; ONE mutex across the binary (not a
+/// second lock per test module) is the only thing that serialises all of its
+/// mutators. Mirrors the integration-side `common::TomeBinGuard` / the
+/// `ENV_MUTEX` idiom used across the codebase (`open_plugins`,
+/// `provider::config`).
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use super::TOME_BIN_ENV;
     use std::sync::Mutex;
 
-    /// Serialises every test that mutates `TOME_BIN` (process-global; `cargo
-    /// test` runs a module's tests on multiple threads). Mirrors the `ENV_MUTEX`
-    /// idiom used across the codebase (see `open_plugins`, `provider::config`).
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    /// The single process-wide `$TOME_BIN` serialisation lock for the lib-test
+    /// binary. See the module doc.
+    pub(crate) static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
-    struct EnvGuard {
+    /// RAII guard that holds [`ENV_MUTEX`] for its lifetime and manages the
+    /// `$TOME_BIN` env var, restoring the previous value on Drop. Constructing
+    /// it with [`TomeBinGuard::new`] clears `$TOME_BIN`; [`TomeBinGuard::install`]
+    /// pins it to a fixed launcher. [`TomeBinGuard::set`] changes it in place
+    /// (for a launcher-change scenario within one test) while still holding the
+    /// lock. The lock is held until Drop, so no other `$TOME_BIN` mutator in the
+    /// binary can run concurrently.
+    pub(crate) struct TomeBinGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         saved: Option<std::ffi::OsString>,
     }
 
-    impl EnvGuard {
-        fn new() -> Self {
+    impl TomeBinGuard {
+        /// Acquire the lock and CLEAR `$TOME_BIN` (so [`super::tome_command`]
+        /// falls through to `current_exe`). Restored on Drop.
+        pub(crate) fn new() -> Self {
             let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             let saved = std::env::var_os(TOME_BIN_ENV);
             // SAFETY: ENV_MUTEX held for the guard's lifetime.
             unsafe { std::env::remove_var(TOME_BIN_ENV) };
-            EnvGuard { _lock: lock, saved }
+            TomeBinGuard { _lock: lock, saved }
         }
-        fn set(&self, val: &str) {
+
+        /// Acquire the lock and PIN `$TOME_BIN` to `val`. Restored on Drop.
+        pub(crate) fn install(val: &str) -> Self {
+            let guard = Self::new();
+            guard.set(val);
+            guard
+        }
+
+        /// Change `$TOME_BIN` to `val` while still holding the lock.
+        pub(crate) fn set(&self, val: &str) {
             // SAFETY: guarded by ENV_MUTEX (held via `_lock`).
             unsafe { std::env::set_var(TOME_BIN_ENV, val) };
         }
     }
 
-    impl Drop for EnvGuard {
+    impl Drop for TomeBinGuard {
         fn drop(&mut self) {
             // SAFETY: still holding ENV_MUTEX.
             match &self.saved {
@@ -374,6 +407,12 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::TomeBinGuard as EnvGuard;
+    use super::*;
 
     // ---- tome_command resolution (promoted from open_plugins #290) -------
 

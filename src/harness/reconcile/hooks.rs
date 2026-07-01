@@ -2825,6 +2825,12 @@ mod launcher_change_tests {
     /// rely on.
     #[test]
     fn session_start_command_round_trips_through_suffix() {
+        // Pin `$TOME_BIN` (held under the shared lock) so the emitted launcher is
+        // a stable `tome`-basename path recognised via the basename arm — never
+        // dependent on a concurrent `$TOME_BIN` mutation or the process-lifetime
+        // self-recognition cache (#337 flaky-test hardening).
+        let _tome_bin =
+            crate::harness::launcher::test_support::TomeBinGuard::install("/usr/local/bin/tome");
         let cmd = session_start_command("devin", "ws");
         let suffix = session_start_args_suffix("devin", "ws");
         assert!(
@@ -2837,6 +2843,12 @@ mod launcher_change_tests {
     /// suffix is recognised by the suffix builder.
     #[test]
     fn run_hook_command_round_trips_through_suffix() {
+        // Pin `$TOME_BIN` (held under the shared lock) so the emitted launcher is
+        // a stable `tome`-basename path recognised via the basename arm — never
+        // dependent on a concurrent `$TOME_BIN` mutation or the process-lifetime
+        // self-recognition cache (#337 flaky-test hardening).
+        let _tome_bin =
+            crate::harness::launcher::test_support::TomeBinGuard::install("/usr/local/bin/tome");
         let cmd = run_hook_command("cursor", "PreToolUse", "ws");
         let suffix = run_hook_args_suffix("cursor", "PreToolUse", "ws");
         assert!(
@@ -2862,7 +2874,19 @@ mod launcher_change_tests {
     #[test]
     fn dispatch_registration_recognises_and_upgrades_across_launcher_change() {
         use crate::harness::hooks_ir::PortableEvent;
+        use crate::harness::launcher::test_support::TomeBinGuard;
         use crate::harness::{HookSupport, HookWire, TimeoutUnit};
+
+        // Pin `$TOME_BIN` to a stable absolute launcher whose BASENAME is `tome`
+        // for the WHOLE test, holding the shared `$TOME_BIN` lock so no
+        // concurrent mutator changes what `tome_command()` emits between the two
+        // reconciler runs. Without this, a concurrent `harness::launcher` test
+        // that sets/clears `$TOME_BIN` between run 1 (Updated upgrade) and run 2
+        // makes `tome_command()` return a different launcher, so run 2 rewrites
+        // (Updated) instead of the required `LeftAlone` idempotence (#337 flaky).
+        // The seeded launcher A below (`/opt/a/bin/tome`) is DELIBERATELY ≠ this
+        // pinned value so run 1 is a genuine deterministic upgrade.
+        let _tome_bin = TomeBinGuard::install("/usr/local/bin/tome");
 
         let tmp = TempDir::new().unwrap();
         // Devin: root-level event keys, native name == CC name `PreToolUse`, no
@@ -2872,7 +2896,8 @@ mod launcher_change_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
         let run_hook_suffix = run_hook_args_suffix("devin", "PreToolUse", "ws");
-        // Entry written with an explicit launcher A (the pre-change on-disk shape).
+        // Entry written with an explicit launcher A (the pre-change on-disk shape),
+        // DIFFERENT from the pinned `$TOME_BIN` so run 1 is a deterministic upgrade.
         let entry_a = tome_run_hook_entry(
             HookFileSpec::DevinHooksV1,
             &format!("/opt/a/bin/tome {run_hook_suffix}"),
@@ -2946,12 +2971,14 @@ mod launcher_change_tests {
             foreign_survives,
             "the other-harness entry must survive: {arr:?}"
         );
-        // The action reflects either an in-place upgrade (Updated) or a no-op
-        // (LeftAlone, when `tome_command()` happened to resolve to launcher A);
-        // both are correct — what matters is no duplicate + foreign preserved.
-        assert!(
-            matches!(action, Action::Updated | Action::LeftAlone),
-            "dispatch action must be Updated or LeftAlone; got: {action:?}",
+        // `$TOME_BIN` is pinned to `/usr/local/bin/tome` (≠ the seeded launcher A
+        // `/opt/a/bin/tome`), so run 1 is a DETERMINISTIC in-place upgrade of the
+        // launcher-A entry to the recognised tome command — no duplicate, foreign
+        // entry preserved.
+        assert_eq!(
+            action,
+            Action::Updated,
+            "run 1 upgrades launcher A to the pinned launcher; got: {action:?}",
         );
 
         // Second run is idempotent (the on-disk entry now matches what the
