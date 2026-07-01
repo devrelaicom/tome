@@ -134,8 +134,20 @@ Tome does not inject file contents or execute commands in bodies; convert
 warns and leaves them in place for you to review, and `lint` keeps flagging
 them afterwards as `lint/residual-harness-ism`.
 
-If you prefer to fail rather than lose anything, pass `--strict`: the first
-unsupported feature aborts the conversion with exit `84`, writing nothing.
+If you prefer to fail rather than lose anything, pass `--strict`: any
+unsupported feature aborts the conversion with exit `84`, writing nothing. The
+error names how many blocking findings there were and the distinct rule-ids
+behind them, so you can see the whole set in one run rather than fixing them one
+at a time.
+
+When a drop is intentional — a plugin that deliberately ships a `themes/`
+directory Tome cannot carry, say — demote that rule with `--allow <rule-id>` so
+it no longer blocks `--strict`. The flag is repeatable
+(`--allow convert/unsupported-component --allow convert/agent-lossy`); an allowed
+rule is still reported as a warning, it just stops aborting the run. Naming a
+rule-id that is not blocking (or does not exist) is a harmless no-op. This lets
+`convert --strict` serve as a CI gate that fails on *new* lossiness while
+tolerating the drops you have already reviewed.
 
 ## Why exit 80 exists
 

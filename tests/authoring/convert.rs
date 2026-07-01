@@ -60,6 +60,7 @@ fn config(output_dir: PathBuf) -> ConvertConfig {
         from: None,
         new_name: None,
         strict: false,
+        allow: Vec::new(),
         force: false,
         dry_run: false,
         fetch_remote: true,
@@ -212,6 +213,125 @@ fn strict_aborts_on_an_unsupported_component_before_writing() {
 }
 
 #[test]
+fn strict_reports_all_blocking_rule_ids_not_just_the_first() {
+    // The CC fixture has TWO distinct strict-blocking findings:
+    // `convert/unsupported-component` (monitors/) and
+    // `convert/tool-restriction-dropped` (allowed-tools: Bash). The strict error
+    // must name BOTH and count the findings, not stop at the first.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let mut cfg = config(out.clone());
+    cfg.strict = true;
+    let err = run(&src, &cfg).unwrap_err();
+    assert_eq!(err.exit_code(), 84);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("convert/unsupported-component"),
+        "names the component rule: {msg}"
+    );
+    assert!(
+        msg.contains("convert/tool-restriction-dropped"),
+        "names the tool-restriction rule: {msg}"
+    );
+    assert!(!out.join("demo-tome").exists(), "still writes nothing");
+}
+
+#[test]
+fn strict_with_allow_demotes_a_rule_and_succeeds() {
+    // Allowing BOTH blocking rule ids lets `--strict` convert successfully; the
+    // demoted findings still appear in the report as warnings (not blocking).
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let mut cfg = config(out.clone());
+    cfg.strict = true;
+    cfg.allow = vec![
+        "convert/unsupported-component".to_owned(),
+        "convert/tool-restriction-dropped".to_owned(),
+    ];
+    let outcome = run(&src, &cfg).expect("strict convert succeeds once both rules allowed");
+
+    // Output was written (all-or-nothing, but nothing blocked).
+    assert!(out.join("demo-tome").exists(), "converted output landed");
+    assert!(!outcome.written.is_empty());
+
+    // The demoted diagnostics are STILL present in the normal report.
+    assert!(
+        outcome
+            .report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "convert/unsupported-component"),
+        "demoted rule still emitted as a diagnostic"
+    );
+    assert!(
+        outcome
+            .report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "convert/tool-restriction-dropped"),
+        "demoted rule still emitted as a diagnostic"
+    );
+}
+
+#[test]
+fn strict_with_partial_allow_still_aborts_on_the_remaining_rule() {
+    // Allowing only ONE of the two blocking rules still aborts on the other.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let mut cfg = config(out.clone());
+    cfg.strict = true;
+    cfg.allow = vec!["convert/unsupported-component".to_owned()];
+    let err = run(&src, &cfg).unwrap_err();
+    assert_eq!(err.exit_code(), 84);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("convert/tool-restriction-dropped"),
+        "aborts on the un-allowed rule: {msg}"
+    );
+    assert!(
+        !msg.contains("convert/unsupported-component"),
+        "the allowed rule is not reported as blocking: {msg}"
+    );
+    assert!(!out.join("demo-tome").exists(), "still writes nothing");
+}
+
+#[test]
+fn allow_of_unknown_or_non_blocking_rule_has_no_effect() {
+    // An `--allow` naming a rule id that is neither blocking nor real is a
+    // harmless no-op: the strict abort proceeds exactly as if it were absent.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let mut cfg = config(out.clone());
+    cfg.strict = true;
+    cfg.allow = vec![
+        "convert/does-not-exist".to_owned(),
+        "convert/missing-version".to_owned(), // a real but non-blocking rule id
+    ];
+    let err = run(&src, &cfg).unwrap_err();
+    assert_eq!(
+        err.exit_code(),
+        84,
+        "no-op allow does not change the verdict"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("convert/unsupported-component"), "{msg}");
+    assert!(msg.contains("convert/tool-restriction-dropped"), "{msg}");
+    assert!(!out.join("demo-tome").exists(), "still writes nothing");
+}
+
+#[test]
 fn level_mismatch_is_a_usage_error() {
     // A bare skill source asked to convert as a plugin.
     let tmp = tempfile::tempdir().unwrap();
@@ -235,6 +355,7 @@ fn skill_config(output_dir: PathBuf, from: Option<&str>) -> ConvertConfig {
         from: from.map(str::to_owned),
         new_name: None,
         strict: false,
+        allow: Vec::new(),
         force: false,
         dry_run: false,
         fetch_remote: true,
@@ -368,6 +489,7 @@ fn catalog_config(output_dir: PathBuf, strict: bool) -> ConvertConfig {
         from: None,
         new_name: None,
         strict,
+        allow: Vec::new(),
         force: false,
         dry_run: false,
         fetch_remote: true,
