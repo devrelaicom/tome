@@ -1217,3 +1217,68 @@ fn json_convert_has_no_bridge_in_the_stream() {
         "json result line present:\n{stdout}"
     );
 }
+
+#[test]
+fn json_convert_diagnostic_lines_carry_lint_finding_fields() {
+    // Issue #299: convert's `--json` diagnostic lines now carry `file`/`line`/
+    // `autofixable` with the SAME field names + value semantics as `lint --json`
+    // findings — so a caller parsing lint findings can parse convert diagnostic
+    // lines the same way. The JSONL envelope is preserved: per-diagnostic lines
+    // followed by the trailing `type: "result"` line.
+    let tmp = tempfile::tempdir().unwrap();
+    // The CC fixture ships a `monitors/` unsupported component + a tool
+    // restriction ⇒ at least one diagnostic in the stream.
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let (stdout, stderr, ok) =
+        run_plugin_convert(&src, &["--output", out.to_str().unwrap(), "--json"]);
+    assert!(ok, "json convert succeeds; stderr: {stderr}");
+
+    // Each non-empty line is one JSON object; classify by `type`.
+    let mut diagnostic_lines = 0usize;
+    let mut result_lines = 0usize;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("non-JSON line `{line}`: {e}"));
+        match v["type"].as_str() {
+            Some("diagnostic") => {
+                diagnostic_lines += 1;
+                // The enriched finding fields are present with lint's semantics.
+                assert!(v.get("rule").is_some(), "diagnostic has `rule`: {line}");
+                assert!(
+                    v.get("severity").is_some(),
+                    "diagnostic has `severity`: {line}"
+                );
+                assert!(
+                    v.get("message").is_some(),
+                    "diagnostic has `message`: {line}"
+                );
+                // #299 additions: present (a value or JSON null), not missing.
+                assert!(
+                    v.as_object().unwrap().contains_key("file"),
+                    "diagnostic carries `file` (issue #299): {line}"
+                );
+                assert!(
+                    v.as_object().unwrap().contains_key("line"),
+                    "diagnostic carries `line` (issue #299): {line}"
+                );
+                assert!(
+                    v["autofixable"].is_boolean(),
+                    "diagnostic carries a boolean `autofixable` (issue #299): {line}"
+                );
+            }
+            Some("result") => result_lines += 1,
+            other => panic!("unexpected JSONL `type` {other:?} on line: {line}"),
+        }
+    }
+    assert!(
+        diagnostic_lines >= 1,
+        "the fixture converts with at least one diagnostic:\n{stdout}"
+    );
+    assert_eq!(
+        result_lines, 1,
+        "exactly one trailing `type: \"result\"` line (envelope preserved):\n{stdout}"
+    );
+}

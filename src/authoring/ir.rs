@@ -201,6 +201,35 @@ pub struct Diagnostic {
     pub autofix: Option<Fix>,
 }
 
+/// The SSOT `Diagnostic` → JSON finding shape shared by `lint --json`
+/// (each object in its `findings[]`) and `convert --json` (the body of each
+/// JSONL `type: "diagnostic"` line). Extracting the mapping into one function
+/// guarantees the two verbs emit byte-identical per-finding fields — a caller
+/// parsing lint findings can parse convert diagnostic lines the same way
+/// (issue #299).
+///
+/// Field semantics (matched to lint's original finding shape):
+/// - `rule` / `severity` / `message`: the diagnostic's own fields.
+/// - `file`: the location's file path, or JSON `null` when the diagnostic
+///   carries no location.
+/// - `line`: the location's 1-based line, or JSON `null` when absent (no
+///   location, or a location without a line).
+/// - `autofixable`: whether the diagnostic carries a mechanically-applicable
+///   [`Fix`].
+///
+/// `convert` wraps this object with a `type: "diagnostic"` discriminator to
+/// preserve its JSONL envelope; `lint` uses it verbatim as a `findings[]` entry.
+pub fn finding_json(d: &Diagnostic) -> serde_json::Value {
+    serde_json::json!({
+        "rule": d.rule_id,
+        "severity": d.severity.as_str(),
+        "message": d.message,
+        "file": d.location.as_ref().map(|l| l.file.display().to_string()),
+        "line": d.location.as_ref().and_then(|l| l.line),
+        "autofixable": d.autofix.is_some(),
+    })
+}
+
 impl Diagnostic {
     /// Build a diagnostic with the given severity (no location, no autofix).
     pub fn new(rule_id: &'static str, severity: Severity, message: impl Into<String>) -> Self {

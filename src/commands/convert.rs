@@ -341,14 +341,22 @@ fn next_bridge(outcome: &ConvertOutcome) -> Option<String> {
     ))
 }
 
-/// One `--json` JSONL diagnostic line (`type: "diagnostic"`).
+/// One `--json` JSONL diagnostic line: the `type: "diagnostic"` discriminator
+/// plus the shared [`crate::authoring::ir::finding_json`] finding fields
+/// (`rule`/`severity`/`message`/`file`/`line`/`autofixable`) — byte-identical
+/// to a `lint --json` `findings[]` entry, so a caller can parse either stream's
+/// findings the same way (issue #299). The JSONL envelope is preserved: this
+/// stays one line per diagnostic followed by the trailing `type: "result"`
+/// line, never lint's single-object shape.
 fn convert_diagnostic_json(d: &crate::authoring::ir::Diagnostic) -> serde_json::Value {
-    json!({
-        "type": "diagnostic",
-        "severity": d.severity.as_str(),
-        "rule": d.rule_id,
-        "message": d.message,
-    })
+    let mut value = crate::authoring::ir::finding_json(d);
+    // Prepend the JSONL discriminator. `finding_json` returns a JSON object, so
+    // the `as_object_mut` unwrap is infallible; the map preserves insertion
+    // order (`serde_json` `preserve_order`) with `type` appended last.
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("type".to_owned(), json!("diagnostic"));
+    }
+    value
 }
 
 /// The final `--json` JSONL `result` line. Shape pinned by
@@ -458,12 +466,59 @@ mod tests {
         assert_eq!(v["infos"], 0);
         assert!(v["strict_blocked"].is_null());
 
-        // A diagnostic line carries its own `type`.
+        // A diagnostic line carries its own `type` discriminator PLUS the shared
+        // finding fields (`file`/`line`/`autofixable`) enriching it to parity
+        // with `lint --json`'s finding shape (issue #299). Absent location ⇒
+        // JSON null for `file`/`line`, mirroring lint exactly.
         let d = crate::authoring::ir::Diagnostic::warning("convert/x", "boom");
         let dj = convert_diagnostic_json(&d);
         assert_eq!(dj["type"], "diagnostic");
         assert_eq!(dj["severity"], "warning");
         assert_eq!(dj["rule"], "convert/x");
+        assert_eq!(dj["message"], "boom");
+        assert!(dj["file"].is_null(), "no location ⇒ file is null: {dj}");
+        assert!(dj["line"].is_null(), "no location ⇒ line is null: {dj}");
+        assert_eq!(dj["autofixable"], false);
+    }
+
+    #[test]
+    fn convert_diagnostic_line_matches_lint_finding_fields() {
+        // Cross-verb parity (issue #299): for the SAME diagnostic, convert's
+        // JSONL diagnostic line and lint's `findings[]` entry carry byte-
+        // identical `rule`/`severity`/`message`/`file`/`line`/`autofixable`.
+        // convert adds ONLY the `type: "diagnostic"` discriminator on top.
+        use crate::authoring::ir::{Diagnostic, Fix, Location, finding_json};
+
+        // Exercise both the located+autofixable case AND the absent-location
+        // case (JSON null derivation must agree between the two verbs).
+        let located = Diagnostic::warning("convert/y", "needs a fix")
+            .at(Location {
+                file: std::path::PathBuf::from("skills/demo/SKILL.md"),
+                line: Some(7),
+            })
+            .with_fix(Fix {
+                path: std::path::PathBuf::from("skills/demo/SKILL.md"),
+                replacement: "fixed".to_owned(),
+            });
+        let unlocated = Diagnostic::info("convert/z", "no location here");
+
+        for d in [&located, &unlocated] {
+            let lint_finding = finding_json(d);
+            let convert_line = convert_diagnostic_json(d);
+            // The convert line differs ONLY by the extra `type` key.
+            assert_eq!(convert_line["type"], "diagnostic");
+            for key in ["rule", "severity", "message", "file", "line", "autofixable"] {
+                assert_eq!(
+                    convert_line[key], lint_finding[key],
+                    "field `{key}` must byte-match lint's finding for {d:?}"
+                );
+            }
+        }
+        // Spot-check the enriched values on the located diagnostic.
+        let dj = convert_diagnostic_json(&located);
+        assert_eq!(dj["file"], "skills/demo/SKILL.md");
+        assert_eq!(dj["line"], 7);
+        assert_eq!(dj["autofixable"], true);
     }
 
     /// Run a git subcommand in `dir`, asserting success (identity injected so CI
