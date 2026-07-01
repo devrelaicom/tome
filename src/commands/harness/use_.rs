@@ -286,6 +286,15 @@ fn resolve_selection(
     } else if args.all {
         // `--all`: every real supported module (NOT the opt-in generics). Uses
         // the effective registry so a test override is honoured.
+        //
+        // Registry-source asymmetry (intentional + safe): the fan-out `names`
+        // read through `with_effective_modules` (which honours the
+        // `HARNESS_MODULES_OVERRIDE` test seam) while `opt_in` / `skipped_opt_in`
+        // read the `OPT_IN_TARGETS` static directly (override-blind). That is
+        // correct because `with_effective_modules` only ever shadows
+        // `SUPPORTED_HARNESSES`, NEVER `OPT_IN_TARGETS` (the two slices are
+        // disjoint by invariant), so the opt-in set is the same whether or not a
+        // test override is installed.
         let mut names: Vec<String> =
             with_effective_modules(|mods| mods.iter().map(|m| m.name().to_string()).collect());
 

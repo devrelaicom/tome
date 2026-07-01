@@ -556,20 +556,32 @@ fn sync_parses_repeated_harness_flag() {
 // Issue #306: `--include-opt-in` behaviour + the opt-in-skip notice.
 // ---------------------------------------------------------------------------
 
-/// clap wiring: `--include-opt-in` REQUIRES `--all`. Passing it alone (or with
-/// explicit names) is a usage error — the least-surprising rule given `names`
-/// already conflicts with `--all`.
+/// clap wiring: `--include-opt-in` REQUIRES `--all` AND conflicts with explicit
+/// names. Passing it alone OR with names is a LOUD usage error — never a silent
+/// no-op (the review MINOR: `requires = "all"` alone is skipped-not-enforced when
+/// names are present because `names` already conflicts with `--all`, so the flag
+/// would parse and do nothing without `conflicts_with = "names"`).
 #[test]
 fn include_opt_in_requires_all() {
     use clap::Parser;
     use tome::cli::Cli;
 
-    // Alone → error (requires --all).
+    // (a) Alone → error (requires --all).
     assert!(
         Cli::try_parse_from(["tome", "harness", "use", "--include-opt-in"]).is_err(),
         "`--include-opt-in` without `--all` must be a usage error",
     );
-    // With --all → parses, and both flags land.
+    // (b) With an explicit name but no --all → error (conflicts_with = names).
+    // Without this rule the flag would be a silent no-op (parses, ignored).
+    assert!(
+        Cli::try_parse_from(["tome", "harness", "use", "--include-opt-in", "cursor"]).is_err(),
+        "`--include-opt-in <name>` (no --all) must be a usage error, not a silent no-op",
+    );
+    assert!(
+        Cli::try_parse_from(["tome", "harness", "use", "cursor", "--include-opt-in"]).is_err(),
+        "name-then-flag ordering must also error (conflicts_with = names)",
+    );
+    // (c) With --all → parses, and both flags land.
     let cli = Cli::try_parse_from(["tome", "harness", "use", "--all", "--include-opt-in"])
         .expect("--all --include-opt-in must parse");
     let tome::cli::Command::Harness(h) = cli.command else {
@@ -579,6 +591,7 @@ fn include_opt_in_requires_all() {
         panic!("expected the use subcommand");
     };
     assert!(args.all && args.include_opt_in);
+    assert!(args.names.is_empty(), "no names in the --all path");
 }
 
 /// `--all --include-opt-in` selects the `--all` set PLUS the opt-in targets

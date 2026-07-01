@@ -427,7 +427,14 @@ pub struct HarnessUseArgs {
     /// (`generic` / `generic-op`) that `--all` skips by default. Only
     /// meaningful with `--all` (requires it); to configure a single opt-in
     /// target, name it explicitly instead.
-    #[arg(long, requires = "all")]
+    ///
+    /// `conflicts_with = "names"` (alongside `requires = "all"`) makes
+    /// `--include-opt-in <name>` a LOUD usage error rather than a silent
+    /// no-op: with explicit names present, `names` already `conflicts_with`
+    /// `all`, so clap treats this flag's `requires = "all"` as
+    /// unsatisfiable-and-skipped instead of an error — the flag would then do
+    /// nothing with no diagnostic (the exact anti-pattern #306 is about).
+    #[arg(long, requires = "all", conflicts_with = "names")]
     pub include_opt_in: bool,
     /// Settings scope to edit. When omitted, falls back to
     /// `[harness] default_scope` in `~/.tome/config.toml`, then to
