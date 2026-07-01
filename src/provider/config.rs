@@ -310,6 +310,52 @@ fn warn_on_env_var_collision(config: &Config, name: &str) {
     }
 }
 
+/// Static credential pre-flight for a capability (issue #291). Resolve the
+/// capability and, when it names an EXTERNAL provider whose credential does NOT
+/// resolve (no inline `api_key` AND the derived `TOME_<NAME>_API_KEY` unset or
+/// empty), return a clear [`TomeError::ProviderConfigInvalid`] (exit 93) naming
+/// the exact expected env var — WITHOUT making any network request.
+///
+/// A missing credential is a *config* problem, not a request failure: exit 93
+/// (resolve-time semantic config error) is the correct code, not 94
+/// (`ProviderRequestFailed`) — so a caller that pre-flights here never 401s deep
+/// in a run.
+///
+/// Returns `Ok(())` for:
+/// - the bundled-local path (`resolve` → `Ok(None)`): no credential is needed;
+/// - an external provider whose credential DOES resolve (env or inline);
+/// - a provider that legitimately needs no auth (a local OpenAI-compatible
+///   server): only handled by NOT pre-flighting in that case — see below.
+///
+/// The pre-flight only fires when a credential is *absent*. It intentionally
+/// does NOT distinguish "provider needs no auth" from "user forgot the key":
+/// Tome cannot know a given `base_url` is a keyless local server, so callers
+/// that want to permit keyless providers should NOT use this pre-flight (the
+/// normal run path's fail-closed request is the right behaviour there). `models
+/// test` uses it because a diagnostic that silently makes a doomed keyless call
+/// against `api.openai.com` is exactly the deep-401 this issue targets.
+///
+/// A [`TomeError::ProviderConfigInvalid`] surfaced by `resolve` itself (an
+/// undefined provider / illegal kind / missing model) propagates unchanged.
+pub fn credential_preflight(config: &Config, capability: Capability) -> Result<(), TomeError> {
+    let Some(resolved) = resolve(config, capability)? else {
+        // Bundled-local path: no credential required.
+        return Ok(());
+    };
+    if resolved.credential.is_present() {
+        return Ok(());
+    }
+    let env_var = derive_env_var_name(&resolved.name);
+    Err(TomeError::ProviderConfigInvalid {
+        detail: format!(
+            "{capability} provider `{}` is configured but no credential resolved; \
+             set the `{env_var}` environment variable (or an inline `api_key` in \
+             [providers.{}])",
+            resolved.name, resolved.name,
+        ),
+    })
+}
+
 /// Resolve a capability to a [`ResolvedProvider`], or `Ok(None)` when no
 /// provider is referenced (use the bundled local model — the default path).
 ///
@@ -978,6 +1024,105 @@ mod tests {
         );
         assert_eq!(dbg_present, "Credential(<present>)");
         assert_eq!(dbg_absent, "Credential(<absent>)");
+    }
+
+    // --- credential_preflight (issue #291) -----------------------------------
+
+    #[test]
+    fn preflight_ok_for_bundled_local_path() {
+        // No provider referenced → Ok(None) → the pre-flight is a no-op.
+        let config = Config::default();
+        for cap in [
+            Capability::Summariser,
+            Capability::Embedding,
+            Capability::Reranker,
+        ] {
+            assert!(credential_preflight(&config, cap).is_ok(), "{cap}");
+        }
+    }
+
+    #[test]
+    fn preflight_ok_when_env_credential_resolves() {
+        let g = EnvGuard::new(&["TOME_P_API_KEY", TIMEOUT_ENV_VAR]);
+        g.set("TOME_P_API_KEY", "env-secret");
+        let config = config_with(
+            "p",
+            entry(ProviderKind::Openai, None, None),
+            Capability::Embedding,
+            Some("p"),
+            Some("model"),
+        );
+        assert!(credential_preflight(&config, Capability::Embedding).is_ok());
+    }
+
+    #[test]
+    fn preflight_ok_when_inline_credential_present() {
+        let _g = EnvGuard::new(&["TOME_P_API_KEY", TIMEOUT_ENV_VAR]);
+        let config = config_with(
+            "p",
+            entry(ProviderKind::Openai, None, Some("inline-secret")),
+            Capability::Embedding,
+            Some("p"),
+            Some("model"),
+        );
+        assert!(credential_preflight(&config, Capability::Embedding).is_ok());
+    }
+
+    #[test]
+    fn preflight_errors_93_and_names_env_var_when_credential_absent() {
+        let _g = EnvGuard::new(&["TOME_MY_PROV_API_KEY", TIMEOUT_ENV_VAR]);
+        let config = config_with(
+            "my-prov",
+            entry(ProviderKind::Openai, None, None), // no inline key
+            Capability::Embedding,
+            Some("my-prov"),
+            Some("model"),
+        );
+        let err = credential_preflight(&config, Capability::Embedding).unwrap_err();
+        // A missing credential is a config problem → exit 93, NOT 94.
+        assert_eq!(
+            err.exit_code(),
+            93,
+            "missing credential is ProviderConfigInvalid/93"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TOME_MY_PROV_API_KEY"),
+            "pre-flight must name the exact derived env var: {msg}"
+        );
+        assert!(msg.contains("embedding"), "names the capability: {msg}");
+    }
+
+    #[test]
+    fn preflight_does_not_leak_inline_credential_value() {
+        // A present inline key makes the pre-flight pass silently — but assert
+        // that even if it errored (it won't here), no path renders the value.
+        // The negative case: an ABSENT key errors, and the error names only the
+        // env var, never a value.
+        let _g = EnvGuard::new(&["TOME_P_API_KEY", TIMEOUT_ENV_VAR]);
+        let config = config_with(
+            "p",
+            entry(ProviderKind::Openai, None, None),
+            Capability::Embedding,
+            Some("p"),
+            Some("model"),
+        );
+        let err = credential_preflight(&config, Capability::Embedding).unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains("sk-"), "no credential-shaped value: {msg}");
+        assert!(msg.contains("TOME_P_API_KEY"), "{msg}");
+    }
+
+    #[test]
+    fn preflight_propagates_resolve_config_error() {
+        // An undefined provider reference is a resolve-time 93 that must
+        // propagate unchanged through the pre-flight.
+        let mut config = Config::default();
+        config.summariser.provider = Some("ghost".into());
+        config.summariser.model = Some("gpt-4o".into());
+        let err = credential_preflight(&config, Capability::Summariser).unwrap_err();
+        assert_eq!(err.exit_code(), 93);
+        assert!(err.to_string().contains("ghost"));
     }
 
     #[test]

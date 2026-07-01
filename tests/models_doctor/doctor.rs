@@ -888,6 +888,263 @@ fn no_drift_reported_when_seeds_match_registry() {
     assert_eq!(report.overall, DoctorClassification::Ok);
 }
 
+// ---- Issue #291: provider credential findings (via assemble_report) ----
+
+/// Serialises tests mutating `TOME_<NAME>_API_KEY` (process-global env).
+static PROVIDER_CRED_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A configured EXTERNAL embedding provider with NO resolvable credential →
+/// `tome doctor` (no `--verify`, the cheap static path) surfaces a distinct
+/// `provider:<name>` finding naming the exact `TOME_<NAME>_API_KEY`, and
+/// classifies Unhealthy (embedding is health-critical). The credential VALUE is
+/// never printed.
+#[test]
+fn assemble_provider_missing_embedding_credential_is_unhealthy_and_names_env_var() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _env = PROVIDER_CRED_ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: guarded by PROVIDER_CRED_ENV_MUTEX; provider `myprov` derives
+    // `TOME_MYPROV_API_KEY` — ensure it is unset so the credential does NOT
+    // resolve.
+    unsafe {
+        std::env::remove_var("TOME_MYPROV_API_KEY");
+    }
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+
+    // Write a config.toml with an OpenAI embedding provider and NO inline key.
+    std::fs::write(
+        &paths.global_config_file,
+        "\
+[providers.myprov]
+kind = \"openai\"
+
+[embedding]
+provider = \"myprov\"
+model = \"text-embedding-3-small\"
+",
+    )
+    .unwrap();
+
+    let home = empty_home();
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+
+    // Models are present, but the missing embedding credential escalates to
+    // Unhealthy (embedding is health-critical).
+    assert_eq!(report.embedder.state, "ok");
+    assert_eq!(
+        report.overall,
+        DoctorClassification::Unhealthy,
+        "a missing embedding-provider credential must classify Unhealthy",
+    );
+
+    // A distinct provider finding naming the exact env var, non-auto-fixable.
+    let provider_fix = report
+        .suggested_fixes
+        .iter()
+        .find(|f| f.subsystem == tome::doctor::Subsystem::Provider("myprov".to_owned()))
+        .expect("a provider:<name> suggested fix must be present");
+    assert!(!provider_fix.auto_fixable, "user must set the env var");
+    assert!(
+        provider_fix.diagnosis.contains("TOME_MYPROV_API_KEY"),
+        "the finding must name the exact env var: {}",
+        provider_fix.diagnosis,
+    );
+    assert!(
+        provider_fix.diagnosis.contains("embedding"),
+        "the finding names the capability: {}",
+        provider_fix.diagnosis,
+    );
+
+    // It counts as remaining manual work (→ exit 75 under --fix).
+    assert!(doctor::fixes::has_remaining_manual_fixes(&report));
+
+    // The provider row renders `credential_resolvable = false`.
+    let row = report
+        .providers
+        .iter()
+        .find(|p| p.name == "myprov")
+        .expect("provider row present");
+    assert!(!row.credential_resolvable);
+}
+
+/// A configured summariser provider with NO credential escalates only to
+/// Degraded (summarisation is optional) — NOT Unhealthy.
+#[test]
+fn assemble_provider_missing_summariser_credential_is_degraded() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _env = PROVIDER_CRED_ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: guarded by PROVIDER_CRED_ENV_MUTEX.
+    unsafe {
+        std::env::remove_var("TOME_SUMPROV_API_KEY");
+    }
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+    std::fs::write(
+        &paths.global_config_file,
+        "\
+[providers.sumprov]
+kind = \"openai\"
+
+[summariser]
+provider = \"sumprov\"
+model = \"gpt-4o-mini\"
+",
+    )
+    .unwrap();
+
+    let home = empty_home();
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    assert_eq!(
+        report.overall,
+        DoctorClassification::Degraded,
+        "a missing summariser-provider credential is optional → Degraded",
+    );
+    let f = report
+        .suggested_fixes
+        .iter()
+        .find(|f| f.subsystem == tome::doctor::Subsystem::Provider("sumprov".to_owned()))
+        .expect("provider fix present");
+    assert!(f.diagnosis.contains("TOME_SUMPROV_API_KEY"));
+    assert!(f.diagnosis.contains("summariser"));
+}
+
+/// An inline `api_key` in `[providers.<name>]` DOES resolve the credential →
+/// NO finding, overall unaffected, AND the credential value never appears in
+/// the report (Principle XIII).
+#[test]
+fn assemble_provider_inline_key_resolves_and_never_leaks_value() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _env = PROVIDER_CRED_ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: guarded by PROVIDER_CRED_ENV_MUTEX.
+    unsafe {
+        std::env::remove_var("TOME_INLINEPROV_API_KEY");
+    }
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+    // Inline api_key — a distinctive value we assert is NEVER serialised.
+    std::fs::write(
+        &paths.global_config_file,
+        "\
+[providers.inlineprov]
+kind = \"openai\"
+api_key = \"sk-super-secret-leaky-value\"
+
+[embedding]
+provider = \"inlineprov\"
+model = \"text-embedding-3-small\"
+",
+    )
+    .unwrap();
+
+    let home = empty_home();
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+
+    // No provider finding — the inline key resolves.
+    assert!(
+        !report
+            .suggested_fixes
+            .iter()
+            .any(|f| matches!(&f.subsystem, tome::doctor::Subsystem::Provider(_))),
+        "an inline api_key must resolve → no provider finding",
+    );
+    // The provider row reports the credential resolves.
+    let row = report
+        .providers
+        .iter()
+        .find(|p| p.name == "inlineprov")
+        .expect("provider row present");
+    assert!(row.credential_resolvable);
+
+    // The credential VALUE must never appear anywhere in the serialised report.
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(
+        !json.contains("sk-super-secret-leaky-value"),
+        "the inline credential value must NEVER be serialised into the doctor report",
+    );
+}
+
+/// `--verify` with a missing credential must NOT make a doomed live probe: the
+/// provider row's `reachable` stays `None` (not `Some(false)` from a 401) while
+/// the credential finding surfaces.
+#[test]
+fn assemble_verify_skips_probe_when_credential_absent() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _env = PROVIDER_CRED_ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: guarded by PROVIDER_CRED_ENV_MUTEX.
+    unsafe {
+        std::env::remove_var("TOME_VERIFYPROV_API_KEY");
+    }
+    // A transport override that PANICS if reached — the verify probe must be
+    // skipped entirely when the credential is absent.
+    let _t = tome::provider::http::set_transport_override(|_spec| {
+        panic!("verify must not probe a provider whose credential is absent");
+    });
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+    std::fs::write(
+        &paths.global_config_file,
+        "\
+[providers.verifyprov]
+kind = \"openai\"
+
+[embedding]
+provider = \"verifyprov\"
+model = \"text-embedding-3-small\"
+",
+    )
+    .unwrap();
+
+    let home = empty_home();
+    // verify = true → but the probe must be skipped (no panic).
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), true).unwrap();
+
+    let row = report
+        .providers
+        .iter()
+        .find(|p| p.name == "verifyprov")
+        .expect("provider row present");
+    assert_eq!(
+        row.reachable, None,
+        "verify must skip the probe (leave reachable None) when credential absent",
+    );
+    // The credential finding still surfaces.
+    assert!(
+        report
+            .suggested_fixes
+            .iter()
+            .any(|f| f.subsystem == tome::doctor::Subsystem::Provider("verifyprov".to_owned())),
+        "the credential finding must surface under --verify too",
+    );
+}
+
 // ---- Helpers -----------------------------------------------------------
 
 fn cache_dir_for(env: &ToolEnv, url: &str) -> std::path::PathBuf {
