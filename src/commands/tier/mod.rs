@@ -123,6 +123,10 @@ fn resolve_targets(
                 // A resolved plugin with no enabled tierable entries (all agents,
                 // disabled, or filtered out by `--kind`) is the same user-facing
                 // "nothing to tier" as a missing entry → EntryNotFound (27).
+                // FAIL-CLOSED BY DESIGN: a `--plugin '*'` glob spanning a plugin
+                // with zero tierable entries (e.g. an agent-only plugin) ABORTS
+                // the whole batch here rather than silently skipping that plugin —
+                // the mutation target set must be unambiguous before any write.
                 return Err(TomeError::EntryNotFound {
                     catalog: pid.catalog.clone(),
                     plugin: pid.plugin.clone(),

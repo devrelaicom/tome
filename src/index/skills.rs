@@ -1212,8 +1212,9 @@ pub fn set_tier_for_plugin(
 /// emitter iterates — the caller emits one record per row. A single UPDATE keeps
 /// the whole reset atomic under the advisory write lock; the follow-up SELECT
 /// re-reads the same enrolled set so the emitted rows exactly reflect what was
-/// changed. An empty workspace (no enabled tierable entries) returns an empty
-/// vec — a benign no-op the caller surfaces as "nothing to reset".
+/// changed. An empty workspace (no enabled tierable entries) yields an empty
+/// vec; the caller emits nothing and exits 0 (a benign idempotent no-op — there
+/// is no "nothing to reset" message).
 pub fn reset_all_tiers_for_workspace(
     conn: &Connection,
     workspace_name: &str,

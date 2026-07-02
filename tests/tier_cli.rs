@@ -896,3 +896,52 @@ fn tier_set_plugin_batch_all_succeed() {
         "every entry across both plugins retiered to 2: {after:?}"
     );
 }
+
+/// FAIL-CLOSED (deliberate, intentional-by-test): a bulk `--plugin` batch hard
+/// fails on the FIRST selector error even when OTHER `--plugin` tokens matched —
+/// the mutation target set must be unambiguous before any write. This diverges
+/// from `plugin enable`'s forward-progress: `tier set` MUST NOT partially retier
+/// the good plugin and then error, because that would leave the batch in a state
+/// the surfaced error contradicts. This test locks that as intentional.
+#[test]
+fn tier_set_plugin_batch_fails_closed_on_selector_error() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled_both(&env, &tmp);
+
+    // A good `--plugin` (plugin-alpha) alongside a `--plugin` glob that matches
+    // nothing (`nonexistent-*`). The selector yields matched=[plugin-alpha] AND a
+    // NoGlobMatch error → the whole batch aborts with Usage (exit 2) BEFORE any
+    // tier write lands.
+    let out = env
+        .cmd()
+        .args([
+            "tier",
+            "set",
+            "--plugin",
+            "plugin-alpha",
+            "--plugin",
+            "nonexistent-*",
+            "2",
+        ])
+        .output()
+        .expect("spawn tier set fail-closed batch");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a zero-match --plugin glob in the batch → Usage (2), fail-closed; stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // The good plugin's entries must be UNCHANGED — no partial write landed.
+    let after = tier_list_json(&env);
+    for e in &after {
+        if e["plugin"] == "plugin-alpha" {
+            assert_eq!(
+                e["tier"], 3,
+                "fail-closed: plugin-alpha must stay at the default tier, no partial write: {e:?}"
+            );
+        }
+    }
+}
