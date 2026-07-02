@@ -35,22 +35,63 @@ pub fn run(args: PluginListArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     // here surfaced an empty list on a fresh install. F11a already threads
     // the resolved workspace through the per-plugin aggregate.
     let conn = open_index_for_read(&paths, &scope.scope)?;
-    let collected = collect_rows(&args, &conn, &paths, scope.scope.name().as_str())?;
+    let workspace_name = scope.scope.name();
+    let collected = collect_rows(&args, &conn, &paths, workspace_name.as_str())?;
 
-    let filtered: Vec<Row> = if args.enabled_only {
-        collected
-            .rows
-            .into_iter()
-            .filter(|r| r.status == PluginStatus::Enabled)
-            .collect()
-    } else {
-        collected.rows
-    };
+    // Post-collection filters compose with logical AND across `--enabled-only`,
+    // `--filter`, and `--tier`. Each narrows BOTH the human table and the JSON
+    // stream identically (a plugin that fails any filter is simply absent from
+    // both), so neither surface can diverge.
+    let mut filtered: Vec<Row> = collected.rows;
+
+    if args.enabled_only {
+        filtered.retain(|r| r.status == PluginStatus::Enabled);
+    }
+
+    // `--filter`: case-insensitive substring match against the plugin NAME or
+    // its DESCRIPTION. Both haystacks are lower-cased once against a
+    // lower-cased needle so the match is ASCII- and Unicode-case-insensitive.
+    if let Some(needle) = &args.filter {
+        let needle = needle.to_lowercase();
+        filtered.retain(|r| row_matches_filter(r, &needle));
+    }
+
+    // `--tier <n>`: keep only plugins with at least one enabled entry routed at
+    // tier `n`. The tier lives in `workspace_skills.tier`; the per-plugin tier
+    // set is queried only when the flag is present (no cost on the common path).
+    if let Some(tier) = args.tier {
+        let mut kept: Vec<Row> = Vec::with_capacity(filtered.len());
+        for r in filtered {
+            let tiers = crate::index::skills::enabled_tiers_for_plugin(
+                &conn,
+                workspace_name.as_str(),
+                &r.id.catalog,
+                &r.id.plugin,
+            )?;
+            if tiers.contains(&tier) {
+                kept.push(r);
+            }
+        }
+        filtered = kept;
+    }
 
     match mode {
         Mode::Human => emit_human(&filtered, collected.any_catalogs),
         Mode::Json => emit_json(&filtered),
     }
+}
+
+/// Case-insensitive substring match of `needle` (already lower-cased) against
+/// the plugin's name or description. Shared by the human + JSON paths so
+/// `--filter` narrows both identically.
+fn row_matches_filter(row: &Row, needle: &str) -> bool {
+    if row.id.plugin.to_lowercase().contains(needle) {
+        return true;
+    }
+    row.record
+        .description
+        .as_deref()
+        .is_some_and(|d| d.to_lowercase().contains(needle))
 }
 
 /// One row in the human table / one NDJSON record. Stored separately from
@@ -330,6 +371,63 @@ fn emit_json(rows: &[Row]) -> Result<(), TomeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a minimal [`Row`] for the `--filter` matcher unit tests. Only the
+    /// fields the matcher reads (`id.plugin`, `record.description`) carry test
+    /// data; everything else is a benign default.
+    fn row_for(plugin: &str, description: Option<&str>) -> Row {
+        let id = PluginId {
+            catalog: "cat".to_owned(),
+            plugin: plugin.to_owned(),
+        };
+        let record = PluginRecord {
+            id: id.clone(),
+            version: String::new(),
+            author: None,
+            description: description.map(str::to_owned),
+            last_upstream_change: None,
+            status: PluginStatus::Disabled,
+            component_counts: crate::plugin::components::ComponentCounts::default(),
+            last_indexed_at: None,
+        };
+        Row {
+            id,
+            version: None,
+            status: PluginStatus::Disabled,
+            per_kind: PerKindCounts::default(),
+            last_indexed_at: None,
+            record,
+        }
+    }
+
+    #[test]
+    fn filter_matches_plugin_name_case_insensitively() {
+        let row = row_for("Formatter", Some("does formatting"));
+        // Needle is pre-lowered by the caller; the matcher lowers the haystack.
+        assert!(row_matches_filter(&row, "format"));
+        assert!(row_matches_filter(&row, "formatter"));
+    }
+
+    #[test]
+    fn filter_matches_description_case_insensitively() {
+        let row = row_for("alpha", Some("The Best Linter Around"));
+        assert!(row_matches_filter(&row, "linter"));
+        // No hit in the name, only the description.
+        assert!(!row.id.plugin.to_lowercase().contains("linter"));
+    }
+
+    #[test]
+    fn filter_excludes_non_matching_row() {
+        let row = row_for("alpha", Some("beta description"));
+        assert!(!row_matches_filter(&row, "gamma"));
+    }
+
+    #[test]
+    fn filter_tolerates_absent_description() {
+        let row = row_for("standalone", None);
+        assert!(row_matches_filter(&row, "stand"));
+        assert!(!row_matches_filter(&row, "missing"));
+    }
 
     // #293: the empty-state nudge is catalog-aware, mirroring `catalog list`.
     #[test]

@@ -144,6 +144,146 @@ fn show_reads_native_manifest_ignoring_legacy_plugin_json() {
 }
 
 #[test]
+fn show_without_details_omits_tier_from_json_and_human() {
+    // #330: the DEFAULT `plugin show` output — human AND json — must be
+    // byte-identical to before the flag existed. `tier` is
+    // `skip_serializing_if = "Option::is_none"` and stays `None` without
+    // `--details`, so it must be ABSENT from the serialized entry JSON, and no
+    // ` tier=` annotation appears on the human entry line.
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup(&env, &fixture_tmp);
+
+    let out = env
+        .cmd()
+        .args([
+            "plugin",
+            "show",
+            "sample-plugin-catalog/plugin-alpha",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).expect("json");
+    let skills = v["skills"].as_array().expect("skills array");
+    assert!(!skills.is_empty(), "fixture has skills to inspect");
+    for s in skills {
+        assert!(
+            s.get("tier").is_none(),
+            "without --details the entry JSON must NOT carry `tier`: {s}",
+        );
+    }
+
+    // Human mode: no ` tier=` annotation on any entry line.
+    let human = env
+        .cmd()
+        .args(["plugin", "show", "sample-plugin-catalog/plugin-alpha"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        !text.contains(" tier="),
+        "without --details the human output must not annotate tiers: {text}",
+    );
+}
+
+#[test]
+fn show_details_annotates_each_entry_with_its_tier() {
+    // #330: `--details` populates `tier` on each per-entry projection (json)
+    // and appends ` tier=<n>` to the human entry line. Enabled entries default
+    // to tier 3; promote skill-a to tier 1 to prove the value is per-entry,
+    // not a constant.
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup(&env, &fixture_tmp);
+
+    let set = env
+        .cmd()
+        .args(["tier", "set", "plugin-alpha/skill-a", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        set.status.success(),
+        "tier set failed: {}",
+        String::from_utf8_lossy(&set.stderr),
+    );
+
+    // JSON: every enabled skill carries a `tier`; skill-a is 1, the rest are 3.
+    let out = env
+        .cmd()
+        .args([
+            "plugin",
+            "show",
+            "sample-plugin-catalog/plugin-alpha",
+            "--details",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).expect("json");
+    let skills = v["skills"].as_array().expect("skills array");
+    assert!(!skills.is_empty(), "fixture has skills");
+    let skill_a = skills
+        .iter()
+        .find(|s| s["name"] == "skill-a")
+        .expect("skill-a present");
+    assert_eq!(
+        skill_a["tier"], 1,
+        "skill-a was promoted to tier 1: {skill_a}",
+    );
+    // Every enabled entry must carry a tier under --details.
+    for s in skills {
+        assert!(
+            s.get("tier").is_some(),
+            "--details must annotate every enabled entry with a tier: {s}",
+        );
+    }
+
+    // Human: the ` tier=1` annotation appears on skill-a's line, and `tier=3`
+    // on the default-tier lines.
+    let human = env
+        .cmd()
+        .args([
+            "plugin",
+            "show",
+            "sample-plugin-catalog/plugin-alpha",
+            "--details",
+        ])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("tier=1"),
+        "the promoted skill's line must carry `tier=1`: {text}",
+    );
+    assert!(
+        text.contains("tier=3"),
+        "default-tier entries must carry `tier=3`: {text}",
+    );
+    // The annotation must be on the skill-a entry line specifically.
+    let skill_a_line = text
+        .lines()
+        .find(|l| l.contains("skill-a "))
+        .expect("skill-a line present");
+    assert!(
+        skill_a_line.contains("tier=1"),
+        "skill-a's own line must carry tier=1: {skill_a_line}",
+    );
+}
+
+#[test]
 fn show_unknown_plugin_exits_with_plugin_not_found_code() {
     let fixture_tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();

@@ -81,6 +81,7 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         scope.scope.name().as_str(),
         &id.catalog,
         &id.plugin,
+        args.details,
     )?;
     let mut skills: Vec<EntryView> = Vec::new();
     let mut commands: Vec<EntryView> = Vec::new();
@@ -191,6 +192,13 @@ struct EntryView {
     /// personas are off — absent from the JSON wire in that case.
     #[serde(skip_serializing_if = "Option::is_none")]
     persona_name: Option<String>,
+    /// #330: the entry's routing tier (`workspace_skills.tier`), populated
+    /// ONLY when `--details` is passed. `None` otherwise — `skip_if_none`
+    /// keeps the default `plugin show --json` wire byte-identical to before
+    /// the flag existed. Absent when the entry is not enabled in the resolved
+    /// workspace (no `workspace_skills` row → no tier).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<u8>,
 }
 
 /// Pull every enabled-or-indexed entry for `(catalog, plugin)` from
@@ -211,9 +219,19 @@ fn list_entries(
     workspace_name: &str,
     catalog: &str,
     plugin: &str,
+    details: bool,
 ) -> Result<Vec<EntryView>, TomeError> {
     use std::path::PathBuf;
     let records = crate::index::skills::list_for_plugin(conn, workspace_name, catalog, plugin)?;
+    // #330: `--details` annotates each entry with its routing tier. The
+    // per-entry tier map is queried ONCE (keyed by `(kind, name)`) and only
+    // when the flag is set, so the default path issues no extra query and the
+    // `EntryView.tier` field stays `None` → absent from the wire.
+    let tiers = if details {
+        crate::index::skills::entry_tiers_for_plugin(conn, workspace_name, catalog, plugin)?
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut out: Vec<EntryView> = Vec::with_capacity(records.len());
     for r in records {
         let stored = PathBuf::from(&r.path);
@@ -266,6 +284,11 @@ fn list_entries(
                  likely a misbehaving catalog",
             );
         }
+        // #330: look up the tier before `r.name` is moved into the view.
+        // Only populated under `--details` (the map is empty otherwise), and
+        // only when the entry is enrolled (a stored-but-disabled entry has no
+        // `workspace_skills` row → no tier → stays `None`).
+        let tier = tiers.get(&(r.kind, r.name.clone())).copied();
         out.push(EntryView {
             name: r.name,
             description: r.description,
@@ -278,6 +301,7 @@ fn list_entries(
             argument_hint,
             // Filled in by the caller when personas resolve true (FR-083).
             persona_name: None,
+            tier,
         });
     }
     Ok(out)
@@ -425,9 +449,14 @@ fn write_entry_line<W: Write>(out: &mut W, e: &EntryView) -> std::io::Result<()>
         .map(|p| format!("   prompt={p}"))
         .unwrap_or_default();
     let dormant_suffix = if dormant { "  [dormant]" } else { "" };
+    // #330: `--details` appends ` tier=<n>` after the flag/prompt/dormant
+    // suffixes. `tier` is `Some` only under `--details` (and only for an
+    // enrolled entry), so without the flag the line is byte-identical to
+    // before. Placed last so it never disturbs the fixed-width flag columns.
+    let tier_suffix = e.tier.map(|t| format!(" tier={t}")).unwrap_or_default();
     writeln!(
         out,
-        "  {:20} searchable={}  user_invocable={}{prompt_suffix}{dormant_suffix}",
+        "  {:20} searchable={}  user_invocable={}{prompt_suffix}{dormant_suffix}{tier_suffix}",
         e.name, e.searchable, e.user_invocable,
     )?;
     if !e.description.is_empty() {

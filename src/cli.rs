@@ -996,12 +996,27 @@ pub struct PluginListArgs {
     /// Hide disabled and unindexable plugins.
     #[arg(long = "enabled-only")]
     pub enabled_only: bool,
+    /// Keep only plugins whose name OR description contains this substring
+    /// (case-insensitive). Composes with `--catalog`, `--enabled-only`, and
+    /// `--tier`.
+    #[arg(long)]
+    pub filter: Option<String>,
+    /// Keep only plugins with at least one enabled entry (skill / command /
+    /// agent) routed at this tier (1, 2, or 3). Composes with `--filter`,
+    /// `--catalog`, and `--enabled-only`.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=3))]
+    pub tier: Option<u8>,
 }
 
 #[derive(Debug, clap::Args)]
 pub struct PluginShowArgs {
     /// The plugin to inspect, as `<catalog>/<plugin>`.
     pub id: String,
+    /// Annotate each per-entry line (skills / commands / agents) with its
+    /// routing tier. Without it the output — human and `--json` — is
+    /// unchanged.
+    #[arg(long)]
+    pub details: bool,
 }
 
 #[derive(Debug, clap::Args)]
