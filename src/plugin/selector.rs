@@ -20,8 +20,31 @@
 //! `resolve_plugin_dir`, preserving the pre-#314 exit codes (a typo'd literal
 //! id resolves to a `PluginId`, which the command then rejects with the same
 //! `PluginNotFound` / `CatalogNotFound` it always did).
+//!
+//! SHAPE, however, IS validated here for literal and bare tokens: both go
+//! through the [`PluginId::from_str`] SSOT (which enforces exactly one `/` and
+//! safe path segments — no `..`, no embedded `/`, no leading dot, non-empty).
+//! A malformed literal (`bad/id/extra`, `mycat/..`, `""`) is a
+//! [`SelectorError::Invalid`] → [`TomeError::Usage`] (exit 2), matching what the
+//! pre-#314 single-id path did and what the sibling `reindex` command pins.
+//! GLOB tokens are exempt: their matches come from the already-valid catalog
+//! candidate set, and a pattern is not a concrete id (`*` is a legal segment
+//! char but a pattern must not be parsed as one).
+//!
+//! [`TomeError::Usage`]: crate::error::TomeError::Usage
+
+use std::str::FromStr;
 
 use crate::plugin::identity::PluginId;
+
+/// The single source of truth for "is this token a glob pattern" — a token is a
+/// glob iff it contains the `*` wildcard. Shared by [`resolve`]'s
+/// glob-vs-literal classification AND the command-layer `single_explicit`
+/// checks in `plugin enable`/`disable`, so a future metacharacter addition
+/// changes exactly one predicate rather than drifting the sites apart.
+pub fn is_glob(token: &str) -> bool {
+    token.contains('*')
+}
 
 /// Match `name` against `pattern`, where `*` in `pattern` matches zero-or-more
 /// of ANY character and every other character is a literal. No other
@@ -99,6 +122,12 @@ pub enum SelectorError {
     NoGlobMatch { pattern: String },
     /// A bare literal name matched no plugin in any enrolled catalog.
     NotFound { plugin: String },
+    /// A literal token is not a well-formed plugin id — it fails the
+    /// [`PluginId::from_str`] shape/segment check (e.g. `bad/id/extra` with two
+    /// slashes, `mycat/..` with a traversal segment, or the empty string). This
+    /// is a shape error, distinct from "well-formed but nonexistent"
+    /// ([`SelectorError::NotFound`]).
+    Invalid { token: String },
 }
 
 impl SelectorError {
@@ -114,6 +143,10 @@ impl SelectorError {
     ///   this is exactly the "no such plugin" case that variant names, so it
     ///   maps there rather than to a generic `Usage`, preserving the exit code a
     ///   single bare-name typo produced before #314.
+    /// * [`SelectorError::Invalid`] → [`TomeError::Usage`] (exit 2) — a malformed
+    ///   id shape is a usage error, matching the pre-#314 single-id path (which
+    ///   parsed via `PluginId::from_str` and mapped any shape failure to
+    ///   `Usage`) and the sibling `reindex bad/id/extra` exit-2 pin.
     ///
     /// [`TomeError`]: crate::error::TomeError
     /// [`TomeError::Usage`]: crate::error::TomeError::Usage
@@ -131,6 +164,9 @@ impl SelectorError {
                  hint: run `tome plugin list` to see available `<catalog>/<plugin>` ids",
             )),
             SelectorError::NotFound { plugin } => TomeError::PluginNotFound(plugin),
+            SelectorError::Invalid { token } => TomeError::Usage(format!(
+                "invalid plugin id `{token}`: expected `<catalog>/<plugin>` with safe path segments"
+            )),
         }
     }
 }
@@ -153,24 +189,34 @@ pub struct Resolution {
 
 /// Resolve `tokens` against `candidates`, scoped by an optional `catalog`.
 ///
-/// Per-token rules (a token is classified by whether it contains `*` and `/`):
+/// Per-token rules (a token is classified by [`is_glob`], then by whether it
+/// contains `/`):
 ///
 /// 1. **Glob** (contains `*`): split on the first `/` into `(cat_pat,
 ///    plug_pat)`; with no `/`, `plug_pat = token` and `cat_pat` is the
-///    `catalog` value (matched exactly) when `Some`, else `*` (all catalogs).
-///    Every candidate with `glob_match(cat_pat, c.catalog) &&
-///    glob_match(plug_pat, c.plugin)` matches. Zero matches ⇒
-///    [`SelectorError::NoGlobMatch`] (never a silent no-op).
-/// 2. **Literal `catalog/plugin`** (has `/`, no `*`): produces the `PluginId`
-///    directly WITHOUT requiring it to be in `candidates` — existence is
-///    checked downstream by `resolve_plugin_dir`, preserving the pre-#314 exit
-///    codes. A slash-qualified token IGNORES `--catalog` (an explicit catalog
-///    wins over the scope flag).
+///    `catalog` value when `Some`, else `*` (all catalogs). Both halves are
+///    matched via [`glob_match`], so a `*` in either half (including in
+///    `--catalog`) globs. Every candidate with `glob_match(cat_pat, c.catalog)
+///    && glob_match(plug_pat, c.plugin)` matches; zero matches ⇒
+///    [`SelectorError::NoGlobMatch`] (never a silent no-op). Glob matches come
+///    from `candidates` (already-valid catalog data), so a pattern is NOT run
+///    through `PluginId::from_str`.
+/// 2. **Literal `catalog/plugin`** (has `/`, no `*`): parsed via the
+///    [`PluginId::from_str`] SSOT so the shape/segment invariants hold (exactly
+///    one `/`, safe segments); a malformed literal ⇒ [`SelectorError::Invalid`]
+///    (exit 2), NOT a hand-built id that could escape a downstream `join`.
+///    Existence is still NOT checked here — downstream `resolve_plugin_dir`
+///    owns that, preserving the pre-#314 exit codes. A slash-qualified token
+///    IGNORES `--catalog` (an explicit catalog wins over the scope flag).
 /// 3. **Literal bare `plugin`** (no `/`, no `*`): if `catalog` is `Some(c)`,
-///    resolve to `c/plugin` (existence downstream); otherwise scan `candidates`
-///    for catalogs holding a plugin named EXACTLY `plugin` — exactly one ⇒ that
-///    id; multiple ⇒ [`SelectorError::Ambiguous`]; none ⇒
-///    [`SelectorError::NotFound`].
+///    parse `c/plugin` via `PluginId::from_str` (validates both the flag value
+///    and the name) and resolve to it (existence downstream); otherwise
+///    validate the bare name as a safe segment, then scan `candidates` for
+///    catalogs holding a plugin named EXACTLY `plugin` — exactly one ⇒ that id;
+///    multiple ⇒ [`SelectorError::Ambiguous`]; none ⇒ [`SelectorError::NotFound`].
+///    A malformed bare token (empty, `..`, embedded `/`) ⇒
+///    [`SelectorError::Invalid`] (exit 2) BEFORE the candidate scan, so it never
+///    degrades to a confusing `NotFound`.
 ///
 /// `matched` is deduped preserving first-seen order, so a plugin matched by two
 /// tokens (e.g. an explicit id and an overlapping glob) appears once.
@@ -186,12 +232,12 @@ pub fn resolve(tokens: &[String], candidates: &[PluginId], catalog: Option<&str>
     };
 
     for token in tokens {
-        if token.contains('*') {
+        if is_glob(token) {
             // ---- GLOB -----------------------------------------------------
             let (cat_pat, plug_pat) = match token.split_once('/') {
                 Some((c, p)) => (c.to_owned(), p.to_owned()),
                 // No `/`: the plugin pattern is the whole token; the catalog
-                // pattern is `--catalog` (exact) when set, else `*` (all).
+                // pattern is `--catalog` (glob-matched) when set, else `*` (all).
                 None => (
                     catalog.map(str::to_owned).unwrap_or_else(|| "*".to_owned()),
                     token.clone(),
@@ -210,30 +256,41 @@ pub fn resolve(tokens: &[String], candidates: &[PluginId], catalog: Option<&str>
                     pattern: token.clone(),
                 });
             }
-        } else if let Some((cat, plug)) = token.split_once('/') {
+        } else if token.contains('/') {
             // ---- LITERAL catalog/plugin -----------------------------------
             // Explicit catalog wins: `--catalog` is ignored for a slash token.
-            // Existence is NOT checked here (downstream `resolve_plugin_dir`
-            // owns that), so this always yields a `PluginId`.
-            push_unique(
-                &mut matched,
-                PluginId {
-                    catalog: cat.to_owned(),
-                    plugin: plug.to_owned(),
-                },
-            );
+            // Parse through the PluginId SSOT so a malformed id (`bad/id/extra`,
+            // `mycat/..`) is a shape error (Usage/2), never a hand-built id that
+            // could escape a downstream `join`. Existence stays downstream.
+            match PluginId::from_str(token) {
+                Ok(id) => push_unique(&mut matched, id),
+                Err(_) => errors.push(SelectorError::Invalid {
+                    token: token.clone(),
+                }),
+            }
         } else if let Some(cat) = catalog {
             // ---- LITERAL bare plugin, scoped by --catalog -----------------
+            // Compose `cat/token` and parse via the SSOT — this validates BOTH
+            // the `--catalog` value and the bare name as safe segments.
             // Existence checked downstream (same as the slash form).
-            push_unique(
-                &mut matched,
-                PluginId {
-                    catalog: cat.to_owned(),
-                    plugin: token.clone(),
-                },
-            );
+            match PluginId::from_str(&format!("{cat}/{token}")) {
+                Ok(id) => push_unique(&mut matched, id),
+                Err(_) => errors.push(SelectorError::Invalid {
+                    token: token.clone(),
+                }),
+            }
         } else {
             // ---- LITERAL bare plugin, unscoped ----------------------------
+            // Validate the bare name as a safe segment BEFORE scanning, so an
+            // empty / `..` / slash-free-but-invalid token surfaces `Invalid`
+            // (Usage/2), not a confusing `NotFound`. (A `/`-containing token
+            // would have taken the slash branch above.)
+            if crate::plugin::identity::validate_segment(token).is_err() {
+                errors.push(SelectorError::Invalid {
+                    token: token.clone(),
+                });
+                continue;
+            }
             // Resolve the catalog by scanning candidates for an EXACT name.
             let hits: Vec<&PluginId> = candidates.iter().filter(|c| c.plugin == *token).collect();
             match hits.as_slice() {
@@ -389,6 +446,87 @@ mod tests {
                 plugin: "nope".to_owned()
             }]
         );
+    }
+
+    // ---- FIX 1 (#314): literal/bare tokens are shape-validated -------------
+
+    #[test]
+    fn resolve_literal_with_two_slashes_is_invalid() {
+        // `bad/id/extra` has two slashes → not a well-formed id. Must be
+        // `Invalid` (Usage/2), NOT a hand-split `catalog="bad"` that would
+        // diverge from the pre-#314 single-id path + the reindex exit-2 pin.
+        let r = resolve(&tok(&["bad/id/extra"]), &sample(), None);
+        assert!(r.matched.is_empty());
+        assert_eq!(
+            r.errors,
+            vec![SelectorError::Invalid {
+                token: "bad/id/extra".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn resolve_literal_traversal_segment_is_invalid() {
+        // `mycat/..` would escape the cache dir via a downstream `join("..")`.
+        // Reject the shape here (Usage/2) so no unvalidated segment reaches it.
+        let r = resolve(&tok(&["mycat/.."]), &sample(), None);
+        assert!(r.matched.is_empty());
+        assert_eq!(
+            r.errors,
+            vec![SelectorError::Invalid {
+                token: "mycat/..".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn resolve_empty_token_is_invalid_not_not_found() {
+        // An empty bare token is a shape error (Usage/2), validated BEFORE the
+        // candidate scan so it never degrades to a confusing `NotFound{""}`.
+        let r = resolve(&tok(&[""]), &sample(), None);
+        assert!(r.matched.is_empty());
+        assert_eq!(
+            r.errors,
+            vec![SelectorError::Invalid {
+                token: String::new()
+            }]
+        );
+    }
+
+    #[test]
+    fn resolve_bare_traversal_token_is_invalid() {
+        // A bare `..` (no slash) is rejected as an unsafe segment.
+        let r = resolve(&tok(&[".."]), &sample(), None);
+        assert!(r.matched.is_empty());
+        assert_eq!(
+            r.errors,
+            vec![SelectorError::Invalid {
+                token: "..".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn resolve_scoped_bare_with_traversal_is_invalid() {
+        // With `--catalog`, `cat/..` is composed then parsed → Invalid.
+        let r = resolve(&tok(&[".."]), &sample(), Some("midnight"));
+        assert!(r.matched.is_empty());
+        assert_eq!(
+            r.errors,
+            vec![SelectorError::Invalid {
+                token: "..".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn resolve_valid_literal_still_bypasses_candidates() {
+        // A well-formed literal that isn't in candidates still resolves (the
+        // existence check stays downstream) — the shape gate must not break the
+        // "literal need not exist" contract.
+        let r = resolve(&tok(&["ghost/plug"]), &sample(), None);
+        assert_eq!(r.matched, vec![id("ghost", "plug")]);
+        assert!(r.errors.is_empty());
     }
 
     #[test]
@@ -563,5 +701,31 @@ mod tests {
         .into_tome_error();
         assert!(matches!(&err, TomeError::PluginNotFound(p) if p == "nope"));
         assert_eq!(err.exit_code(), 20);
+    }
+
+    #[test]
+    fn invalid_maps_to_usage_and_echoes_token() {
+        use crate::error::TomeError;
+        let err = SelectorError::Invalid {
+            token: "bad/id/extra".to_owned(),
+        }
+        .into_tome_error();
+        assert_eq!(err.exit_code(), 2, "Invalid must map to Usage (exit 2)");
+        match err {
+            TomeError::Usage(msg) => assert!(msg.contains("bad/id/extra"), "msg: {msg}"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    // ---- FIX 2 (#314): is_glob is the single glob predicate ---------------
+
+    #[test]
+    fn is_glob_matches_only_star_tokens() {
+        assert!(is_glob("a*"));
+        assert!(is_glob("*"));
+        assert!(is_glob("cat/*"));
+        assert!(!is_glob("plain"));
+        assert!(!is_glob("cat/plugin"));
+        assert!(!is_glob(""));
     }
 }

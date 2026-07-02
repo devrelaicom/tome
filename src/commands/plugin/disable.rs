@@ -90,7 +90,7 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
     // A plugin already disabled surfaces `PluginAlreadyInState` (exit 21). For a
     // batch/glob spanning mixed states we treat that as a benign skip; a SINGLE
     // explicit id still surfaces exit 21.
-    let single_explicit = args.ids.len() == 1 && !args.ids[0].contains('*');
+    let single_explicit = args.ids.len() == 1 && !crate::plugin::selector::is_glob(&args.ids[0]);
     let mut successes: Vec<DisableOutcome> = Vec::new();
 
     for id in &resolution.matched {

@@ -20,7 +20,7 @@ pub use manifest::{
     PluginAuthor, PluginManifest, TomeAuthor, TomePluginManifest, manifest_path_for,
     parse_plugin_manifest, read_plugin_manifest, tome_manifest_path_for,
 };
-pub use selector::{Resolution, SelectorError, glob_match, resolve};
+pub use selector::{Resolution, SelectorError, glob_match, is_glob, resolve};
 
 use time::OffsetDateTime;
 

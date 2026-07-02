@@ -138,7 +138,7 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     // skip (no record, no error captured) so a wildcard re-run over an
     // already-enabled plugin isn't a fatal error; an EXPLICIT single-id enable
     // of an already-enabled plugin still surfaces exit 21 (see below).
-    let single_explicit = args.ids.len() == 1 && !args.ids[0].contains('*');
+    let single_explicit = args.ids.len() == 1 && !crate::plugin::selector::is_glob(&args.ids[0]);
     let mut successes: Vec<lifecycle::EnableOutcome> = Vec::new();
 
     for id in &resolution.matched {

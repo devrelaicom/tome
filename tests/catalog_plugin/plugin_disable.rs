@@ -438,3 +438,101 @@ fn disable_bare_name_scoped_by_catalog_flag() {
     assert_eq!(enabled_count_for(&paths, "plugin-alpha"), 0);
     assert!(enabled_count_for(&paths, "plugin-beta") > 0);
 }
+
+// ---- issue #314 FIX 1: malformed literal ids → exit 2 (Usage) ------------
+//
+// The pre-#314 single-id path parsed via `PluginId::from_str` and mapped any
+// shape failure to `Usage` (exit 2). The selector must preserve that — and the
+// sibling `tome reindex bad/id/extra` PINS exit 2, which #316 inherits by
+// reusing `selector::resolve` verbatim. These drive BOTH enable and disable
+// through the CLI binary; a malformed id short-circuits in `resolve` (empty
+// match set) BEFORE any embedder/model work, so `plugin enable` is ONNX-free
+// on this path and safe to run in CI.
+
+/// `plugin disable bad/id/extra` (two slashes) → exit 2, mirroring the reindex
+/// pin. No state is touched.
+#[test]
+fn disable_malformed_literal_two_slashes_exits_2() {
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_and_beta_enabled(&env, &fixture_tmp);
+
+    let out = env
+        .cmd()
+        .args(["plugin", "disable", "bad/id/extra", "--force"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "malformed literal (two slashes) must be Usage (exit 2); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// `plugin disable mycat/..` (traversal segment) → exit 2. Rejecting the shape
+/// here means no unvalidated `..` reaches `resolve_plugin_dir`'s `join`.
+#[test]
+fn disable_traversal_segment_exits_2() {
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_and_beta_enabled(&env, &fixture_tmp);
+
+    let out = env
+        .cmd()
+        .args(["plugin", "disable", "mycat/..", "--force"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "traversal segment must be Usage (exit 2); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// `plugin enable bad/id/extra` → exit 2, matching disable + reindex. This is
+/// the enable-side parity: the malformed id short-circuits in `resolve` before
+/// any model work.
+#[test]
+fn enable_malformed_literal_two_slashes_exits_2() {
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_and_beta_enabled(&env, &fixture_tmp);
+
+    let out = env
+        .cmd()
+        .args(["plugin", "enable", "bad/id/extra", "--yes"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "malformed literal on enable must be Usage (exit 2); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// An empty-string id → exit 2 (a shape error, not a confusing `NotFound`).
+#[test]
+fn disable_empty_id_exits_2() {
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_and_beta_enabled(&env, &fixture_tmp);
+
+    let out = env
+        .cmd()
+        .args(["plugin", "disable", "", "--force"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "empty id must be Usage (exit 2); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
