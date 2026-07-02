@@ -317,3 +317,73 @@ fn remove_all_without_force_on_non_tty_is_54_and_removes_nothing() {
         "refused --all remove must not delete anything",
     );
 }
+
+/// Byte-stable wire-shape pin (binary-driven): a SINGLE `models remove <name>
+/// --json` must serialise as the BARE record `{"name":..,"status":"removed"}`
+/// — byte-identical to the pre-#315 shape (no `{"models":[..]}` envelope).
+#[test]
+fn remove_single_json_wire_shape_pin_is_bare_record() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let entry = embedder();
+    fabricate_installed_models(&paths, &[entry]);
+
+    let out = env
+        .cmd()
+        .args(["--json", "models", "remove", entry.name, "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "expected success, got {:?}; stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = format!(r#"{{"name":"{}","status":"removed"}}"#, entry.name);
+    assert_eq!(
+        stdout.trim_end(),
+        expected,
+        "single `models remove --json` must be the BARE pre-#315 record shape",
+    );
+}
+
+/// Load-bearing dedupe: `models remove <name> <name> --force` (same name twice)
+/// deletes the model exactly ONCE and exits 0. Without the `resolve_targets`
+/// dedupe the second `remove_one` would `remove_file` an already-gone manifest
+/// → I/O error / non-zero exit.
+#[test]
+fn remove_duplicate_names_deletes_once_and_succeeds() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let entry = embedder();
+    fabricate_installed_models(&paths, &[entry]);
+
+    let out = env
+        .cmd()
+        .args([
+            "--json", "models", "remove", entry.name, entry.name, "--force",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "duplicate names must not error (dedupe); got {:?}; stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // Deduped to a single target → the bare record shape (one element).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = format!(r#"{{"name":"{}","status":"removed"}}"#, entry.name);
+    assert_eq!(
+        stdout.trim_end(),
+        expected,
+        "duplicate names dedupe to a single bare record",
+    );
+    assert!(
+        !paths.models_dir.join(entry.name).exists(),
+        "model deleted exactly once",
+    );
+}

@@ -93,7 +93,16 @@ pub fn run(args: ModelsRemoveArgs, mode: Mode) -> Result<(), TomeError> {
     }
 
     if mode == Mode::Json {
-        output::write_json(&RemoveEnvelope { models: records })?;
+        // A SINGLE record serialises as the bare `RemoveRecord`
+        // (`{"name":..,"status":..}`) so the pre-#315 single-name `--json` shape
+        // is BYTE-IDENTICAL; a multi / `--all` run serialises as the
+        // `{"models":[..]}` envelope (mirrors `models download`). The empty
+        // `--all` case short-circuited earlier, so `records` is never empty here.
+        if let [single] = records.as_slice() {
+            output::write_json(single)?;
+        } else {
+            output::write_json(&RemoveEnvelope { models: records })?;
+        }
     }
 
     match first_error {

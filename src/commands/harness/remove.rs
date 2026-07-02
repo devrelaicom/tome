@@ -211,6 +211,12 @@ fn resolve_selection(
     } else if args.all {
         // Read the names configured in THIS scope's list (not the effective
         // walk): `--all` clears the scope's own declarations.
+        //
+        // This enumeration read is intentionally BEFORE the advisory lock (the
+        // caller acquires it after `resolve_selection`). Safe: each `remove_one`
+        // RE-OPENS the settings doc and `retain`s under the lock, so a name that
+        // vanished between this read and the write is simply a per-harness no-op
+        // (`list_changed:false`) — never a data-loss window.
         Ok(("all", configured_names_in_scope(settings_path, paths)))
     } else {
         Err(TomeError::Usage(
