@@ -630,10 +630,14 @@ fn emit_human_sections(outcomes: &[HarnessInfoOutcome]) -> Result<(), TomeError>
     }
     // Reuse the single-harness renderer per section. `emit_human` locks stdout
     // per call, so separate the sections with a blank line printed between (not
-    // after) them for clean, greppable output.
+    // after) them for clean, greppable output. The separator goes through a
+    // short-lived locked-handle `writeln!` that PROPAGATES `io::Error` — matching
+    // every other write in this file — rather than a bare `println!`, which
+    // panics on a broken pipe (`tome harness info | head`) and, under
+    // `panic = "abort"`, aborts.
     for (i, outcome) in outcomes.iter().enumerate() {
         if i > 0 {
-            println!();
+            writeln!(std::io::stdout().lock())?;
         }
         emit_human(outcome)?;
     }
