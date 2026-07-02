@@ -122,6 +122,7 @@ pub(crate) fn kind_of(arg: TierKindArg) -> EntryKind {
     match arg {
         TierKindArg::Skill => EntryKind::Skill,
         TierKindArg::Command => EntryKind::Command,
+        TierKindArg::Agent => EntryKind::Agent,
     }
 }
 

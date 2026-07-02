@@ -144,9 +144,11 @@
       "subcommands": {},
       "flags": [
         "--catalog",
+        "--kind",
         "--min-score",
         "--no-rerank",
         "--plugin",
+        "--query",
         "--strict",
         "--top-k",
         "--verbose"

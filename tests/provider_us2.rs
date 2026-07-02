@@ -573,10 +573,12 @@ fn query_with_embedder_seed(
     let scope = Scope(WorkspaceName::global());
     let config = Config::default();
     let args = QueryArgs {
-        text: "anything".to_string(),
+        text: vec!["anything".to_string()],
+        query: None,
         top_k: Some(10),
-        catalog: None,
-        plugin: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: None,

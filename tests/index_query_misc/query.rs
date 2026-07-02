@@ -207,8 +207,9 @@ fn knn_filter_narrows_results_to_one_plugin() {
 
     // Now narrow to plugin-beta only.
     let filters = QueryFilters {
-        catalog: Some("sample-plugin-catalog"),
-        plugin: Some("plugin-beta"),
+        catalogs: vec!["sample-plugin-catalog"],
+        plugins: vec!["plugin-beta"],
+        ..Default::default()
     };
     let filtered = knn(&conn, "global", &unrelated, 20, &filters).unwrap();
     assert!(!filtered.is_empty(), "filter must not eliminate every row");
@@ -225,8 +226,8 @@ fn knn_catalog_filter_rejects_unknown_catalog_with_empty_result() {
     let embedder = StubEmbedder::new();
     let qv = embedder.embed("anything").unwrap();
     let filters = QueryFilters {
-        catalog: Some("does-not-exist"),
-        plugin: None,
+        catalogs: vec!["does-not-exist"],
+        ..Default::default()
     };
     let hits = knn(&conn, "global", &qv, 10, &filters).unwrap();
     assert!(
@@ -323,10 +324,12 @@ fn knn_rejects_query_vector_of_wrong_length() {
 /// value.
 fn args_for(text: &str, top_k: u32) -> QueryArgs {
     QueryArgs {
-        text: text.to_owned(),
+        text: vec![text.to_owned()],
+        query: None,
         top_k: Some(top_k),
-        catalog: None,
-        plugin: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -626,8 +629,8 @@ fn run_with_deps_filters_applied_pre_rerank() {
 
     let mut args = args_for("anything", 10);
     args.no_rerank = false;
-    args.catalog = Some("sample-plugin-catalog".to_owned());
-    args.plugin = Some("plugin-beta".to_owned());
+    args.catalog = vec!["sample-plugin-catalog".to_owned()];
+    args.plugin = vec!["plugin-beta".to_owned()];
 
     let deps = QueryDeps {
         paths: &env.paths,
@@ -656,7 +659,7 @@ fn run_with_deps_unknown_catalog_filter_returns_catalog_not_found() {
     let embedder = StubEmbedder::new();
 
     let mut args = args_for("anything", 5);
-    args.catalog = Some("does-not-exist".to_owned());
+    args.catalog = vec!["does-not-exist".to_owned()];
 
     let deps = QueryDeps {
         paths: &env.paths,
@@ -690,8 +693,8 @@ fn run_with_deps_catalog_plugin_filter_validates_against_db_not_config() {
 
     let mut args = args_for("anything", 10);
     args.no_rerank = false;
-    args.catalog = Some("sample-plugin-catalog".to_owned());
-    args.plugin = Some("plugin-beta".to_owned());
+    args.catalog = vec!["sample-plugin-catalog".to_owned()];
+    args.plugin = vec!["plugin-beta".to_owned()];
 
     let deps = QueryDeps {
         paths: &env.paths,
@@ -720,7 +723,7 @@ fn run_with_deps_unknown_catalog_filter_errors_against_db_with_empty_config() {
     let empty_config = Config::default();
 
     let mut args = args_for("anything", 5);
-    args.catalog = Some("does-not-exist".to_owned());
+    args.catalog = vec!["does-not-exist".to_owned()];
 
     let deps = QueryDeps {
         paths: &env.paths,
@@ -745,8 +748,8 @@ fn run_with_deps_unknown_plugin_filter_errors_against_db_with_empty_config() {
     let empty_config = Config::default();
 
     let mut args = args_for("anything", 5);
-    args.catalog = Some("sample-plugin-catalog".to_owned());
-    args.plugin = Some("ghost-plugin".to_owned());
+    args.catalog = vec!["sample-plugin-catalog".to_owned()];
+    args.plugin = vec!["ghost-plugin".to_owned()];
 
     let deps = QueryDeps {
         paths: &env.paths,

@@ -121,10 +121,12 @@ fn build_config_query_env() -> ConfigQueryEnv {
 
 fn base_args() -> QueryArgs {
     QueryArgs {
-        text: "query".into(),
+        text: vec!["query".into()],
         top_k: None,
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: false,
         strict: false,
         min_score: None,
@@ -294,10 +296,12 @@ fn top_k_none_falls_through_to_builtin_default() {
         reranker_seed: stub_reranker_seed(),
     };
     let args = QueryArgs {
-        text: "alpha widget".into(),
+        text: vec!["alpha widget".into()],
         top_k: None,
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -335,10 +339,12 @@ fn top_k_some_caps_results_at_the_supplied_value() {
         reranker_seed: stub_reranker_seed(),
     };
     let args = QueryArgs {
-        text: "alpha widget".into(),
+        text: vec!["alpha widget".into()],
         top_k: Some(1),
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -380,10 +386,12 @@ fn top_k_from_config_caps_results() {
         reranker_seed: stub_reranker_seed(),
     };
     let args = QueryArgs {
-        text: "alpha widget".into(),
+        text: vec!["alpha widget".into()],
         top_k: Some(resolved_top_k),
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -424,10 +432,12 @@ fn explicit_top_k_flag_beats_config() {
         reranker_seed: stub_reranker_seed(),
     };
     let args = QueryArgs {
-        text: "alpha widget".into(),
+        text: vec!["alpha widget".into()],
         top_k: Some(resolved),
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -476,10 +486,12 @@ fn no_rerank_flag_forces_reranker_off_regardless_of_config() {
         reranker_seed: stub_reranker_seed(),
     };
     let args = QueryArgs {
-        text: "alpha widget".into(),
+        text: vec!["alpha widget".into()],
         top_k: Some(5),
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -525,10 +537,12 @@ fn config_rerank_false_disables_reranker_when_flag_absent() {
         reranker_seed: stub_reranker_seed(),
     };
     let args = QueryArgs {
-        text: "alpha widget".into(),
+        text: vec!["alpha widget".into()],
         top_k: Some(5),
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: false,
         strict: false,
         min_score: None,
@@ -570,10 +584,12 @@ fn strict_min_score_from_config_is_applied_when_flag_absent() {
         reranker_seed: stub_reranker_seed(),
     };
     let args = QueryArgs {
-        text: "alpha widget".into(),
+        text: vec!["alpha widget".into()],
         top_k: Some(5),
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: resolved_min_score,
@@ -613,10 +629,12 @@ fn explicit_min_score_flag_beats_config() {
         reranker_seed: stub_reranker_seed(),
     };
     let args = QueryArgs {
-        text: "alpha widget".into(),
+        text: vec!["alpha widget".into()],
         top_k: Some(5),
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: resolved,
@@ -648,10 +666,12 @@ fn strict_min_score_defaults_to_mode_default_when_both_absent() {
         reranker_seed: stub_reranker_seed(),
     };
     let args = QueryArgs {
-        text: "alpha widget".into(),
+        text: vec!["alpha widget".into()],
         top_k: Some(5),
-        catalog: None,
-        plugin: None,
+        query: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -664,4 +684,157 @@ fn strict_min_score_defaults_to_mode_default_when_both_absent() {
     let _ = outcome.results; // results may be empty if no skill scores above cosine default
     // No assertion on threshold_passed — it varies by StubEmbedder distances.
     // The test proves the pipeline exits cleanly under the default behaviour.
+}
+
+// ── #319: input arg surface (variadic text, -q alias, repeatable filters) ─────
+//
+// Parse-level coverage for the new `tome query` input arguments. These drive
+// the real clap parser (`Cli::try_parse_from`) so the arg wiring — variadic
+// positional, `-q`/`--query`, the `conflicts_with`, and `ArgAction::Append` —
+// is asserted end-to-end, plus the `effective_query_text` join/precedence SSOT.
+
+use tome::cli::{Cli, Command, TierKindArg};
+use tome::commands::query::effective_query_text;
+
+/// Extract the parsed `QueryArgs` from a `tome query …` argv, or panic with the
+/// clap error. Keeps each test focused on the assertion, not the plumbing.
+fn parse_query(argv: &[&str]) -> tome::cli::QueryArgs {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(argv).expect("query args must parse");
+    match cli.command {
+        Command::Query(args) => args,
+        other => panic!("expected Command::Query, got {other:?}"),
+    }
+}
+
+#[test]
+fn variadic_positional_words_join_with_single_space() {
+    let args = parse_query(&["tome", "query", "reset", "a", "counter"]);
+    assert_eq!(args.text, vec!["reset", "a", "counter"]);
+    assert_eq!(args.query, None);
+    assert_eq!(
+        effective_query_text(&args).as_deref(),
+        Some("reset a counter"),
+        "positional words must join with single spaces",
+    );
+}
+
+#[test]
+fn dash_q_alias_is_equivalent_to_positional_words() {
+    let args = parse_query(&["tome", "query", "-q", "reset a counter"]);
+    assert!(
+        args.text.is_empty(),
+        "-q must not populate the positional vec"
+    );
+    assert_eq!(args.query.as_deref(), Some("reset a counter"));
+    assert_eq!(
+        effective_query_text(&args).as_deref(),
+        Some("reset a counter"),
+        "-q value is the effective query",
+    );
+    // Long form `--query` is the same slot.
+    let long = parse_query(&["tome", "query", "--query", "reset a counter"]);
+    assert_eq!(
+        effective_query_text(&long),
+        effective_query_text(&args),
+        "--query and -q resolve identically",
+    );
+}
+
+#[test]
+fn positional_and_query_flag_are_mutually_exclusive() {
+    use clap::Parser;
+    // Mixing the positional form and -q/--query is a clap conflict (exit 2).
+    let res = Cli::try_parse_from(["tome", "query", "foo", "--query", "x"]);
+    assert!(
+        res.is_err(),
+        "positional words + --query must be a parse conflict",
+    );
+    let res2 = Cli::try_parse_from(["tome", "query", "-q", "x", "foo"]);
+    assert!(res2.is_err(), "-q + positional must also conflict");
+}
+
+#[test]
+fn both_input_forms_absent_yields_none_from_effective_query() {
+    // `num_args = 0..` means bare `tome query` PARSES (empty text vec, no -q).
+    // The usage error is raised by `run` (and `pipeline`) via
+    // `effective_query_text` returning `None`, not by clap.
+    let args = parse_query(&["tome", "query"]);
+    assert!(args.text.is_empty());
+    assert_eq!(args.query, None);
+    assert_eq!(
+        effective_query_text(&args),
+        None,
+        "neither form given → None → the run/pipeline Usage gate fires",
+    );
+}
+
+#[test]
+fn catalog_and_plugin_are_repeatable() {
+    let args = parse_query(&[
+        "tome",
+        "query",
+        "reset",
+        "--catalog",
+        "a",
+        "--catalog",
+        "b",
+        "--plugin",
+        "p1",
+        "--plugin",
+        "p2",
+    ]);
+    assert_eq!(args.catalog, vec!["a", "b"]);
+    assert_eq!(args.plugin, vec!["p1", "p2"]);
+    // A single value still parses to a one-element vec (back-compat).
+    let single = parse_query(&["tome", "query", "reset", "--catalog", "only"]);
+    assert_eq!(single.catalog, vec!["only"]);
+    assert!(single.plugin.is_empty());
+}
+
+#[test]
+fn kind_is_repeatable_and_maps_to_the_value_enum() {
+    let args = parse_query(&[
+        "tome", "query", "reset", "--kind", "skill", "--kind", "command", "--kind", "agent",
+    ]);
+    assert_eq!(
+        args.kind,
+        vec![TierKindArg::Skill, TierKindArg::Command, TierKindArg::Agent],
+    );
+}
+
+#[test]
+fn unknown_kind_value_is_rejected_at_parse_time() {
+    use clap::Parser;
+    let res = Cli::try_parse_from(["tome", "query", "reset", "--kind", "nonsense"]);
+    assert!(
+        res.is_err(),
+        "an out-of-enum --kind value must be a clap parse error (exit 2)",
+    );
+}
+
+#[test]
+fn existing_flags_still_parse_alongside_the_new_ones() {
+    // Back-compat: the pre-#319 flags parse unchanged, mixed with new inputs.
+    let args = parse_query(&[
+        "tome",
+        "query",
+        "reset",
+        "a",
+        "counter",
+        "--top-k",
+        "3",
+        "--no-rerank",
+        "--strict",
+        "--min-score",
+        "0.25",
+    ]);
+    assert_eq!(
+        effective_query_text(&args).as_deref(),
+        Some("reset a counter")
+    );
+    assert_eq!(args.top_k, Some(3));
+    assert!(args.no_rerank);
+    assert!(args.strict);
+    assert_eq!(args.min_score, Some(0.25));
 }

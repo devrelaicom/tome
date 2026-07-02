@@ -458,10 +458,12 @@ mod cli_search {
             reranker_seed: stub_reranker_seed(),
         };
         let args = QueryArgs {
-            text: "alpha widget configuration".into(),
+            text: vec!["alpha widget configuration".into()],
+            query: None,
             top_k: Some(10),
-            catalog: None,
-            plugin: None,
+            catalog: Vec::new(),
+            plugin: Vec::new(),
+            kind: Vec::new(),
             no_rerank: false,
             strict: false,
             min_score: None,
