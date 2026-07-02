@@ -238,12 +238,26 @@ pub enum TierCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct TierSetArgs {
-    /// The entry to retier, as `<plugin>/<name>`.
-    pub id: String,
-    /// The routing tier: 1 (load at session start), 2 (load before matching
-    /// tasks), or 3 (default; searchable on demand).
-    #[arg(value_parser = clap::value_parser!(u8).range(1..=3))]
-    pub tier: u8,
+    /// The entry to retier, as `<plugin>/<name>`, followed by the tier. The name
+    /// segment may be a `*` glob (`<plugin>/*` retiers every entry of the plugin;
+    /// `<plugin>/foo-*` retiers a subset). Mutually exclusive with `--plugin`;
+    /// exactly one selection source is required. With `--plugin` the sole
+    /// positional is the tier.
+    ///
+    /// clap sees these as two optional trailing positionals so the tier can be
+    /// the only one when `--plugin` is present; the id/tier split, the XOR with
+    /// `--plugin`, and the tier's 1..=3 range are all validated at runtime
+    /// (missing/both/out-of-range → usage exit 2), preserving the pre-#317 exit
+    /// codes for the single-id form.
+    #[arg(value_name = "ID", num_args = 0..=2)]
+    pub positionals: Vec<String>,
+    /// Retier every enabled tierable entry of a plugin, selected as
+    /// `<catalog>/<plugin>` (or a bare `<plugin>` disambiguated by `--catalog`).
+    /// Repeatable (`--plugin a --plugin b`). A `*` glob in either segment fans
+    /// out across matching catalogs/plugins. Mutually exclusive with the
+    /// positional entry id.
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub plugin: Vec<String>,
     /// Disambiguate when the same plugin name exists across catalogs.
     #[arg(long)]
     pub catalog: Option<String>,
@@ -257,8 +271,21 @@ pub struct TierListArgs {}
 
 #[derive(Debug, clap::Args)]
 pub struct TierClearArgs {
-    /// The entry to reset, as `<plugin>/<name>`.
-    pub id: String,
+    /// The entry to reset, as `<plugin>/<name>`. The name segment may be a `*`
+    /// glob (`<plugin>/*`, `<plugin>/foo-*`). Mutually exclusive with `--plugin`
+    /// and `--all`; exactly one selection source is required.
+    #[arg(conflicts_with_all = ["plugin", "all"], required_unless_present_any = ["plugin", "all"])]
+    pub id: Option<String>,
+    /// Reset every enabled tierable entry of a plugin, selected as
+    /// `<catalog>/<plugin>` (or a bare `<plugin>` disambiguated by `--catalog`).
+    /// Repeatable; a `*` glob in either segment fans out. Mutually exclusive with
+    /// the positional entry id and `--all`.
+    #[arg(long, action = clap::ArgAction::Append, conflicts_with = "all")]
+    pub plugin: Vec<String>,
+    /// Reset EVERY enabled tierable entry in the resolved workspace to the
+    /// default tier (3). Mutually exclusive with the positional id and `--plugin`.
+    #[arg(long)]
+    pub all: bool,
     #[arg(long)]
     pub catalog: Option<String>,
     #[arg(long, value_enum)]

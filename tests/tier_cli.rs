@@ -423,3 +423,476 @@ fn plugin_enable_with_tier_flag_binary() {
         );
     }
 }
+
+// ---- issue #317: bulk retiering (--plugin, name-globs, --all) -------------
+
+/// Enable BOTH plugin-alpha and plugin-beta in `global` via the library API
+/// (StubEmbedder) so the `--plugin` fan-out and workspace-wide `--all` tests
+/// operate over more than one plugin.
+fn setup_enabled_both(env: &ToolEnv, tmp: &TempDir) {
+    let paths = paths_for(env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+
+    let embedder = StubEmbedder::new();
+    for plugin in ["plugin-alpha", "plugin-beta"] {
+        let id: PluginId = format!("sample-plugin-catalog/{plugin}").parse().unwrap();
+        let deps = LifecycleDeps {
+            paths: &paths,
+            scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+            config: &config,
+            embedder: &embedder,
+            embedder_seed: stub_embedder_seed(),
+            reranker_seed: stub_reranker_seed(),
+            summariser_seed: stub_summariser_seed(),
+            allow_model_download: false,
+        };
+        lifecycle::enable(&id, &deps).unwrap_or_else(|e| panic!("enable {plugin}: {e}"));
+    }
+}
+
+/// The tier of a named entry, or `None` when it isn't listed.
+fn tier_of(entries: &[serde_json::Value], name: &str) -> Option<i64> {
+    entries
+        .iter()
+        .find(|e| e["name"] == name)
+        .and_then(|e| e["tier"].as_i64())
+}
+
+/// A single literal `<plugin>/<name>` id remains BYTE-IDENTICAL: `--json` emits
+/// exactly one object with the pinned field order. This is the back-compat
+/// guarantee for the pre-#317 shape (mirrors `tier_record_json_shape_is_pinned`
+/// end-to-end through the binary).
+#[test]
+fn tier_set_single_literal_id_json_is_one_pinned_object() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled(&env, &tmp);
+
+    let out = env
+        .cmd()
+        .args(["--json", "tier", "set", "plugin-alpha/skill-a", "2"])
+        .output()
+        .expect("spawn tier set --json");
+    assert!(
+        out.status.success(),
+        "tier set exit {:?}; stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 1, "exactly one JSON object; got: {stdout}");
+    assert_eq!(
+        lines[0],
+        r#"{"catalog":"sample-plugin-catalog","plugin":"plugin-alpha","name":"skill-a","kind":"skill","tier":2}"#,
+        "single-id JSON must be the byte-identical pinned shape",
+    );
+}
+
+/// A `<plugin>/*` name-glob retiers EVERY enabled entry of the plugin.
+#[test]
+fn tier_set_name_glob_retiers_every_entry() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled(&env, &tmp);
+
+    let before = tier_list_json(&env);
+    assert!(before.len() >= 2, "plugin-alpha has multiple entries");
+    assert!(
+        before.iter().all(|e| e["tier"] == 3),
+        "all entries start at default tier 3"
+    );
+
+    let out = env
+        .cmd()
+        .args(["--json", "tier", "set", "plugin-alpha/*", "2"])
+        .output()
+        .expect("spawn tier set glob");
+    assert!(
+        out.status.success(),
+        "tier set glob exit {:?}; stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // One NDJSON record per affected entry.
+    let records = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    assert_eq!(records, before.len(), "one record per retiered entry");
+
+    let after = tier_list_json(&env);
+    assert!(
+        after.iter().all(|e| e["tier"] == 2),
+        "every entry now tier 2: {after:?}"
+    );
+}
+
+/// A `<plugin>/foo-*` name-glob retiers only the matching SUBSET; non-matching
+/// siblings keep their tier.
+#[test]
+fn tier_set_name_glob_subset_leaves_others() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled(&env, &tmp);
+
+    // `skill-*` matches every plugin-alpha entry (all named skill-…), so use a
+    // narrower glob that excludes at least one: `skill-a*` matches only skill-a.
+    let out = env
+        .cmd()
+        .args(["tier", "set", "plugin-alpha/skill-a*", "1"])
+        .output()
+        .expect("spawn tier set subset glob");
+    assert!(
+        out.status.success(),
+        "tier set subset exit {:?}; stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let after = tier_list_json(&env);
+    assert_eq!(tier_of(&after, "skill-a"), Some(1), "skill-a retiered");
+    // A sibling that does NOT match `skill-a*` stays at the default.
+    assert_eq!(
+        tier_of(&after, "skill-c"),
+        Some(3),
+        "non-matching sibling skill-c unchanged"
+    );
+}
+
+/// A name-glob that matches nothing is `entry_not_found` (exit 27), never a
+/// silent success.
+#[test]
+fn tier_set_name_glob_zero_match_exits_27() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled(&env, &tmp);
+
+    let out = env
+        .cmd()
+        .args(["tier", "set", "plugin-alpha/nope-*", "1"])
+        .output()
+        .expect("spawn tier set zero-match glob");
+    assert_eq!(
+        out.status.code(),
+        Some(27),
+        "zero-match glob → EntryNotFound (27); stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// `--plugin <catalog>/<plugin>` fans out over every enabled entry of the named
+/// plugin, leaving OTHER plugins untouched.
+#[test]
+fn tier_set_plugin_selector_fans_out() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled_both(&env, &tmp);
+
+    let out = env
+        .cmd()
+        .args([
+            "tier",
+            "set",
+            "--plugin",
+            "sample-plugin-catalog/plugin-alpha",
+            "2",
+        ])
+        .output()
+        .expect("spawn tier set --plugin");
+    assert!(
+        out.status.success(),
+        "tier set --plugin exit {:?}; stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let after = tier_list_json(&env);
+    // Every plugin-alpha entry is tier 2; plugin-beta's skill-x is untouched (3).
+    for e in &after {
+        if e["plugin"] == "plugin-alpha" {
+            assert_eq!(e["tier"], 2, "plugin-alpha entry retiered: {e:?}");
+        }
+    }
+    assert_eq!(
+        tier_of(&after, "skill-x"),
+        Some(3),
+        "plugin-beta/skill-x untouched by --plugin plugin-alpha"
+    );
+}
+
+/// A bare `--plugin <plugin>` (no catalog) resolves via the enabled-plugin
+/// candidate set when the name is unique across enrolled catalogs.
+#[test]
+fn tier_set_plugin_bare_unique_catalog() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled_both(&env, &tmp);
+
+    let out = env
+        .cmd()
+        .args(["tier", "set", "--plugin", "plugin-beta", "1"])
+        .output()
+        .expect("spawn tier set --plugin bare");
+    assert!(
+        out.status.success(),
+        "bare --plugin exit {:?}; stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let after = tier_list_json(&env);
+    assert_eq!(
+        tier_of(&after, "skill-x"),
+        Some(1),
+        "plugin-beta/skill-x retiered via bare --plugin"
+    );
+    // plugin-alpha entries stay at the default.
+    assert_eq!(
+        tier_of(&after, "skill-a"),
+        Some(3),
+        "plugin-alpha untouched"
+    );
+}
+
+/// `--plugin` naming a plugin with no tierable entries is `entry_not_found`
+/// (exit 27). `ghost` is not an enabled plugin.
+#[test]
+fn tier_set_plugin_no_entries_exits_27() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled(&env, &tmp);
+
+    let out = env
+        .cmd()
+        .args([
+            "tier",
+            "set",
+            "--plugin",
+            "sample-plugin-catalog/ghost",
+            "1",
+        ])
+        .output()
+        .expect("spawn tier set --plugin ghost");
+    // A slash-qualified `--plugin` that isn't an enabled plugin resolves to a
+    // valid PluginId (selector defers existence downstream), then collects zero
+    // tierable entries → EntryNotFound (27).
+    assert_eq!(
+        out.status.code(),
+        Some(27),
+        "--plugin with no tierable entries → EntryNotFound (27); stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// `tier clear --all` resets EVERY enabled tierable entry in the workspace back
+/// to the default (3), across multiple plugins.
+#[test]
+fn tier_clear_all_resets_workspace() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled_both(&env, &tmp);
+
+    // Bump a couple of entries off the default first.
+    for id in ["plugin-alpha/skill-a", "plugin-beta/skill-x"] {
+        let set = env
+            .cmd()
+            .args(["tier", "set", id, "1"])
+            .output()
+            .expect("spawn tier set");
+        assert!(set.status.success(), "tier set {id}");
+    }
+    let bumped = tier_list_json(&env);
+    assert_eq!(tier_of(&bumped, "skill-a"), Some(1));
+    assert_eq!(tier_of(&bumped, "skill-x"), Some(1));
+
+    // Reset the whole workspace.
+    let clear = env
+        .cmd()
+        .args(["tier", "clear", "--all"])
+        .output()
+        .expect("spawn tier clear --all");
+    assert!(
+        clear.status.success(),
+        "tier clear --all exit {:?}; stderr={}",
+        clear.status.code(),
+        String::from_utf8_lossy(&clear.stderr),
+    );
+
+    let after = tier_list_json(&env);
+    assert!(
+        after.iter().all(|e| e["tier"] == 3),
+        "every entry back to default tier 3: {after:?}"
+    );
+}
+
+/// `tier clear --plugin <sel>` resets a whole plugin, leaving others untouched.
+#[test]
+fn tier_clear_plugin_selector_resets_one_plugin() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled_both(&env, &tmp);
+
+    // Bump both plugins to tier 1.
+    for sel in ["plugin-alpha", "plugin-beta"] {
+        let set = env
+            .cmd()
+            .args(["tier", "set", "--plugin", sel, "1"])
+            .output()
+            .expect("spawn tier set --plugin");
+        assert!(set.status.success(), "tier set --plugin {sel}");
+    }
+
+    // Clear only plugin-alpha.
+    let clear = env
+        .cmd()
+        .args(["tier", "clear", "--plugin", "plugin-alpha"])
+        .output()
+        .expect("spawn tier clear --plugin");
+    assert!(
+        clear.status.success(),
+        "tier clear --plugin exit {:?}; stderr={}",
+        clear.status.code(),
+        String::from_utf8_lossy(&clear.stderr),
+    );
+
+    let after = tier_list_json(&env);
+    assert_eq!(
+        tier_of(&after, "skill-a"),
+        Some(3),
+        "plugin-alpha reset to default"
+    );
+    assert_eq!(
+        tier_of(&after, "skill-x"),
+        Some(1),
+        "plugin-beta still tier 1 (untouched)"
+    );
+}
+
+/// CLI XOR parse errors are exit 2, independent of any DB state: neither
+/// selection source, or more than one, is a usage error.
+#[test]
+fn tier_selection_xor_is_usage_error() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled(&env, &tmp);
+
+    // set: neither id nor --plugin (only a tier).
+    let neither = env
+        .cmd()
+        .args(["tier", "set", "2"])
+        .output()
+        .expect("spawn tier set neither");
+    assert_eq!(
+        neither.status.code(),
+        Some(2),
+        "set with no selection source → usage 2; stderr={}",
+        String::from_utf8_lossy(&neither.stderr),
+    );
+
+    // set: both id and --plugin.
+    let both = env
+        .cmd()
+        .args([
+            "tier",
+            "set",
+            "plugin-alpha/skill-a",
+            "2",
+            "--plugin",
+            "plugin-alpha",
+        ])
+        .output()
+        .expect("spawn tier set both");
+    assert_eq!(
+        both.status.code(),
+        Some(2),
+        "set with both id and --plugin → usage 2; stderr={}",
+        String::from_utf8_lossy(&both.stderr),
+    );
+
+    // clear: neither id, --plugin, nor --all.
+    let clear_neither = env
+        .cmd()
+        .args(["tier", "clear"])
+        .output()
+        .expect("spawn tier clear neither");
+    assert_eq!(
+        clear_neither.status.code(),
+        Some(2),
+        "clear with no selection source → usage 2",
+    );
+
+    // clear: both id and --all.
+    let clear_both = env
+        .cmd()
+        .args(["tier", "clear", "plugin-alpha/skill-a", "--all"])
+        .output()
+        .expect("spawn tier clear both");
+    assert_eq!(
+        clear_both.status.code(),
+        Some(2),
+        "clear with both id and --all → usage 2",
+    );
+}
+
+/// Forward-progress across a bulk `--plugin` batch where every entry is a benign
+/// success: all entries are applied and one record emitted per entry.
+#[test]
+fn tier_set_plugin_batch_all_succeed() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled_both(&env, &tmp);
+
+    // Two --plugin selectors in one batch → union of both plugins' entries.
+    let out = env
+        .cmd()
+        .args([
+            "--json",
+            "tier",
+            "set",
+            "--plugin",
+            "plugin-alpha",
+            "--plugin",
+            "plugin-beta",
+            "2",
+        ])
+        .output()
+        .expect("spawn tier set two --plugin");
+    assert!(
+        out.status.success(),
+        "batch --plugin exit {:?}; stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let records = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+
+    let after = tier_list_json(&env);
+    assert_eq!(
+        records,
+        after.len(),
+        "one record per entry across both plugins"
+    );
+    assert!(
+        after.iter().all(|e| e["tier"] == 2),
+        "every entry across both plugins retiered to 2: {after:?}"
+    );
+}
