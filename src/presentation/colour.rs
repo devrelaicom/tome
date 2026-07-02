@@ -181,22 +181,66 @@ mod tests {
     // `TOME_NO_COLOR` is process-global; serialise every test that mutates it.
     static NO_COLOR_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    /// Panic-safe `TOME_NO_COLOR` override, mirroring the `cli.rs` test's
+    /// `JsonEnvGuard`. Captures the pre-test value on construction and
+    /// restores/removes it in `Drop`, so an intervening `assert!` panic can't
+    /// leak the var into a later test. Caller MUST hold `NO_COLOR_ENV_MUTEX` for
+    /// the guard's lifetime (the guard is about panic-safe restore, not
+    /// serialisation).
+    struct NoColorEnvGuard {
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl NoColorEnvGuard {
+        /// Capture the current value and leave the var untouched. `set`/`unset`
+        /// then mutate it in place under the held mutex.
+        fn capture() -> Self {
+            Self {
+                prior: std::env::var_os("TOME_NO_COLOR"),
+            }
+        }
+
+        fn set(&self, value: &str) {
+            // SAFETY: the caller holds NO_COLOR_ENV_MUTEX for the guard's life.
+            unsafe { std::env::set_var("TOME_NO_COLOR", value) };
+        }
+
+        fn unset(&self) {
+            // SAFETY: the caller holds NO_COLOR_ENV_MUTEX for the guard's life.
+            unsafe { std::env::remove_var("TOME_NO_COLOR") };
+        }
+    }
+
+    impl Drop for NoColorEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: NO_COLOR_ENV_MUTEX is still held by the test for the
+            // guard's lifetime.
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var("TOME_NO_COLOR", v),
+                    None => std::env::remove_var("TOME_NO_COLOR"),
+                }
+            }
+        }
+    }
+
     /// The `TOME_NO_COLOR` env override folded into `set_disabled` via
     /// `disabled_with_env`: a truthy value forces colour off even when the
     /// `--no-color` flag is absent; the flag alone still forces off.
     #[test]
     fn tome_no_color_env_ors_into_disabled() {
         let _lock = NO_COLOR_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var_os("TOME_NO_COLOR");
+        // RAII: `TOME_NO_COLOR` is restored/removed on drop even if an
+        // assertion below panics — no manual restore tail to skip.
+        let env = NoColorEnvGuard::capture();
 
-        // SAFETY: the module env mutex is held for the whole test.
-        unsafe { std::env::set_var("TOME_NO_COLOR", "1") };
+        env.set("1");
         assert!(
             disabled_with_env(false),
             "truthy TOME_NO_COLOR must disable colour even without --no-color",
         );
 
-        unsafe { std::env::set_var("TOME_NO_COLOR", "0") };
+        env.set("0");
         assert!(
             !disabled_with_env(false),
             "falsey TOME_NO_COLOR must not disable colour on its own",
@@ -206,7 +250,7 @@ mod tests {
             "--no-color flag still forces off regardless of env",
         );
 
-        unsafe { std::env::remove_var("TOME_NO_COLOR") };
+        env.unset();
         assert!(
             !disabled_with_env(false),
             "unset TOME_NO_COLOR + no flag → not disabled",
@@ -215,14 +259,6 @@ mod tests {
             disabled_with_env(true),
             "--no-color flag forces off with env unset",
         );
-
-        // SAFETY: still holding the module env mutex.
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("TOME_NO_COLOR", v),
-                None => std::env::remove_var("TOME_NO_COLOR"),
-            }
-        }
     }
 
     /// Verify the full precedence chain of `resolve_color`:
