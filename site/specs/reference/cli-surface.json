@@ -58,11 +58,13 @@
     "plugin": {
       "subcommands": {
         "enable": [
+          "--catalog",
           "--sync",
           "--verbose",
           "--yes"
         ],
         "disable": [
+          "--catalog",
           "--force",
           "--sync",
           "--verbose"

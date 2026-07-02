@@ -94,6 +94,26 @@ nothing until you enable them.
   per-entry annotations — useful before deciding whether to enable it.
 - `tome plugin disable <name>` reverses this: the plugin's entries are removed
   from the index, and your harnesses drop them on the next sync.
+- Enable or disable **several plugins at once**, and use `*` wildcards to match
+  by pattern:
+
+  ```bash
+  # Two plugins in one call
+  tome plugin enable midnight-expert/compact-core midnight-expert/midnight-verify
+
+  # Every plugin whose name starts with `compact-`
+  tome plugin enable "midnight-expert/compact-*"
+
+  # Every plugin in a catalog
+  tome plugin enable "midnight-expert/*"
+  ```
+
+  `--catalog <name>` scopes bare or wildcard names to one catalog, so you can
+  drop the `<catalog>/` prefix (`tome plugin enable "compact-*" --catalog
+  midnight-expert`). A wildcard that matches nothing is an error rather than a
+  silent no-op, and a batch that hits a bad id still processes the good ones and
+  reports the failure at the end. The same applies to `tome plugin disable`,
+  which asks for a single confirmation naming every plugin in the batch.
 - Bare `tome plugin` opens an interactive picker — catalog → plugin → action —
   useful when you want to pick from a list instead of typing names.
 

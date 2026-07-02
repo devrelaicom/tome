@@ -54,6 +54,62 @@ fn setup_with_alpha_enabled(env: &ToolEnv, fixture_tmp: &TempDir) -> Paths {
     paths
 }
 
+/// Like [`setup_with_alpha_enabled`] but pre-enables BOTH `plugin-alpha` and
+/// `plugin-beta` from the sample catalog — the fixture for #314 batch / glob
+/// disable tests, which need more than one enabled plugin to exercise.
+fn setup_with_alpha_and_beta_enabled(env: &ToolEnv, fixture_tmp: &TempDir) -> Paths {
+    let paths = paths_for(env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(fixture_tmp, "catalog");
+    let cli_config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &cli_config);
+
+    let embedder = StubEmbedder::new();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+        config: &cli_config,
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
+        allow_model_download: false,
+    };
+    for plugin in ["plugin-alpha", "plugin-beta"] {
+        let id: PluginId = format!("sample-plugin-catalog/{plugin}").parse().unwrap();
+        lifecycle::enable(&id, &deps).unwrap_or_else(|e| panic!("pre-enable {plugin}: {e:?}"));
+    }
+
+    paths
+}
+
+/// Enabled-flag sum for one `(catalog, plugin)` in the `global` workspace.
+fn enabled_count_for(paths: &Paths, plugin: &str) -> i64 {
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: stub_embedder_seed(),
+            reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
+            profile: None,
+        },
+    )
+    .unwrap();
+    conn.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+         FROM skills AS s
+         LEFT JOIN workspace_skills AS ws
+                ON ws.skill_id = s.id
+               AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+         WHERE s.catalog = ?1 AND s.plugin = ?2",
+        rusqlite::params!["sample-plugin-catalog", plugin],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap()
+}
+
 fn enabled_row_counts(paths: &Paths) -> (i64, i64) {
     let conn = index::open(
         &paths.index_db,
@@ -198,4 +254,187 @@ fn disable_already_disabled_plugin_exits_21() {
         second.status.code(),
         String::from_utf8_lossy(&second.stderr),
     );
+}
+
+// ---- issue #314: variadic ids, wildcard globs, --catalog -----------------
+
+/// A `*` glob disables every matching plugin. `sample-plugin-catalog/plugin-*`
+/// spans both `plugin-alpha` and `plugin-beta`; one glob token disables both.
+#[test]
+fn disable_glob_expands_to_multiple_plugins() {
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let paths = setup_with_alpha_and_beta_enabled(&env, &fixture_tmp);
+
+    assert!(enabled_count_for(&paths, "plugin-alpha") > 0);
+    assert!(enabled_count_for(&paths, "plugin-beta") > 0);
+
+    let out = env
+        .cmd()
+        .args([
+            "plugin",
+            "disable",
+            "sample-plugin-catalog/plugin-*",
+            "--force",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "glob disable must succeed; exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // NDJSON: one record per successfully-disabled plugin (two lines here).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let plugins: Vec<String> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let v: Value = serde_json::from_str(l).expect("each line is a JSON record");
+            assert_eq!(v["status"], "disabled");
+            v["plugin"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(
+        plugins,
+        vec![
+            "sample-plugin-catalog/plugin-alpha".to_owned(),
+            "sample-plugin-catalog/plugin-beta".to_owned(),
+        ],
+        "both plugins must be disabled, sorted by candidate order",
+    );
+
+    // Both plugins are now disabled on disk.
+    assert_eq!(enabled_count_for(&paths, "plugin-alpha"), 0);
+    assert_eq!(enabled_count_for(&paths, "plugin-beta"), 0);
+}
+
+/// A batch with one BAD id among good ids: the good ids are processed, the
+/// process exits with the first error's code, and the JSON stream carries ONLY
+/// the good records. A bad literal `<catalog>/<plugin>` that does not exist maps
+/// to `PluginNotFound` (exit 20) downstream.
+#[test]
+fn disable_forward_progress_processes_good_and_surfaces_first_error() {
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let paths = setup_with_alpha_and_beta_enabled(&env, &fixture_tmp);
+
+    let out = env
+        .cmd()
+        .args([
+            "plugin",
+            "disable",
+            // bad (nonexistent) literal id FIRST, then a good one — proves the
+            // loop does not short-circuit on the bad token.
+            "sample-plugin-catalog/does-not-exist",
+            "sample-plugin-catalog/plugin-alpha",
+            "--force",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    // The good plugin was disabled...
+    assert_eq!(
+        enabled_count_for(&paths, "plugin-alpha"),
+        0,
+        "the good id must still be disabled despite the bad one",
+    );
+    // ...beta was not in the selection, so it stays enabled.
+    assert!(enabled_count_for(&paths, "plugin-beta") > 0);
+
+    // Exit code is the first error's — PluginNotFound (20) for the bad literal.
+    assert_eq!(
+        out.status.code(),
+        Some(20),
+        "expected exit 20 (PluginNotFound) from the bad id; stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // JSON stream: exactly ONE record, for the good plugin. The failed id is
+    // NOT emitted in JSON (stderr + non-zero exit convey it).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let records: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("JSON record"))
+        .collect();
+    assert_eq!(
+        records.len(),
+        1,
+        "only the good record is emitted; got {stdout:?}"
+    );
+    assert_eq!(records[0]["plugin"], "sample-plugin-catalog/plugin-alpha");
+    assert_eq!(records[0]["status"], "disabled");
+}
+
+/// A wildcard that matches nothing is an ERROR (exit 2, Usage), never a silent
+/// success — a user who typed `xyz-*` and hit nothing wants to know.
+#[test]
+fn disable_zero_glob_match_is_usage_error_not_silent_success() {
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_and_beta_enabled(&env, &fixture_tmp);
+
+    let out = env
+        .cmd()
+        .args([
+            "plugin",
+            "disable",
+            "sample-plugin-catalog/xyz-*",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a zero-match glob must be a Usage error (exit 2), got {:?}; stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("sample-plugin-catalog/xyz-*"),
+        "error must echo the pattern, got: {stderr}",
+    );
+}
+
+/// A bare name scoped by `--catalog` resolves to that catalog. Disabling
+/// `plugin-alpha --catalog sample-plugin-catalog` targets exactly it.
+#[test]
+fn disable_bare_name_scoped_by_catalog_flag() {
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let paths = setup_with_alpha_and_beta_enabled(&env, &fixture_tmp);
+
+    let out = env
+        .cmd()
+        .args([
+            "plugin",
+            "disable",
+            "plugin-alpha",
+            "--catalog",
+            "sample-plugin-catalog",
+            "--force",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "bare-name + --catalog disable must succeed; exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let record: Value = serde_json::from_slice(&out.stdout).expect("one JSON record");
+    assert_eq!(record["plugin"], "sample-plugin-catalog/plugin-alpha");
+    assert_eq!(enabled_count_for(&paths, "plugin-alpha"), 0);
+    assert!(enabled_count_for(&paths, "plugin-beta") > 0);
 }

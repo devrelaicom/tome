@@ -996,8 +996,15 @@ pub enum PluginCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct PluginEnableArgs {
-    /// The plugin to enable, as `<catalog>/<plugin>`.
-    pub id: String,
+    /// One or more plugins as `<catalog>/<plugin>`. The plugin segment (or a
+    /// bare name with `--catalog`) may contain `*` wildcards, e.g.
+    /// `midnight-expert/compact-*` or `midnight-expert/*`.
+    #[arg(required = true, num_args = 1..)]
+    pub ids: Vec<String>,
+    /// Scope bare or wildcard names to one catalog. A slash-qualified
+    /// `<catalog>/<plugin>` id ignores this (the explicit catalog wins).
+    #[arg(long)]
+    pub catalog: Option<String>,
     /// Skip the model-download confirmation prompt. Required to enable a
     /// plugin from a non-interactive context (e.g. CI) when models are
     /// not yet installed. `--force` is accepted as a hidden alias so the
@@ -1020,8 +1027,15 @@ pub struct PluginEnableArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct PluginDisableArgs {
-    /// The plugin to disable, as `<catalog>/<plugin>`.
-    pub id: String,
+    /// One or more plugins as `<catalog>/<plugin>`. The plugin segment (or a
+    /// bare name with `--catalog`) may contain `*` wildcards, e.g.
+    /// `midnight-expert/compact-*` or `midnight-expert/*`.
+    #[arg(required = true, num_args = 1..)]
+    pub ids: Vec<String>,
+    /// Scope bare or wildcard names to one catalog. A slash-qualified
+    /// `<catalog>/<plugin>` id ignores this (the explicit catalog wins).
+    #[arg(long)]
+    pub catalog: Option<String>,
     /// Skip the confirmation prompt. Required to disable a plugin from a
     /// non-interactive context (e.g. CI). `--yes` is accepted as a hidden
     /// alias so both non-interactive spellings work everywhere (FR-021).
@@ -1584,5 +1598,71 @@ mod tests {
             panic!("expected `skill lint`");
         };
         assert!(a.autofix && a.dry_run);
+    }
+
+    // ---- issue #314: plugin enable/disable variadic ids + --catalog -------
+
+    #[test]
+    fn plugin_enable_accepts_variadic_ids_and_catalog() {
+        let cli = parse(&[
+            "tome",
+            "plugin",
+            "enable",
+            "cat/a",
+            "cat/b*",
+            "bare",
+            "--catalog",
+            "cat",
+        ]);
+        let Command::Plugin(super::PluginArgs {
+            command: Some(super::PluginCommand::Enable(a)),
+        }) = cli.command
+        else {
+            panic!("expected `plugin enable`");
+        };
+        assert_eq!(a.ids, vec!["cat/a", "cat/b*", "bare"]);
+        assert_eq!(a.catalog.as_deref(), Some("cat"));
+    }
+
+    #[test]
+    fn plugin_disable_accepts_variadic_ids_and_catalog() {
+        let cli = parse(&[
+            "tome",
+            "plugin",
+            "disable",
+            "cat/a",
+            "cat/*",
+            "--catalog",
+            "cat",
+        ]);
+        let Command::Plugin(super::PluginArgs {
+            command: Some(super::PluginCommand::Disable(a)),
+        }) = cli.command
+        else {
+            panic!("expected `plugin disable`");
+        };
+        assert_eq!(a.ids, vec!["cat/a", "cat/*"]);
+        assert_eq!(a.catalog.as_deref(), Some("cat"));
+    }
+
+    #[test]
+    fn plugin_enable_single_id_still_parses() {
+        // Back-compat: exactly one positional id is the common case.
+        let cli = parse(&["tome", "plugin", "enable", "cat/plug"]);
+        let Command::Plugin(super::PluginArgs {
+            command: Some(super::PluginCommand::Enable(a)),
+        }) = cli.command
+        else {
+            panic!("expected `plugin enable`");
+        };
+        assert_eq!(a.ids, vec!["cat/plug"]);
+        assert_eq!(a.catalog, None);
+    }
+
+    #[test]
+    fn plugin_enable_requires_at_least_one_id() {
+        // Zero positionals is a clap usage error (exit 2).
+        assert_eq!(parse_exit(&["tome", "plugin", "enable"]), 2);
+        assert_eq!(parse_exit(&["tome", "plugin", "disable"]), 2);
     }
 }

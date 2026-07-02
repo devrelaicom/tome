@@ -480,7 +480,12 @@ fn run_enable_action(scope: &ResolvedScope, id: &PluginId) -> Result<(), TomeErr
     // free. `--yes` is left false; the user is at a TTY and may decline.
     super::enable::run(
         PluginEnableArgs {
-            id: id.to_string(),
+            // #314: the enable handler now takes variadic ids; the interactive
+            // flow resolves a single concrete `PluginId`, so pass it as a
+            // one-element list with no `--catalog` scope (the id is already
+            // slash-qualified).
+            ids: vec![id.to_string()],
+            catalog: None,
             yes: false,
             // Interactive enable does not pre-set a tier; the default (3)
             // applies. Users can refine per-entry via `tome tier set`.
