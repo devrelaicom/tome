@@ -29,13 +29,26 @@ pub struct Input {
     pub plugin: String,
     /// The skill `name` field as returned by `search_skills`.
     pub name: String,
+    /// #331: when true, return the body WITHOUT running the substitution
+    /// pipeline — literal `${TOME_*}` tokens are preserved. Use this when
+    /// authoring/converting a skill (you want the source tokens, not the
+    /// resolved values). Default false (substitutions are applied).
+    ///
+    /// `#[serde(default)]` keeps existing callers (who omit `raw`) parsing
+    /// to `false` under `deny_unknown_fields`, preserving current behavior.
+    #[serde(default)]
+    pub raw: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
-    /// SKILL.md body with YAML frontmatter stripped. Body is otherwise
+    /// SKILL.md body with YAML frontmatter stripped, then
+    /// substitution-rendered (built-ins + env passthrough) — UNLESS the
+    /// caller passed `raw: true`, in which case the literal `${TOME_*}`
+    /// tokens are preserved and no substitution runs. Otherwise the body is
     /// verbatim — no normalisation, no rewrites, no path-relative-to-
-    /// absolute resolution in code blocks.
+    /// absolute resolution in code blocks. See `substitutions_applied` for
+    /// which mode produced this value.
     pub content: String,
     /// Absolute path to the entry body file (a skill's `SKILL.md` or a
     /// command's `<name>.md`).
@@ -66,6 +79,15 @@ pub struct Output {
     /// above is added for it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_name: Option<String>,
+    /// #331: whether the substitution pipeline was applied to `content`.
+    /// `false` only when the caller passed `raw: true` (literal `${TOME_*}`
+    /// tokens preserved); `true` in the default rendered mode. Always
+    /// present — the output is an emit-only record with no
+    /// `additionalProperties: false`, so adding this key is a
+    /// backward-compatible additive change (same precedent as the #289
+    /// `kind` key). Appended LAST, after `prompt_name`, so it never
+    /// reorders the pre-#331 fields.
+    pub substitutions_applied: bool,
 }
 
 /// Pipeline:
@@ -292,57 +314,74 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 
     let (raw_content, resources) = body_and_resources;
 
-    // Phase 5 / US2.c (FR-101): run the substitution pipeline over the
-    // frontmatter-stripped body so callers see Stage 1 (built-ins) +
-    // Stage 2 (env passthrough) values. `get_skill` never receives args
-    // (it's the read-side; Stage 3 + Stage 4 are exercised via the
-    // `prompts/get` MCP surface in `mcp::prompts`), so `args = None`
-    // and `declared_args = []`.
+    // #331: `raw: true` returns the frontmatter-stripped body verbatim,
+    // skipping the substitution pipeline entirely (literal `${TOME_*}` tokens
+    // preserved — what an authoring/converting agent needs). Raw mode is a
+    // pure read: no substitution context is built, so none of the render
+    // block's data-dir side-effects or substitution-failure error arms are
+    // reachable and it cannot fail on substitution. The default (`raw:
+    // false`) runs the pipeline exactly as before.
     //
-    // Build + render are pure compute (built-ins read context fields;
-    // env reads `std::env::var`; the data-dir built-ins call
-    // `create_dir_all` which is sync). Run on the blocking pool to keep
-    // the runtime responsive per the sync-boundary discipline.
-    let ctx_state = state.clone();
-    let ctx_input = input.clone_for_log();
-    let ctx_skill_path = skill_path.clone();
-    let ctx_plugin_version = plugin_version;
-    let rendered_result = tokio::task::spawn_blocking(move || {
-        let ctx = build_substitution_context(
-            &ctx_state,
-            &ctx_input,
-            &ctx_skill_path,
-            ctx_plugin_version,
-        )?;
-        substitution::render(&raw_content, &ctx).map_err(map_substitution_error)
-    })
-    .await
-    .map_err(|e| {
-        internal(
-            &input,
-            started,
-            format!("render join: {e}"),
-            ErrorCategory::Internal,
-        )
-    })?;
-
-    let content = match rendered_result {
-        Ok(s) => s,
-        Err((code, err)) => {
-            // Co-M1: a POST-resolution substitution/render failure — the entry
-            // resolved, so the version + names are in hand. Map the contract
-            // `code` slug back to its closed `ErrorCategory`, emit anonymous +
-            // attributed error telemetry, then return the McpError unchanged.
-            let category = substitution_code_to_category(code);
-            let err = emit_error(&input, started, code, err);
-            emit_post_resolution_error_telemetry(
-                &state,
+    // Telemetry (the anonymous `tome.entry_invoked`, the attributed
+    // `catalog.<id>.entry_invoked`, the info log) and `prompt_name`
+    // resolution below STILL fire in both modes — raw mode is still an
+    // entry fetch. Only the render is conditional.
+    let (content, substitutions_applied) = if input.raw {
+        (raw_content, false)
+    } else {
+        // Phase 5 / US2.c (FR-101): run the substitution pipeline over the
+        // frontmatter-stripped body so callers see Stage 1 (built-ins) +
+        // Stage 2 (env passthrough) values. `get_skill` never receives args
+        // (it's the read-side; Stage 3 + Stage 4 are exercised via the
+        // `prompts/get` MCP surface in `mcp::prompts`), so `args = None`
+        // and `declared_args = []`.
+        //
+        // Build + render are pure compute (built-ins read context fields;
+        // env reads `std::env::var`; the data-dir built-ins call
+        // `create_dir_all` which is sync). Run on the blocking pool to keep
+        // the runtime responsive per the sync-boundary discipline.
+        let ctx_state = state.clone();
+        let ctx_input = input.clone_for_log();
+        let ctx_skill_path = skill_path.clone();
+        let ctx_plugin_version = plugin_version;
+        let rendered_result = tokio::task::spawn_blocking(move || {
+            let ctx = build_substitution_context(
+                &ctx_state,
+                &ctx_input,
+                &ctx_skill_path,
+                ctx_plugin_version,
+            )?;
+            substitution::render(&raw_content, &ctx).map_err(map_substitution_error)
+        })
+        .await
+        .map_err(|e| {
+            internal(
                 &input,
-                attributed_plugin_version.clone(),
-                category,
+                started,
+                format!("render join: {e}"),
+                ErrorCategory::Internal,
             )
-            .await;
-            return Err(err);
+        })?;
+
+        match rendered_result {
+            Ok(s) => (s, true),
+            Err((code, err)) => {
+                // Co-M1: a POST-resolution substitution/render failure — the
+                // entry resolved, so the version + names are in hand. Map the
+                // contract `code` slug back to its closed `ErrorCategory`, emit
+                // anonymous + attributed error telemetry, then return the
+                // McpError unchanged.
+                let category = substitution_code_to_category(code);
+                let err = emit_error(&input, started, code, err);
+                emit_post_resolution_error_telemetry(
+                    &state,
+                    &input,
+                    attributed_plugin_version.clone(),
+                    category,
+                )
+                .await;
+                return Err(err);
+            }
         }
     };
 
@@ -439,6 +478,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         resources,
         kind: resolved_kind,
         prompt_name,
+        substitutions_applied,
     })
 }
 
@@ -853,6 +893,7 @@ impl Input {
             catalog: self.catalog.clone(),
             plugin: self.plugin.clone(),
             name: self.name.clone(),
+            raw: self.raw,
         }
     }
 }

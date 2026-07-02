@@ -161,6 +161,44 @@ fn descriptions_match_contract_wording() {
 }
 
 #[test]
+fn get_skill_input_schema_advertises_raw_boolean() {
+    // #331: the `get_skill` input schema (what `tools/list` exposes to an
+    // agent) must advertise the optional `raw` boolean property so a client
+    // can discover the no-substitution mode. `raw` carries `#[serde(default)]`
+    // ⇒ it is NOT in `required`. This is the schema-side pin for the new
+    // parameter: a rename, type change, or accidental promotion to required
+    // flips this test red.
+    let tools = Server::tool_router().list_all();
+    let get = tools
+        .iter()
+        .find(|t| t.name == "get_skill")
+        .expect("get_skill advertised");
+
+    let schema = &get.input_schema;
+    let properties = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("input schema has a `properties` object");
+
+    let raw = properties
+        .get("raw")
+        .expect("input schema advertises the `raw` property (#331)");
+    assert_eq!(
+        raw.get("type").and_then(|t| t.as_str()),
+        Some("boolean"),
+        "`raw` must be a boolean in the input schema; got: {raw}",
+    );
+
+    // The three original fields stay required; `raw` (defaulted) must NOT be.
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        assert!(
+            !required.iter().any(|v| v.as_str() == Some("raw")),
+            "`raw` is defaulted (optional) and must not appear in `required`; got: {required:?}",
+        );
+    }
+}
+
+#[test]
 fn descriptions_do_not_enumerate_fixture_identifiers() {
     // FR-108: the tool descriptions must NOT name any specific catalog,
     // plugin, or skill identifier. We assert against the identifiers
@@ -344,6 +382,7 @@ fn get_skill_returns_unknown_catalog_for_missing_name() {
                 catalog: "nonexistent".into(),
                 plugin: "p".into(),
                 name: "s".into(),
+                raw: false,
             },
         ))
         .expect_err("unknown catalog must reject");
@@ -373,6 +412,7 @@ fn get_skill_rejects_empty_fields() {
                 catalog: "".into(),
                 plugin: "p".into(),
                 name: "s".into(),
+                raw: false,
             },
         ))
         .expect_err("empty catalog must reject");

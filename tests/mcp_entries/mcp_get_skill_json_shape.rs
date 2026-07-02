@@ -33,18 +33,47 @@ fn get_skill_output_wire_shape_for_skill_kind() {
         // A non-invocable skill has no prompt — `prompt_name` is `None` and
         // MUST be omitted; only the additive `kind` key is added vs pre-#289.
         prompt_name: None,
+        // #331: the default (rendered) mode reports `substitutions_applied:
+        // true`. Always present (non-`Option`), appended LAST.
+        substitutions_applied: true,
     };
 
     let json = serde_json::to_string(&out).expect("serialise");
 
-    // Document order: content, path, resources, kind, [prompt_name omitted].
-    // `kind` is lowercase via `#[serde(rename_all = "lowercase")]` on
-    // `EntryKind`. `prompt_name` is ABSENT (None + skip_serializing_if).
-    let expected = r#"{"content":"rendered skill body","path":"/abs/path/to/SKILL.md","resources":["/abs/path/to/examples/basic.ts"],"kind":"skill"}"#;
+    // Document order: content, path, resources, kind, [prompt_name omitted],
+    // substitutions_applied. `kind` is lowercase via
+    // `#[serde(rename_all = "lowercase")]` on `EntryKind`. `prompt_name` is
+    // ABSENT (None + skip_serializing_if). `substitutions_applied` is the
+    // additive #331 key, appended LAST.
+    let expected = r#"{"content":"rendered skill body","path":"/abs/path/to/SKILL.md","resources":["/abs/path/to/examples/basic.ts"],"kind":"skill","substitutions_applied":true}"#;
 
     assert_eq!(
         json, expected,
-        "get_skill skill-kind JSON wire shape drift — `kind` must be present (additive #289), `prompt_name` absent",
+        "get_skill skill-kind JSON wire shape drift — `kind` must be present (additive #289), `prompt_name` absent, `substitutions_applied` present (additive #331)",
+    );
+}
+
+#[test]
+fn get_skill_output_wire_shape_for_raw_mode() {
+    // #331: `raw: true` preserves literal `${TOME_*}` tokens and reports
+    // `substitutions_applied: false`. Wire shape is otherwise identical — the
+    // only difference is the boolean value of the always-present key.
+    let out = Output {
+        content: "raw body with ${TOME_PROJECT_DIR} preserved".into(),
+        path: "/abs/path/to/SKILL.md".into(),
+        resources: vec![],
+        kind: EntryKind::Skill,
+        prompt_name: None,
+        substitutions_applied: false,
+    };
+
+    let json = serde_json::to_string(&out).expect("serialise");
+
+    let expected = r#"{"content":"raw body with ${TOME_PROJECT_DIR} preserved","path":"/abs/path/to/SKILL.md","resources":[],"kind":"skill","substitutions_applied":false}"#;
+
+    assert_eq!(
+        json, expected,
+        "get_skill raw-mode JSON wire shape drift — literal token preserved in `content`, `substitutions_applied` must be `false`",
     );
 }
 
@@ -58,14 +87,16 @@ fn get_skill_output_wire_shape_for_command_kind() {
         resources: vec![],
         kind: EntryKind::Command,
         prompt_name: Some("plug__deploy".into()),
+        // #331: rendered mode; `substitutions_applied` follows `prompt_name`.
+        substitutions_applied: true,
     };
 
     let json = serde_json::to_string(&out).expect("serialise");
 
-    let expected = r#"{"content":"run the deploy","path":"/abs/path/to/commands/deploy.md","resources":[],"kind":"command","prompt_name":"plug__deploy"}"#;
+    let expected = r#"{"content":"run the deploy","path":"/abs/path/to/commands/deploy.md","resources":[],"kind":"command","prompt_name":"plug__deploy","substitutions_applied":true}"#;
 
     assert_eq!(
         json, expected,
-        "get_skill command-kind JSON wire shape drift — `kind` lowercase `command`, `prompt_name` appended LAST",
+        "get_skill command-kind JSON wire shape drift — `kind` lowercase `command`, `prompt_name` then `substitutions_applied` appended LAST",
     );
 }

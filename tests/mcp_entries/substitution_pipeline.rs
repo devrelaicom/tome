@@ -253,6 +253,7 @@ fn mcp_get_skill_runs_builtins_and_env() {
                 catalog: "acme".to_string(),
                 plugin: "plug".to_string(),
                 name: "pipe-skill".to_string(),
+                raw: false,
             },
         ))
         .expect("get_skill ok");

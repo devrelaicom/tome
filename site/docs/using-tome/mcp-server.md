@@ -25,7 +25,10 @@ Tome exposes four tools. The first three form a search-then-load flow:
   (including its `when_to_use` guidance) without pulling the full body. Useful for
   confirming relevance before loading.
 - **`get_skill`** — loads a skill's full content, with variable substitution
-  applied, ready for the agent to use.
+  applied, ready for the agent to use. Pass `raw: true` to receive the body with
+  literal `${TOME_*}` substitution tokens preserved instead — useful for
+  authoring or conversion workflows that need the source tokens, not the
+  resolved values.
 
 The typical loop is: `search_skills` to find candidates → `get_skill_info` to
 confirm → `get_skill` to load only the best match.
