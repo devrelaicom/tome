@@ -657,3 +657,88 @@ fn status_json_has_no_onboarding_text() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("parse JSON");
     assert_eq!(v["catalogs_enrolled"], 0);
 }
+
+// ---- Issue #323: `status [<workspace>]` positional -------------------------
+
+/// `status <name>` reports on the NAMED workspace instead of the resolved scope:
+/// the emitted `current_workspace` is the positional's name. Two workspaces are
+/// seeded (`global` bootstraps implicitly + a named `other`); running
+/// `status other` from a directory with no project marker (so the default scope
+/// would be `global`) must re-resolve to `other`.
+#[test]
+fn status_positional_reports_named_workspace() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+    // Seed a distinguishable second workspace in the central registry.
+    crate::common::seed_workspace(&paths, "other");
+
+    // No positional → resolved default scope (`global`).
+    let default_json = env.cmd().args(["--json", "status"]).output().unwrap();
+    let dv: serde_json::Value = serde_json::from_slice(&default_json.stdout).unwrap_or_else(|_| {
+        panic!(
+            "parse default JSON; stderr: {}",
+            String::from_utf8_lossy(&default_json.stderr)
+        )
+    });
+    assert_eq!(
+        dv["current_workspace"], "global",
+        "no positional → resolved scope (global)",
+    );
+
+    // Positional `other` → the report re-resolves to that workspace.
+    let named_json = env
+        .cmd()
+        .args(["--json", "status", "other"])
+        .output()
+        .unwrap();
+    let nv: serde_json::Value = serde_json::from_slice(&named_json.stdout).unwrap_or_else(|_| {
+        panic!(
+            "parse named JSON; stderr: {}",
+            String::from_utf8_lossy(&named_json.stderr)
+        )
+    });
+    assert_eq!(
+        nv["current_workspace"], "other",
+        "status <name> must report the named workspace",
+    );
+    // The named-workspace scope is a Flag resolution (project_root = None), so it
+    // reports as `project` scope (non-global), mirroring `--workspace other`.
+    assert_eq!(nv["current_scope"], "project");
+}
+
+/// `status <nonexistent>` fails with `WorkspaceNotFound` (exit 13) — the SAME
+/// membership validation `--workspace <name>` performs, since `status` re-runs
+/// the resolver with a synthetic flag.
+#[test]
+fn status_positional_unknown_workspace_exits_13() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+    // Bootstrap the DB (so the membership check queries a real registry) but do
+    // NOT seed the requested name.
+    crate::common::seed_workspace(&paths, "exists");
+
+    let out = env.cmd().args(["status", "nope"]).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(13),
+        "unknown positional workspace must exit 13 (WorkspaceNotFound); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // The `--workspace` flag form yields the identical exit code — parity check.
+    let out_flag = env
+        .cmd()
+        .args(["--workspace", "nope", "status"])
+        .output()
+        .unwrap();
+    assert_eq!(out_flag.status.code(), Some(13));
+}

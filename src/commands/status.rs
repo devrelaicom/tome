@@ -40,6 +40,24 @@ mod art;
 
 pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
+    // Issue #323: `status [<workspace>]` reports on a NAMED workspace instead of
+    // the resolved scope. Re-run the resolver with a synthetic `--workspace`
+    // arg so membership validation + errors match `--workspace <name>` exactly:
+    // a missing name → `WorkspaceNotFound` (exit 13), a malformed name → the
+    // existing workspace-name error, `source = Flag`, and `project_root = None`
+    // (project-relative harness/MCP fills go inactive — consistent with
+    // `workspace info <name>`). No positional ⇒ use the resolved scope unchanged.
+    let effective = match args.name.as_deref() {
+        Some(name) => {
+            let synthetic = crate::cli::GlobalScopeArgs {
+                workspace: Some(name.to_owned()),
+            };
+            crate::workspace::resolution::resolve_lenient(&synthetic, &paths)?
+        }
+        None => scope.clone(),
+    };
+    let scope = &effective;
+
     let mut report = assemble_report(&paths, &scope.scope, args.verify)?;
     // Phase 11 / US5 (T065): augment with per-harness MCP integration state
     // (needs the ResolvedScope's project root, which `assemble_report` lacks).
