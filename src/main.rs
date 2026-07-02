@@ -21,6 +21,24 @@ fn main() {
     }
 
     let cli = Cli::parse();
+
+    // `tome completions <shell>` is intercepted here — after the `--version`
+    // hook, after `Cli::parse()`, but BEFORE `Paths::resolve()`, scope
+    // resolution, logging/colour init, and telemetry. Generating a completion
+    // script is a pure static operation over the derived `Cli` command tree; it
+    // reads no HOME, index, config, or workspace. A user runs it during shell
+    // setup (possibly before Tome is configured), so it must never require valid
+    // state. `--json` is irrelevant for a shell script (ignored). The borrow of
+    // `cli.command` ends before the later `match cli.command`, so there is no
+    // move conflict. On error, emit via the same code/mode path as any command.
+    if let Command::Completions(args) = &cli.command {
+        if let Err(err) = commands::completions::run(args) {
+            output::write_error(cli.mode(), &err);
+            std::process::exit(err.exit_code());
+        }
+        std::process::exit(0);
+    }
+
     // Skip the stderr-based CLI tracing subscriber on the MCP path —
     // `mcp::run` installs its own file-backed JSON subscriber, and the
     // global `tracing` registry only accepts one. Also skip the
@@ -187,6 +205,9 @@ fn main() {
         Command::Tier(cmd) => commands::tier::run(cmd, &scope, mode),
         Command::Sync(args) => commands::sync::run(args, &scope, &paths, mode),
         Command::Config(cmd) => commands::config::run(cmd, &scope, mode),
+        // Intercepted pre-dispatch above (before `Paths::resolve`); that arm
+        // exits the process, so this is unreachable. Kept for exhaustiveness.
+        Command::Completions(_) => unreachable!("completions is handled pre-dispatch"),
     };
 
     // Single exit-path teardown (FR-047b). `teardown_at_exit` is THE one call

@@ -281,6 +281,29 @@ carry an inline `api_key`, which must never be echoed through a user-facing
 surface), and the list-valued `[harness]` composition settings. Setting values
 from the CLI (`config set`) is a planned fast-follow.
 
+## `tome completions`
+
+Generate a shell completion script and print it to stdout.
+
+| Subcommand | Flags | Purpose |
+| --- | --- | --- |
+| `completions <shell>` | | Print a completion script for `<shell>` to stdout, where `<shell>` is one of `bash`, `zsh`, `fish`, `powershell`, or `elvish`. An unknown shell is a usage error (exit `2`) that lists the valid values. |
+
+Generating completions is a pure static operation over the command tree, so it
+needs no configured HOME, index, or config — you can run it during shell setup
+before Tome is otherwise configured. Redirect the output to the file your shell
+loads completions from:
+
+- **zsh** — `tome completions zsh > ~/.zfunc/_tome` (ensure `~/.zfunc` is on your
+  `fpath` and `autoload -U compinit && compinit` runs in `~/.zshrc`).
+- **bash** — `tome completions bash > /usr/local/etc/bash_completion.d/tome`
+  (or source it from `~/.bashrc`: `source <(tome completions bash)`).
+- **fish** — `tome completions fish > ~/.config/fish/completions/tome.fish`.
+- **powershell** — `tome completions powershell | Out-String | Invoke-Expression`
+  (or append it to your `$PROFILE`).
+- **elvish** — `tome completions elvish > ~/.config/elvish/lib/tome.elv` and
+  `use tome` it from your `rc.elv`.
+
 ## `tome mcp`
 
 Run Tome as a stdio MCP server backed by the resolved workspace's index.
