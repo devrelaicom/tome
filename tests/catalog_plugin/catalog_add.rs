@@ -216,6 +216,119 @@ fn successful_add_persists_scrubbed_url_in_config() {
 // no longer has a meaningful test target.
 
 #[test]
+fn add_echoes_resolved_commit_sha() {
+    // #329 Part A: `catalog add` resolves the HEAD commit of the cache dir and
+    // surfaces it. Human output carries a short (7-char) sha in the
+    // parenthetical; `--json` carries the full 40-hex sha under `added.commit`.
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+
+    // Human mode.
+    let out = env
+        .cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("commit: "),
+        "expected a `commit: ` fragment in human stdout: {}",
+        stdout
+    );
+    // The short sha is a 7-char lowercase hex token immediately after
+    // `commit: `. Extract and validate it.
+    let short = stdout
+        .split("commit: ")
+        .nth(1)
+        .and_then(|tail| tail.split([',', ')', ' ']).next())
+        .expect("a token after `commit: `");
+    assert_eq!(short.len(), 7, "short sha must be 7 chars, got {:?}", short);
+    assert!(
+        short.chars().all(|c| c.is_ascii_hexdigit()),
+        "short sha must be hex, got {:?}",
+        short
+    );
+
+    // JSON mode (fresh env so the add isn't a duplicate).
+    let env = ToolEnv::new();
+    let out = env
+        .cmd()
+        .args(["catalog", "add", &fix.url, "--json"])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).expect("json parse");
+    let commit = v["added"]["commit"]
+        .as_str()
+        .expect("`added.commit` must be a string");
+    assert_eq!(
+        commit.len(),
+        40,
+        "the JSON `commit` must be the full 40-hex sha, got {:?}",
+        commit
+    );
+    assert!(
+        commit.chars().all(|c| c.is_ascii_hexdigit()),
+        "the JSON `commit` must be hex, got {:?}",
+        commit
+    );
+    // The human short sha must be the 7-char prefix of the full JSON sha.
+    assert_eq!(
+        &commit[..7],
+        short,
+        "human short sha must be the prefix of the full JSON sha",
+    );
+}
+
+#[test]
+fn ref_aliases_and_short_name_parse() {
+    // #329 Part A: `--branch`/`--tag` are visible aliases of `--ref`, and `-n`
+    // is a short for `--name`. Assert at the clap parse level.
+    use clap::Parser;
+    use tome::cli::{CatalogCommand, Cli, Command};
+
+    let extract = |argv: &[&str]| -> (Option<String>, Option<String>) {
+        let cli = Cli::try_parse_from(argv).expect("parse");
+        let Command::Catalog(CatalogCommand::Add(add)) = cli.command else {
+            panic!("expected `catalog add`");
+        };
+        (add.ref_, add.name)
+    };
+
+    let (ref_, _) = extract(&["tome", "catalog", "add", "owner/repo", "--branch", "dev"]);
+    assert_eq!(ref_.as_deref(), Some("dev"), "`--branch` sets ref_");
+
+    let (ref_, _) = extract(&["tome", "catalog", "add", "owner/repo", "--tag", "v1.2.0"]);
+    assert_eq!(ref_.as_deref(), Some("v1.2.0"), "`--tag` sets ref_");
+
+    let (_, name) = extract(&["tome", "catalog", "add", "owner/repo", "-n", "alias"]);
+    assert_eq!(name.as_deref(), Some("alias"), "`-n` sets name");
+}
+
+#[test]
+fn update_force_flag_is_rejected() {
+    // #329 Part C: the inert `catalog update --force` flag was removed; parsing
+    // it is now a clap usage error.
+    use clap::Parser;
+    use tome::cli::Cli;
+
+    let res = Cli::try_parse_from(["tome", "catalog", "update", "--force"]);
+    assert!(
+        res.is_err(),
+        "`catalog update --force` must be a usage error now that the flag is gone",
+    );
+}
+
+#[test]
 fn git_failure_with_credential_url_is_scrubbed() {
     let env = ToolEnv::new();
     // URL with embedded credentials pointing at nothing. Git will fail; we

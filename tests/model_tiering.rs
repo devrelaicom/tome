@@ -355,15 +355,9 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
         project_root: None,
         overridden_project_marker: None,
     };
-    let update_err = catalog_update::run(
-        CatalogUpdateArgs {
-            name: None,
-            force: false,
-        },
-        &update_scope,
-        Mode::Json,
-    )
-    .expect_err("`catalog update` must refuse under embedder drift");
+    let update_err =
+        catalog_update::run(CatalogUpdateArgs { name: None }, &update_scope, Mode::Json)
+            .expect_err("`catalog update` must refuse under embedder drift");
     assert_eq!(
         update_err.exit_code(),
         41,

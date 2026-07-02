@@ -178,6 +178,13 @@ pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     let (manifest, _reused) = result?;
     let display_name = args.name.clone().unwrap_or_else(|| manifest.name.clone());
 
+    // Best-effort: resolve the HEAD commit of the on-disk cache dir. This runs
+    // AFTER the lock section, so it works for both the fresh-clone and reuse
+    // paths (`cache_dir` is the persisted git repo in either case). A failure
+    // degrades to `None` and never fails the add — the catalog is already
+    // registered.
+    let commit = Git::new(&display_name).rev_parse_head_opt(&cache_dir);
+
     let last_synced = clone_mtime(&cache_dir);
     let emit_record = EmittedCatalog {
         name: display_name,
@@ -186,6 +193,7 @@ pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         plugin_count: manifest.plugins.len(),
         cache_path: cache_dir,
         last_synced,
+        commit,
     };
     emit(mode, &emit_record)?;
 
@@ -231,6 +239,9 @@ struct EmittedCatalog {
     plugin_count: usize,
     cache_path: std::path::PathBuf,
     last_synced: Option<OffsetDateTime>,
+    /// The resolved HEAD commit SHA (full 40-char hex), or `None` when the
+    /// best-effort `git rev-parse HEAD` on the cache dir failed.
+    commit: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -247,16 +258,28 @@ struct AddedRecord<'a> {
     plugin_count: usize,
     #[serde(with = "time::serde::rfc3339::option")]
     last_synced: Option<OffsetDateTime>,
+    /// Additive: the resolved HEAD commit SHA (full 40-char hex). Omitted
+    /// entirely when the best-effort read failed, so the wire shape is
+    /// unchanged for any caller that didn't have a resolvable commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit: Option<&'a str>,
 }
 
 fn emit(mode: Mode, rec: &EmittedCatalog) -> Result<(), TomeError> {
     match mode {
         Mode::Human => {
             let mut out = std::io::stdout().lock();
+            // Extend the parenthetical with the SHORT (7-char) commit SHA when
+            // it resolved. When `None`, the `commit: …` fragment is omitted
+            // gracefully rather than printing a placeholder.
+            let commit_frag = match rec.commit.as_deref() {
+                Some(sha) => format!(", commit: {}", short_sha(sha)),
+                None => String::new(),
+            };
             writeln!(
                 out,
-                "Added catalog `{}` from {} (ref: {}, plugins: {}).",
-                rec.name, rec.url, rec.pinned_ref, rec.plugin_count
+                "Added catalog `{}` from {} (ref: {}{}, plugins: {}).",
+                rec.name, rec.url, rec.pinned_ref, commit_frag, rec.plugin_count
             )?;
             let _ = rec.cache_path; // human form omits the path
             if let Some(ts) = rec.last_synced
@@ -281,10 +304,19 @@ fn emit(mode: Mode, rec: &EmittedCatalog) -> Result<(), TomeError> {
                     ref_: &rec.pinned_ref,
                     plugin_count: rec.plugin_count,
                     last_synced: rec.last_synced,
+                    // Additive: the FULL 40-char SHA, omitted when unavailable.
+                    commit: rec.commit.as_deref(),
                 },
             };
             crate::output::write_json(&env)?;
         }
     }
     Ok(())
+}
+
+/// The short (7-char) form of a commit SHA for human output. Falls back to the
+/// whole string if it is somehow shorter than 7 chars (never expected from
+/// `git rev-parse HEAD`, but avoids a panic on a truncated read).
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
 }

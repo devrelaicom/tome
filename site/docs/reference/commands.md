@@ -15,10 +15,10 @@ the authoring commands for creating new ones.
 
 | Subcommand | Flags | Purpose |
 | --- | --- | --- |
-| `add <source>` | `--name`, `--ref` | Register a catalog from an `owner/repo` shorthand, a git URL, or a local path (interpreted as `file://`). `--name` overrides the display name; `--ref` tracks a branch, tag, or SHA (default `main`). |
+| `add <source>` | `--name` (`-n`), `--ref` (`--branch`, `--tag`) | Register a catalog from an `owner/repo` shorthand, a git URL, or a local path (interpreted as `file://`). The shorthand also accepts a forge prefix: `gh:owner/repo`, `gl:owner/repo`, `bb:owner/repo` for GitHub, GitLab, and Bitbucket. `--name` (short `-n`) overrides the display name; `--ref` tracks a branch, tag, or SHA (default `main`) and has visible aliases `--branch` and `--tag`. The output reports the resolved `commit` — the short SHA in human output, the full 40-char SHA in the `--json` `added.commit` field. |
 | `remove <name>` | `--force` | Remove a registered catalog. Refuses while it still has enabled plugins (exit `53`); `--force` cascades the disable. |
 | `list` | | List registered catalogs. |
-| `update [<name>]` | `--force` | Refresh one catalog, or every registered catalog when the name is omitted. (`--force` is accepted but currently a no-op.) |
+| `update [<name>]` | | Refresh one catalog, or every registered catalog when the name is omitted. |
 | `show <name>` | | Show a catalog's manifest and registration metadata. |
 | `create <name>` | `--template`, `--output`, `--description`, `--author`, `--dry-run`, `--force` | Scaffold a new catalog from a template. `--description` sets the manifest description; `--author` sets the catalog owner (otherwise a `Your Name` placeholder); `--dry-run` previews the files without writing them. See [Creating](../authoring/create.md). |
 | `convert <source> [<name>]` | `--name`, `--from`, `--output`, `--into`, `--force`, `--dry-run`, `--strict`, `--allow`, `--no-fetch` | Convert a Claude Code marketplace into a native Tome catalog — a copy; the source is never modified. `--no-fetch` skips fetching the marketplace's remote-source plugins (they are warned-and-skipped). See [Converting](../authoring/convert.md). |
