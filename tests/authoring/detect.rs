@@ -38,7 +38,7 @@ fn detect_maps_native_skill_and_from_overrides_harness() {
     let generic = detect(&root, None, ArtifactLevel::Skill).unwrap();
     assert_eq!(generic.harness, SourceHarness::AgentSkills);
 
-    let opencode = detect(&root, Some("opencode"), ArtifactLevel::Skill).unwrap();
+    let opencode = detect(&root, Some(SourceHarness::OpenCode), ArtifactLevel::Skill).unwrap();
     assert_eq!(opencode.harness, SourceHarness::OpenCode);
     assert_eq!(opencode.level, ArtifactLevel::Skill);
 }

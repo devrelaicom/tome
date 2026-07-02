@@ -16,16 +16,18 @@ rewriting.
 
 The command names what you want to produce: a whole catalog (`catalog`), one
 plugin (`plugin`), or a single skill (`skill`). The source format is
-auto-detected; `--from` overrides detection when it can't decide.
+auto-detected; `--from` overrides detection when it can't decide. `--from` takes
+a closed set of values (validated at parse time — an unknown value is a usage
+error, exit `2`): the six sources below, plus the `claude` and `agent` aliases.
 
 | Source (`--from`) | What it covers |
 | --- | --- |
-| `claude-code` | Claude Code marketplaces, plugins, and skills |
+| `claude-code` (alias `claude`) | Claude Code marketplaces, plugins, and skills |
 | `codex` | Codex projects |
 | `cursor` | Native `SKILL.md` trees written for Cursor |
 | `opencode` | Native `SKILL.md` trees written for OpenCode |
 | `cline` | Native `SKILL.md` trees written for Cline |
-| `agent-skills` | The generic Agent Skills `SKILL.md` layout |
+| `agent-skills` (alias `agent`) | The generic Agent Skills `SKILL.md` layout |
 
 When detection fails, convert exits `83` and asks you to pass `--from` rather
 than guessing.
@@ -85,8 +87,8 @@ emulate. [Linting](./lint.md) covers how to work through them (and what
 Convert never modifies the source — it writes a converted copy:
 
 - The copy is named `<source-name>-tome` by default. Override it with the
-  positional `NAME` argument or `--name` (supplying both with different values
-  is a usage error).
+  optional positional `NAME` argument (there is no `--name` flag — the name is a
+  single positional, consistent across the authoring verbs).
 - Convert writes the copy under the current directory by default;
   `--output <dir>` selects a different parent.
 - `--into <path>` places the converted artifact inside an existing Tome
@@ -105,9 +107,11 @@ cleaned up on every exit path — success, failure, or `--strict` abort. If the
 source string could be read both ways (a local directory named `owner/repo`
 exists), the local path wins.
 
-For `tome catalog convert` only, `--no-fetch` skips the marketplace's
-remote-source plugins: they're warned and skipped instead of fetched. The
-source argument itself may still be remote.
+For `tome catalog convert` only, `--no-fetch` (alias `--local-only`) skips the
+marketplace's remote-source plugins: they're warned and skipped instead of
+fetched. The source argument itself may still be remote. The flag lives on
+`catalog convert` alone — passing it to `plugin convert` or `skill convert` is a
+usage error (a single plugin or skill has no remote-plugin fan-out to skip).
 
 ## What gets rewritten
 

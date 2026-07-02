@@ -26,8 +26,14 @@ use crate::util::{TOME_CONFIG_MAX, bounded_read_to_string};
 use crate::workspace::ResolvedScope;
 
 /// Run a conversion for the given artifact `level`.
+///
+/// `no_fetch` is passed explicitly by the caller: `catalog convert` threads its
+/// `--no-fetch` flag; `plugin`/`skill convert` pass `false` (a single
+/// plugin/skill conversion has no remote-plugin fan-out to skip). `fetch_remote`
+/// is `!no_fetch`.
 pub fn run(
     args: ConvertArgs,
+    no_fetch: bool,
     _scope: &ResolvedScope,
     mode: Mode,
     level: ArtifactLevel,
@@ -38,8 +44,8 @@ pub fn run(
     // conversion (NFR-003).
     let (source_root, _clone) = resolve_source(&args.source)?;
 
-    let new_name =
-        convert::resolve_requested_name(args.name.as_deref(), args.name_flag.as_deref())?;
+    // The new name is the positional `<NAME>` (or `None` → `<source-name>-tome`).
+    let new_name = args.name.clone();
 
     // `--output` lands the copy at `<output>/<name>/`; `--into` injects it into
     // an existing Tome artifact (a plugin into a catalog, a skill into a
@@ -62,7 +68,7 @@ pub fn run(
         allow: args.allow,
         force: args.force,
         dry_run: args.dry_run,
-        fetch_remote: !args.no_fetch,
+        fetch_remote: !no_fetch,
         output_dir,
     };
 

@@ -9,5 +9,7 @@ use crate::output::Mode;
 use crate::workspace::ResolvedScope;
 
 pub fn run(args: ConvertArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
-    crate::commands::convert::run(args, scope, mode, ArtifactLevel::Plugin)
+    // A single-plugin conversion has no remote-plugin fan-out, so `--no-fetch`
+    // is not offered here — always fetch (`no_fetch = false`).
+    crate::commands::convert::run(args, false, scope, mode, ArtifactLevel::Plugin)
 }
