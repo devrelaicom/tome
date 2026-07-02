@@ -48,10 +48,10 @@ pub struct Input {
     /// (Unicode scalar values), per FR-092. When absent, falls back to
     /// `[mcp] description_max_chars` in `~/.tome/config.toml`, then to
     /// the built-in default of 150. Pass a large value to minimise
-    /// truncation; the resolved value is capped at
-    /// [`MAX_DESCRIPTION_MAX_CHARS`], and anything strictly above that is
-    /// rejected as `invalid_description_max_chars`. Negative values are
-    /// rejected by the `u32` deserialiser.
+    /// truncation; the resolved value must not exceed
+    /// [`MAX_DESCRIPTION_MAX_CHARS`] — anything strictly above is rejected as
+    /// `invalid_description_max_chars`. Negative values are rejected by the
+    /// `u32` deserialiser.
     #[serde(default)]
     pub description_max_chars: Option<u32>,
 }

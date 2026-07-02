@@ -47,7 +47,7 @@ pub struct Input {
     pub name: String,
     /// Disambiguator when a plugin ships entries with the same name across
     /// kinds. One of `skill` (the default), `command`, or `agent`. Defaults to
-    /// `skill` per FR-084.
+    /// `skill`.
     #[serde(default = "default_kind")]
     pub kind: EntryKind,
 }
