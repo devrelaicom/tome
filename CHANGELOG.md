@@ -572,6 +572,66 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.13](https://github.com/devrelaicom/tome/compare/v0.7.12...v0.7.13) - 2026-07-02
+
+### Added
+
+- *(cli)* plugin enable/disable accept multiple ids and wildcard globs ([#314](https://github.com/devrelaicom/tome/pull/314)) ([#386](https://github.com/devrelaicom/tome/pull/386))
+- *(cli)* add tome completions <shell> (clap_complete) ([#385](https://github.com/devrelaicom/tome/pull/385))
+- *(harness)* make harness info name optional; standardize meta --harness field ([#327](https://github.com/devrelaicom/tome/pull/327)) ([#384](https://github.com/devrelaicom/tome/pull/384))
+- *(authoring)* --from ValueEnum, drop convert --name, lint --dry-run requires --autofix, scope --no-fetch to catalog ([#383](https://github.com/devrelaicom/tome/pull/383))
+- *(query)* --kind filter, repeatable --catalog/--plugin, variadic query text ([#319](https://github.com/devrelaicom/tome/pull/319)) ([#382](https://github.com/devrelaicom/tome/pull/382))
+- *(cli)* TOME_JSON/TOME_NO_COLOR env, -w short, status <workspace> positional ([#323](https://github.com/devrelaicom/tome/pull/323)) ([#381](https://github.com/devrelaicom/tome/pull/381))
+- *(catalog)* branch/tag aliases, forge shorthands, commit echo; drop inert update --force ([#329](https://github.com/devrelaicom/tome/pull/329)) ([#380](https://github.com/devrelaicom/tome/pull/380))
+- *(mcp)* add get_skill raw (no-substitution) body mode ([#331](https://github.com/devrelaicom/tome/pull/331)) ([#378](https://github.com/devrelaicom/tome/pull/378))
+- *(plugin)* add list --filter/--tier and show --details ([#377](https://github.com/devrelaicom/tome/pull/377))
+- *(models)* add test --verify, download --profile, and profile ValueEnum ([#328](https://github.com/devrelaicom/tome/pull/328)) ([#376](https://github.com/devrelaicom/tome/pull/376))
+- *(cli)* make harness/models/meta remove + meta add variadic with --all ([#315](https://github.com/devrelaicom/tome/pull/315)) ([#375](https://github.com/devrelaicom/tome/pull/375))
+- *(create)* wire --description, --author, and --dry-run flags ([#325](https://github.com/devrelaicom/tome/pull/325)) ([#374](https://github.com/devrelaicom/tome/pull/374))
+- *(mcp)* thread per-argument descriptions into prompts/list ([#312](https://github.com/devrelaicom/tome/pull/312)) ([#373](https://github.com/devrelaicom/tome/pull/373))
+- *(telemetry)* lead first-run stderr with a welcome before the opt-out notice ([#313](https://github.com/devrelaicom/tome/pull/313)) ([#372](https://github.com/devrelaicom/tome/pull/372))
+- *(plugin)* surface the interactive tome plugin browser in hints ([#311](https://github.com/devrelaicom/tome/pull/311)) ([#371](https://github.com/devrelaicom/tome/pull/371))
+- *(output)* style human error prefix and dim embedded hint lines ([#310](https://github.com/devrelaicom/tome/pull/310)) ([#370](https://github.com/devrelaicom/tome/pull/370))
+- *(harness)* surface opt-in targets in harness use --all ([#306](https://github.com/devrelaicom/tome/pull/306)) ([#369](https://github.com/devrelaicom/tome/pull/369))
+- *(cli)* add global --non-interactive and unify skip-confirmation flags ([#305](https://github.com/devrelaicom/tome/pull/305)) ([#368](https://github.com/devrelaicom/tome/pull/368))
+- *(sync)* fan bare tome sync out to bound projects ([#303](https://github.com/devrelaicom/tome/pull/303)) ([#367](https://github.com/devrelaicom/tome/pull/367))
+- *(query)* add effective-knobs header and Type column to human output ([#366](https://github.com/devrelaicom/tome/pull/366))
+- *(workspace)* note when [workspace] default shadows a project marker ([#302](https://github.com/devrelaicom/tome/pull/302)) ([#365](https://github.com/devrelaicom/tome/pull/365))
+- *(workspace)* mark current row + relative last_used in workspace list ([#300](https://github.com/devrelaicom/tome/pull/300)) ([#364](https://github.com/devrelaicom/tome/pull/364))
+- *(authoring)* give convert --json diagnostic lines lint-finding parity ([#299](https://github.com/devrelaicom/tome/pull/299)) ([#363](https://github.com/devrelaicom/tome/pull/363))
+- *(convert)* bridge successful convert into lint/harness-use ([#362](https://github.com/devrelaicom/tome/pull/362))
+- *(convert)* add --allow to demote strict-blocking rules ([#297](https://github.com/devrelaicom/tome/pull/297)) ([#361](https://github.com/devrelaicom/tome/pull/361))
+- *(error)* structured retryable/remediation error fields ([#296](https://github.com/devrelaicom/tome/pull/296)) ([#360](https://github.com/devrelaicom/tome/pull/360))
+- *(doctor)* surface unrepresented plugin hooks ([#292](https://github.com/devrelaicom/tome/pull/292)) ([#359](https://github.com/devrelaicom/tome/pull/359))
+- *(mcp)* align the three-tier workflow — surface get_skill_info everywhere + match its not-found codes to get_skill ([#295](https://github.com/devrelaicom/tome/pull/295)) ([#358](https://github.com/devrelaicom/tome/pull/358))
+- *(harness)* slim the always-injected session directive ([#294](https://github.com/devrelaicom/tome/pull/294)) ([#357](https://github.com/devrelaicom/tome/pull/357))
+- *(cli)* make empty/zero states actionable ([#293](https://github.com/devrelaicom/tome/pull/293)) ([#356](https://github.com/devrelaicom/tome/pull/356))
+- *(provider)* surface missing BYOK credential at config-resolve time ([#291](https://github.com/devrelaicom/tome/pull/291)) ([#355](https://github.com/devrelaicom/tome/pull/355))
+- *(harness)* per-harness fidelity preview (tome harness preview) ([#288](https://github.com/devrelaicom/tome/pull/288)) ([#354](https://github.com/devrelaicom/tome/pull/354))
+- *(config)* add `tome config show` and `tome config validate` ([#286](https://github.com/devrelaicom/tome/pull/286)) ([#353](https://github.com/devrelaicom/tome/pull/353))
+- *(mcp)* actionable signal on empty/weak search_skills results ([#285](https://github.com/devrelaicom/tome/pull/285)) ([#352](https://github.com/devrelaicom/tome/pull/352))
+- *(doctor)* fresh-install onboarding for status + doctor ([#283](https://github.com/devrelaicom/tome/pull/283)) ([#351](https://github.com/devrelaicom/tome/pull/351))
+- *(status)* distinct exit code for degraded vs unhealthy health ([#282](https://github.com/devrelaicom/tome/pull/282)) ([#350](https://github.com/devrelaicom/tome/pull/350))
+- *(plugin)* --sync flag on enable/disable to apply changes to harnesses ([#280](https://github.com/devrelaicom/tome/pull/280)) ([#349](https://github.com/devrelaicom/tome/pull/349))
+- *(output)* add onboarding next: hints on success and recovery hint: on first-run errors ([#348](https://github.com/devrelaicom/tome/pull/348))
+- *(plugin)* show relative last-indexed and populate last_upstream_change ([#309](https://github.com/devrelaicom/tome/pull/309)) ([#347](https://github.com/devrelaicom/tome/pull/347))
+- *(mcp)* TOME_MCP_LOG to quiet or redirect the mcp.log file sink ([#307](https://github.com/devrelaicom/tome/pull/307)) ([#346](https://github.com/devrelaicom/tome/pull/346))
+- *(workspace)* add `tome workspace current` for prompts and scripts ([#301](https://github.com/devrelaicom/tome/pull/301)) ([#345](https://github.com/devrelaicom/tome/pull/345))
+- *(provider)* env-tunable retry count via TOME_PROVIDER_MAX_RETRIES ([#343](https://github.com/devrelaicom/tome/pull/343))
+
+### Documentation
+
+- *(mcp)* clarify read-tool schemas + default meta action ([#332](https://github.com/devrelaicom/tome/pull/332)) ([#379](https://github.com/devrelaicom/tome/pull/379))
+
+### Fixed
+
+- *(harness)* launcher-tolerant ownership for the hook + recovery sinks (#337 phase B) ([#342](https://github.com/devrelaicom/tome/pull/342))
+- *(harness)* launcher-tolerant ownership for the standard MCP sink (#337 phase A) ([#341](https://github.com/devrelaicom/tome/pull/341))
+- *(mcp)* make commands reachable through the MCP surface ([#289](https://github.com/devrelaicom/tome/pull/289)) ([#340](https://github.com/devrelaicom/tome/pull/340))
+- *(config)* let doctor & status diagnose a malformed config instead of bricking ([#287](https://github.com/devrelaicom/tome/pull/287)) ([#339](https://github.com/devrelaicom/tome/pull/339))
+- *(harness)* resolve absolute launcher for the tome-op MCP bundle ([#290](https://github.com/devrelaicom/tome/pull/290)) ([#338](https://github.com/devrelaicom/tome/pull/338))
+- *(telemetry)* widen CI auto-disable detection ([#284](https://github.com/devrelaicom/tome/pull/284)) ([#335](https://github.com/devrelaicom/tome/pull/335))
+
 ## [0.7.12](https://github.com/devrelaicom/tome/compare/v0.7.11...v0.7.12) - 2026-06-30
 
 ### Other
