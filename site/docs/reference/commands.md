@@ -114,7 +114,15 @@ embedder drift, or a malformed config). Both non-zero codes fail a plain "fail
 on any non-zero" CI gate; the distinct `10` lets a "fail on unhealthy only" gate
 branch (or read `--json`'s `.overall` field — `"ok"` / `"degraded"` /
 `"unhealthy"` — the documented gating source). `--verify` rehashes each
-installed model against its pinned SHA-256. See
+installed model against its pinned SHA-256.
+
+`tome status [<workspace>]` accepts an optional positional workspace name: it
+reports on that named workspace instead of the resolved scope (defaulting to the
+resolved scope when omitted), mirroring `tome workspace info [<name>]`. The name
+must already exist in the central registry — a missing name exits `13`
+(`workspace_not_found`). Targeting a name resolves it as a flag-style scope
+(`project`, `project_root = None`), so the project-relative harness/MCP rows are
+inactive, exactly as with `--workspace <name>`. See
 [Exit codes](./exit-codes.md#health-verdicts-status--doctor) and
 [Troubleshooting](../using-tome/troubleshooting.md).
 
@@ -290,10 +298,22 @@ file log rather than failing to start.
 - `--json` is available on the read-only inspection commands and emits
   machine-readable JSON on stdout, orthogonal to logging (which goes to
   stderr). `tome mcp` intentionally ignores it — the protocol *is* the
-  structured output.
-- `--workspace <name>` runs the command against a named workspace. When
-  omitted, the resolver consults `TOME_WORKSPACE` and the project-marker walk
-  before falling back to the privileged `global` workspace.
+  structured output. The environment variable `TOME_JSON` (any truthy value —
+  set, non-empty, and not `0`/`false`/`no`/`off`) forces JSON when the flag is
+  absent; the `--json` flag always wins.
+- `--no-color` disables ANSI colour in human output. A truthy `TOME_NO_COLOR`
+  (same truthy rule as above) does the same — a Tome-specific override layered
+  on top of the standard `NO_COLOR` signal and the `[output] color` config knob,
+  so you can force Tome's colour off without disabling colour in every other
+  `NO_COLOR`-respecting tool. Precedence (highest first): `--no-color` /
+  `TOME_NO_COLOR` → `NO_COLOR` → `[output] color` → auto (TTY).
+- `--workspace <name>` (short `-w`) runs the command against a named workspace.
+  When omitted, the resolver consults the `TOME_WORKSPACE` environment variable
+  (an empty value is ignored) and the project-marker walk before falling back to
+  the privileged `global` workspace. `TOME_WORKSPACE` is resolved by the scope
+  resolver (not as a clap `env=`), so it keeps its distinct `env` provenance in
+  `doctor` / `workspace info` / `list` / `current` diagnostics and the
+  empty-value-ignored behaviour.
 - `--non-interactive` auto-confirms every prompt-bearing command
   (`catalog remove`, `plugin enable`/`disable`, `models remove`,
   `telemetry reset`), equivalent to passing that command's `--force` / `--yes`.

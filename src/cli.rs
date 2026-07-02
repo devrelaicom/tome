@@ -45,12 +45,16 @@ Run `tome <command> --help` for details on any command.";
 )]
 pub struct Cli {
     /// Emit machine-readable JSON on stdout instead of human text.
+    /// Env: `TOME_JSON` (any truthy value — set, non-empty, and not
+    /// `0`/`false`/`no`/`off`) forces JSON when the flag is absent.
     #[arg(long, global = true)]
     pub json: bool,
 
     /// Disable ANSI colour in human output. Overrides `[output] color` in
     /// `~/.tome/config.toml` and the `NO_COLOR` environment variable.
-    /// The MCP path never emits colour regardless of this flag.
+    /// Env: `TOME_JSON`-style truthy `TOME_NO_COLOR` also forces colour off
+    /// (a Tome-specific override layered on top of the existing `NO_COLOR`
+    /// precedence). The MCP path never emits colour regardless of this flag.
     #[arg(long, global = true)]
     pub no_color: bool,
 
@@ -83,9 +87,10 @@ pub struct Cli {
 pub struct GlobalScopeArgs {
     /// Use the named workspace from the central registry. Must already
     /// exist; create via `tome workspace init <name>`. When omitted, the
-    /// resolver consults `TOME_WORKSPACE` and the project-marker walk
-    /// before falling back to the privileged `global` workspace.
-    #[arg(long, global = true, value_name = "NAME")]
+    /// resolver consults the `TOME_WORKSPACE` environment variable (an empty
+    /// value is ignored) and the project-marker walk before falling back to
+    /// the privileged `global` workspace. `-w` is the short form.
+    #[arg(short = 'w', long, global = true, value_name = "NAME")]
     pub workspace: Option<String>,
 }
 
@@ -724,6 +729,16 @@ pub struct McpArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct StatusArgs {
+    /// Report on this workspace instead of the resolved scope (defaults to
+    /// the resolved scope). Mirrors `workspace info [<name>]`. Must already
+    /// exist in the central registry (missing → exit 13).
+    // The Rust field is `name` (not `workspace`) deliberately: clap keys an arg
+    // on its field name, so naming it `workspace` would collide with the global
+    // `-w`/`--workspace` flag's id and shadow it on `tome status`. This matches
+    // `WorkspaceInfoArgs.name`, keeping `tome status -w <name>` working.
+    #[arg(value_name = "WORKSPACE")]
+    pub name: Option<String>,
+
     /// Rehash each installed model's primary file against its pinned
     /// SHA-256. Slower (several seconds for the reranker), but catches
     /// silent on-disk corruption.
@@ -1242,6 +1257,149 @@ impl Cli {
     }
 
     pub fn mode(&self) -> crate::output::Mode {
-        crate::output::Mode::from_flag(self.json)
+        // Precedence: the `--json` flag wins; when absent, a truthy `TOME_JSON`
+        // env var forces JSON. `env_truthy` (the shared SSOT, also used by
+        // `--non-interactive`/`TOME_NONINTERACTIVE`) never hard-errors on an
+        // unparsable value, unlike clap's boolish `env=` parser — the reason we
+        // gate here rather than annotate the flag with `env = "TOME_JSON"`.
+        crate::output::Mode::from_flag(self.json || crate::util::env_truthy("TOME_JSON"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::Mode;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    // Env is process-global. `mode()` reads `TOME_JSON`, so any test that sets
+    // it must serialise against every other env-mutating test in this binary.
+    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Set/unset `TOME_JSON` for the guard's lifetime, restoring the prior value
+    /// on drop. Caller MUST hold `ENV_MUTEX`.
+    struct JsonEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl JsonEnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let previous = std::env::var_os("TOME_JSON");
+            // SAFETY: caller holds ENV_MUTEX; no other test mutates env.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var("TOME_JSON", v),
+                    None => std::env::remove_var("TOME_JSON"),
+                }
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for JsonEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: ENV_MUTEX is held for the guard's lifetime.
+            unsafe {
+                match &self.previous {
+                    Some(v) => std::env::set_var("TOME_JSON", v),
+                    None => std::env::remove_var("TOME_JSON"),
+                }
+            }
+        }
+    }
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("cli parse")
+    }
+
+    #[test]
+    fn tome_json_env_forces_json_when_flag_absent() {
+        let _lock = lock_env();
+        let _env = JsonEnvGuard::set(Some("1"));
+        // No `--json` flag, but TOME_JSON=1 → Json.
+        assert_eq!(parse(&["tome", "status"]).mode(), Mode::Json);
+    }
+
+    #[test]
+    fn tome_json_unset_is_human_without_flag() {
+        let _lock = lock_env();
+        let _env = JsonEnvGuard::set(None);
+        assert_eq!(parse(&["tome", "status"]).mode(), Mode::Human);
+    }
+
+    #[test]
+    fn tome_json_flag_wins_even_without_env() {
+        let _lock = lock_env();
+        let _env = JsonEnvGuard::set(None);
+        // `--json` flag alone → Json, no env needed.
+        assert_eq!(parse(&["tome", "--json", "status"]).mode(), Mode::Json);
+    }
+
+    #[test]
+    fn tome_json_garbage_value_is_truthy() {
+        let _lock = lock_env();
+        // `env_truthy` semantics: any set, non-empty, non-falsey token is truthy.
+        let _env = JsonEnvGuard::set(Some("xyz"));
+        assert_eq!(parse(&["tome", "status"]).mode(), Mode::Json);
+    }
+
+    #[test]
+    fn tome_json_falsey_and_empty_are_human() {
+        let _lock = lock_env();
+        for falsey in ["0", "false", "no", "off", ""] {
+            let _env = JsonEnvGuard::set(Some(falsey));
+            assert_eq!(
+                parse(&["tome", "status"]).mode(),
+                Mode::Human,
+                "TOME_JSON={falsey:?} must not force JSON",
+            );
+        }
+    }
+
+    #[test]
+    fn short_w_parses_as_workspace() {
+        // `-w <name>` is the short form of `--workspace`.
+        let cli = parse(&["tome", "-w", "demo", "status"]);
+        assert_eq!(cli.scope.workspace.as_deref(), Some("demo"));
+        // The long form is unchanged.
+        let cli_long = parse(&["tome", "--workspace", "demo", "status"]);
+        assert_eq!(cli_long.scope.workspace.as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn status_positional_workspace_parses() {
+        // `status <workspace>` is a bare positional (not `--flag`).
+        let cli = parse(&["tome", "status", "other"]);
+        let Command::Status(args) = cli.command else {
+            panic!("expected Status");
+        };
+        assert_eq!(args.name.as_deref(), Some("other"));
+        assert!(!args.verify);
+        // No positional → None.
+        let cli_none = parse(&["tome", "status"]);
+        let Command::Status(args_none) = cli_none.command else {
+            panic!("expected Status");
+        };
+        assert_eq!(args_none.name, None);
+    }
+
+    #[test]
+    fn status_positional_does_not_shadow_global_workspace_flag() {
+        // Naming the positional field `name` (not `workspace`) keeps the global
+        // `-w`/`--workspace` flag usable on `tome status` in trailing position —
+        // the positional and the global flag no longer share a clap arg id.
+        let cli = parse(&["tome", "status", "-w", "ws", "pos"]);
+        assert_eq!(cli.scope.workspace.as_deref(), Some("ws"));
+        let Command::Status(args) = cli.command else {
+            panic!("expected Status");
+        };
+        assert_eq!(args.name.as_deref(), Some("pos"));
     }
 }

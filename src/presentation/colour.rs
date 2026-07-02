@@ -1,10 +1,19 @@
 //! Colour gating for human output.
 //!
 //! Colour is enabled according to the following precedence (highest wins):
-//! 1. `--no-color` CLI flag (forwarded via [`set_disabled`]) → always off,
+//! 1. `--no-color` CLI flag OR a truthy `TOME_NO_COLOR` env var (both
+//!    forwarded via [`set_disabled`]) → always off,
 //! 2. `NO_COLOR` environment variable (per <https://no-color.org>) → always off,
 //! 3. `[output] color` in `~/.tome/config.toml` (`always` → on, `never` → off),
 //! 4. auto: stdout is connected to a terminal.
+//!
+//! `TOME_NO_COLOR` is a Tome-specific truthy override (any set, non-empty value
+//! that is not `0`/`false`/`no`/`off`) layered ON TOP of the standard `NO_COLOR`
+//! signal — it lets a caller force Tome's colour off without also disabling
+//! colour in every other `NO_COLOR`-respecting tool. It is folded into the
+//! `--no-color` decision inside [`set_disabled`] rather than checked here so the
+//! shared [`crate::util::env_truthy`] SSOT (which the binary crate cannot reach
+//! directly) stays internal.
 //!
 //! The decision is computed once at startup via [`init`] and read by any code
 //! that wants to colour a fragment, so the result is consistent across the
@@ -28,8 +37,22 @@ static FORCE_DISABLED: OnceLock<bool> = OnceLock::new();
 
 /// Forward the `--no-color` flag from the CLI parser. Idempotent. Must be
 /// called before [`init`] for the flag to take effect.
+///
+/// A truthy `TOME_NO_COLOR` env var (the shared [`crate::util::env_truthy`]
+/// convention) is OR-ed into `disabled` here, so `main.rs` can keep calling
+/// `set_disabled(cli.no_color)` unchanged and the env override still forces
+/// colour off. Resolving the OR in this lib function keeps `env_truthy`
+/// `pub(crate)` — the binary crate cannot reach it directly.
 pub fn set_disabled(disabled: bool) {
-    let _ = FORCE_DISABLED.set(disabled);
+    let _ = FORCE_DISABLED.set(disabled_with_env(disabled));
+}
+
+/// The exact rule [`set_disabled`] applies: the `--no-color` flag OR a truthy
+/// `TOME_NO_COLOR`. Split out so the env-override wiring is unit-testable without
+/// touching the one-shot `FORCE_DISABLED`/`ENABLED` `OnceLock`s (which other
+/// tests in the same binary may already have locked in).
+fn disabled_with_env(no_color_flag: bool) -> bool {
+    no_color_flag || crate::util::env_truthy("TOME_NO_COLOR")
 }
 
 /// Pure colour-enabled resolver. Precedence (highest wins):
@@ -147,12 +170,96 @@ pub fn label(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::ColorMode;
+    use std::sync::Mutex;
 
     // ENABLED is a global OnceLock, so we cannot reliably re-initialise it
     // mid-process. These tests therefore exercise only the public predicate
     // forms and the pure `resolve_color` function; the actual gating logic
     // is covered by visual inspection plus the integration tests that pipe
     // `tome` to a file (FR-046).
+
+    // `TOME_NO_COLOR` is process-global; serialise every test that mutates it.
+    static NO_COLOR_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Panic-safe `TOME_NO_COLOR` override, mirroring the `cli.rs` test's
+    /// `JsonEnvGuard`. Captures the pre-test value on construction and
+    /// restores/removes it in `Drop`, so an intervening `assert!` panic can't
+    /// leak the var into a later test. Caller MUST hold `NO_COLOR_ENV_MUTEX` for
+    /// the guard's lifetime (the guard is about panic-safe restore, not
+    /// serialisation).
+    struct NoColorEnvGuard {
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl NoColorEnvGuard {
+        /// Capture the current value and leave the var untouched. `set`/`unset`
+        /// then mutate it in place under the held mutex.
+        fn capture() -> Self {
+            Self {
+                prior: std::env::var_os("TOME_NO_COLOR"),
+            }
+        }
+
+        fn set(&self, value: &str) {
+            // SAFETY: the caller holds NO_COLOR_ENV_MUTEX for the guard's life.
+            unsafe { std::env::set_var("TOME_NO_COLOR", value) };
+        }
+
+        fn unset(&self) {
+            // SAFETY: the caller holds NO_COLOR_ENV_MUTEX for the guard's life.
+            unsafe { std::env::remove_var("TOME_NO_COLOR") };
+        }
+    }
+
+    impl Drop for NoColorEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: NO_COLOR_ENV_MUTEX is still held by the test for the
+            // guard's lifetime.
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var("TOME_NO_COLOR", v),
+                    None => std::env::remove_var("TOME_NO_COLOR"),
+                }
+            }
+        }
+    }
+
+    /// The `TOME_NO_COLOR` env override folded into `set_disabled` via
+    /// `disabled_with_env`: a truthy value forces colour off even when the
+    /// `--no-color` flag is absent; the flag alone still forces off.
+    #[test]
+    fn tome_no_color_env_ors_into_disabled() {
+        let _lock = NO_COLOR_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // RAII: `TOME_NO_COLOR` is restored/removed on drop even if an
+        // assertion below panics — no manual restore tail to skip.
+        let env = NoColorEnvGuard::capture();
+
+        env.set("1");
+        assert!(
+            disabled_with_env(false),
+            "truthy TOME_NO_COLOR must disable colour even without --no-color",
+        );
+
+        env.set("0");
+        assert!(
+            !disabled_with_env(false),
+            "falsey TOME_NO_COLOR must not disable colour on its own",
+        );
+        assert!(
+            disabled_with_env(true),
+            "--no-color flag still forces off regardless of env",
+        );
+
+        env.unset();
+        assert!(
+            !disabled_with_env(false),
+            "unset TOME_NO_COLOR + no flag → not disabled",
+        );
+        assert!(
+            disabled_with_env(true),
+            "--no-color flag forces off with env unset",
+        );
+    }
 
     /// Verify the full precedence chain of `resolve_color`:
     /// flag(--no-color) > NO_COLOR env > config(always/never) > auto(tty)
