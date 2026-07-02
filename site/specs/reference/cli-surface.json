@@ -331,6 +331,12 @@
       "flags": [
         "--verbose"
       ]
+    },
+    "completions": {
+      "subcommands": {},
+      "flags": [
+        "--verbose"
+      ]
     }
   },
   "globalFlags": [

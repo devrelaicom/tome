@@ -105,6 +105,10 @@ required-features = ["registry-refresh"]
 [dependencies]
 # Phase 1 — unchanged
 clap = { version = "4", features = ["derive"] }
+# Shell-completion script generation (`tome completions <shell>`, issue #322).
+# Version-matched to clap 4; its only significant dependency is `clap` itself,
+# already present. Apache-2.0/MIT — on the licence allowlist.
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 serde_json = { version = "1", features = ["preserve_order"] }

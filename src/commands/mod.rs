@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod completions;
 pub mod config;
 pub mod convert;
 pub mod create;

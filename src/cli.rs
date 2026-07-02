@@ -168,6 +168,21 @@ pub enum Command {
     /// Both are read-only. Setting values (`config set`) is a fast-follow.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Generate a shell completion script (bash/zsh/fish/powershell/elvish) on
+    /// stdout. This is a pure static operation over the command tree — it needs
+    /// no HOME, index, or config, so it works during shell setup before Tome is
+    /// configured. Example: `tome completions zsh > ~/.zfunc/_tome`.
+    Completions(CompletionsArgs),
+}
+
+/// `tome completions <shell>` — emit a completion script for the named shell.
+#[derive(Debug, clap::Args)]
+pub struct CompletionsArgs {
+    /// The shell to generate completions for. `clap_complete::Shell` is itself a
+    /// `ValueEnum` (bash/zsh/fish/powershell/elvish), so an unknown shell is a
+    /// parse-time usage error (exit 2) that lists the valid values.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 /// `tome config <subcommand>` — inspect and validate `~/.tome/config.toml`.
