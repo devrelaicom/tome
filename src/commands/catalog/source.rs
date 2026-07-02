@@ -13,7 +13,9 @@
 //!
 //! A forge-prefixed value whose remainder does not look like `owner/repo`
 //! (e.g. `gl:foo`) is NOT expanded — it falls through to the local-path
-//! branch so a malformed shorthand never silently produces a bad URL.
+//! branch and is treated as a local path (`file://<cwd>/gl:foo`). That path
+//! won't exist, so the later `git clone` fails clearly; we never silently
+//! synthesise a forge URL from a malformed shorthand.
 
 use std::path::{Path, PathBuf};
 
@@ -32,8 +34,11 @@ pub fn resolve(input: &str) -> Result<String, TomeError> {
 
     // Forge-prefixed shorthands: `gh:`/`gl:`/`bb:owner/repo`. The remainder
     // must still look like `owner/repo`; if it doesn't (e.g. `gl:foo`) we do
-    // NOT expand it — fall through to the local-path branch so a malformed
-    // shorthand fails clearly rather than producing a bad URL.
+    // NOT expand it — fall through to the local-path branch, where it is
+    // treated as a local path (`file://<cwd>/gl:foo`) and the later
+    // `git clone` fails clearly rather than us producing a bad forge URL.
+    // The host in each pair is HARDCODED and must stay the sole authority:
+    // everything after the prefix is a path (`{owner}/{repo}`), never a host.
     for (prefix, host) in [
         ("gh:", "github.com"),
         ("gl:", "gitlab.com"),
@@ -129,6 +134,45 @@ mod tests {
             r
         );
         assert!(!r.contains("gitlab.com"), "got {}", r);
+    }
+
+    /// Security-critical: the forge host is HARDCODED — everything after the
+    /// prefix is a PATH (`{owner}/{repo}`), never a host. These assertions pin
+    /// that authority so a future refactor of `looks_like_owner_repo` (or the
+    /// expansion loop) can't silently let attacker-controlled input move the
+    /// resolved host off the intended forge.
+    #[test]
+    fn forge_prefix_host_is_immutable() {
+        // A host-shaped first segment is still just the OWNER path segment —
+        // the resolved host stays `gitlab.com`, and `evil.com` is appended as
+        // path, never substituted as the authority.
+        assert_eq!(
+            resolve("gl:evil.com/x").unwrap(),
+            "https://gitlab.com/evil.com/x",
+        );
+
+        // Three-segment input is not `owner/repo` (`parts.len() != 2`), so it
+        // must NOT expand — it falls through to the local-path branch. In
+        // particular it must never yield a two-slash forge URL where the
+        // trailing segment could read as a path escape.
+        let three = resolve("gh:a/b/c").unwrap();
+        assert!(
+            three.starts_with("file://"),
+            "`gh:a/b/c` (3 segments) must fall through to a local path; got {}",
+            three,
+        );
+        assert!(!three.contains("github.com"), "got {}", three);
+
+        // An `@` in the remainder isn't a valid `owner/repo` character, so a
+        // userinfo-injection-ish shorthand does NOT expand — it falls through
+        // and never synthesises a `user@host`-style forge URL.
+        let at = resolve("gl:a@b/c").unwrap();
+        assert!(
+            at.starts_with("file://"),
+            "`gl:a@b/c` must fall through to a local path; got {}",
+            at,
+        );
+        assert!(!at.contains("gitlab.com"), "got {}", at);
     }
 
     #[test]
