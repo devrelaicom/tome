@@ -156,7 +156,38 @@ pub fn resolve_query_args(args: QueryArgs, qcfg: &crate::config::QueryConfig) ->
     }
 }
 
+/// The single Usage message for a missing / empty / whitespace-only query,
+/// shared by the CLI `run` gate and the `pipeline` backstop so a user hits the
+/// SAME helpful guidance whether they type bare `tome query`, `-q ""`, or a
+/// whitespace-only positional word.
+const EMPTY_QUERY_USAGE: &str =
+    "provide a query: positional words (`tome query reset a counter`), or -q/--query <text>";
+
+/// Resolve the effective query string from the two mutually-exclusive input
+/// forms: the single-string `-q`/`--query` (highest precedence) or the variadic
+/// positional words joined with a single space. `None` when neither was given
+/// (clap's `conflicts_with` guarantees they are never both set). This is the
+/// single source of truth for the CLI `run` usage-gate AND the `pipeline`
+/// backstop, so both surfaces derive the query identically.
+///
+/// The positional `Vec<String>` is joined verbatim (single spaces). A caller
+/// wanting exact whitespace uses `-q "..."`. An empty joined string (e.g. a
+/// single empty positional token) is still `Some("")`; the downstream
+/// `pipeline` trims and rejects an empty/whitespace query as a `Usage` error.
+pub fn effective_query_text(args: &QueryArgs) -> Option<String> {
+    args.query
+        .clone()
+        .or_else(|| (!args.text.is_empty()).then(|| args.text.join(" ")))
+}
+
 pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+    // Gate on the query input BEFORE any I/O: neither positional words nor
+    // `-q`/`--query` given is a usage error (the two forms are mutually
+    // exclusive by clap `conflicts_with`, so at most one is ever set).
+    if effective_query_text(&args).is_none() {
+        return Err(TomeError::Usage(EMPTY_QUERY_USAGE.into()));
+    }
+
     let paths = Paths::resolve()?;
     // Strict load of the global config so a malformed `config.toml` surfaces
     // as exit 5 rather than silently falling through to defaults. The vestigial
@@ -469,9 +500,17 @@ fn telemetry_attribution_enabled() -> bool {
 /// CLI callers go through [`run_with_deps`] which calls this then
 /// emits per `mode`.
 pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, TomeError> {
-    let text = args.text.trim();
+    // Derive the effective query string from the positional words / `-q` form
+    // (the same SSOT the CLI `run` gate uses), then trim. A missing or
+    // whitespace-only query is a `Usage` error — this is the backstop for
+    // direct library / MCP callers that don't run the `run` gate.
+    let query_text = effective_query_text(args).unwrap_or_default();
+    let text = query_text.trim();
     if text.is_empty() {
-        return Err(TomeError::Usage("query text is empty".into()));
+        // Same rich guidance as the `run` gate (shared SSOT), so `tome query
+        // -q ""` and a whitespace-only positional both get the actionable form
+        // rather than a terse "query text is empty".
+        return Err(TomeError::Usage(EMPTY_QUERY_USAGE.into()));
     }
 
     let conn = open_index_for_read(deps.paths, deps.scope)?;
@@ -506,9 +545,19 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
     } else {
         top_k_resolved
     };
+    // Build the multi-value filters from the arg vecs. Each empty vec is "no
+    // filter for that dimension". `--kind` maps to `EntryKind` via the shared
+    // `tier::set::kind_of` (reused, not duplicated). Borrow the `String`s as
+    // `&str` — `filters` lives only for the `knn` call below.
     let filters = QueryFilters {
-        catalog: args.catalog.as_deref(),
-        plugin: args.plugin.as_deref(),
+        catalogs: args.catalog.iter().map(String::as_str).collect(),
+        plugins: args.plugin.iter().map(String::as_str).collect(),
+        kinds: args
+            .kind
+            .iter()
+            .copied()
+            .map(crate::commands::tier::set::kind_of)
+            .collect(),
     };
     let candidates = knn(
         &conn,
@@ -608,15 +657,22 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
     })
 }
 
-/// Validate `--catalog` / `--plugin` against the `workspace_catalogs` DB
-/// enrolment + the on-disk catalog manifests.
+/// Validate the (repeatable) `--catalog` / `--plugin` filters against the
+/// `workspace_catalogs` DB enrolment + the on-disk catalog manifests.
 ///
 /// FF2: catalog existence is resolved from the DB (`config.toml [catalogs]`
 /// is never written in production, so reading it failed every filter on a
-/// fresh install). Costs one enrolment lookup plus at most one TOML parse
-/// per enrolled catalog when a `--plugin` filter is set — bounded and cheap
-/// relative to the query itself. The `<catalog>/<plugin>` vs bare error
-/// message semantics are preserved.
+/// fresh install). #319: `--catalog`/`--plugin` are now repeatable, so EACH
+/// named catalog must be enrolled (first unknown → `CatalogNotFound`, exit 3)
+/// and EACH named plugin must exist in the in-scope catalog set (first unknown
+/// → `PluginNotFound`). Bounded and cheap relative to the query: one enrolment
+/// lookup per catalog + at most one TOML parse per enrolled catalog when a
+/// `--plugin` filter is set. The `<catalog>/<plugin>` vs bare error message
+/// semantics are preserved for the single-`--catalog` case.
+///
+/// `--kind` needs no validation: it is a closed `ValueEnum` (clap rejects an
+/// unknown kind at parse time, exit 2), and every accepted kind is a valid
+/// column value — an in-scope-but-absent kind just returns no rows.
 fn validate_filters(
     args: &QueryArgs,
     conn: &rusqlite::Connection,
@@ -625,44 +681,57 @@ fn validate_filters(
 ) -> Result<(), TomeError> {
     use crate::index::workspace_catalogs;
 
-    if let Some(catalog) = args.catalog.as_deref()
-        && workspace_catalogs::find(conn, workspace_name, catalog)?.is_none()
-    {
-        return Err(TomeError::CatalogNotFound(catalog.to_owned()));
-    }
-
-    let Some(plugin) = args.plugin.as_deref() else {
-        return Ok(());
-    };
-
-    // Resolve the set of enrolments to scan: the one named catalog (already
-    // confirmed to exist above), or every enrolment in the workspace when no
-    // `--catalog` was given.
-    let enrolments = match args.catalog.as_deref() {
-        Some(c) => workspace_catalogs::find(conn, workspace_name, c)?
-            .into_iter()
-            .collect(),
-        None => workspace_catalogs::list_for_workspace(conn, workspace_name)?,
-    };
-
-    for enrolment in &enrolments {
-        let clone_dir = paths.cache_dir_for(&enrolment.url);
-        let Some(manifest) = read_catalog_manifest(&clone_dir) else {
-            continue;
-        };
-        if manifest.plugins.iter().any(|p| p.name == plugin) {
-            return Ok(());
+    // Each named catalog must be enrolled in the resolved workspace. Fail on the
+    // FIRST unknown so the exit code (3) and the offending name are unambiguous.
+    for catalog in &args.catalog {
+        if workspace_catalogs::find(conn, workspace_name, catalog)?.is_none() {
+            return Err(TomeError::CatalogNotFound(catalog.clone()));
         }
     }
 
-    // Scope the error message: when both filters were given, the
-    // `<catalog>/<plugin>` form is the precise identity. Otherwise the bare
-    // plugin name is enough — there is no catalog scope to attach.
-    let message = match args.catalog.as_deref() {
-        Some(c) => format!("{c}/{plugin}"),
-        None => plugin.to_owned(),
+    if args.plugin.is_empty() {
+        return Ok(());
+    }
+
+    // Resolve the set of enrolments to scan for plugin existence: the named
+    // catalogs (all already confirmed enrolled above), or every enrolment in
+    // the workspace when no `--catalog` was given. Collect once and reuse for
+    // every named plugin.
+    let enrolments = if args.catalog.is_empty() {
+        workspace_catalogs::list_for_workspace(conn, workspace_name)?
+    } else {
+        let mut acc = Vec::with_capacity(args.catalog.len());
+        for c in &args.catalog {
+            if let Some(e) = workspace_catalogs::find(conn, workspace_name, c)? {
+                acc.push(e);
+            }
+        }
+        acc
     };
-    Err(TomeError::PluginNotFound(message))
+
+    // Parse each in-scope catalog manifest at most once, then check every named
+    // plugin against the union of plugin names. A `--plugin` value matching in
+    // ANY in-scope catalog is valid (mirrors the `IN (...)` filter semantics).
+    let plugin_names: std::collections::HashSet<String> = enrolments
+        .iter()
+        .filter_map(|e| read_catalog_manifest(&paths.cache_dir_for(&e.url)))
+        .flat_map(|m| m.plugins.into_iter().map(|p| p.name))
+        .collect();
+
+    for plugin in &args.plugin {
+        if !plugin_names.contains(plugin) {
+            // Scope the error message: with exactly one `--catalog` the
+            // `<catalog>/<plugin>` form is the precise identity. With zero or
+            // several catalogs the bare plugin name is the unambiguous handle.
+            let message = match args.catalog.as_slice() {
+                [c] => format!("{c}/{plugin}"),
+                _ => plugin.clone(),
+            };
+            return Err(TomeError::PluginNotFound(message));
+        }
+    }
+
+    Ok(())
 }
 
 /// Run drift detection. Embedder drift converts to a hard error; reranker

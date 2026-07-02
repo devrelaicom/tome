@@ -34,6 +34,7 @@ use rusqlite::{Connection, params};
 use tempfile::TempDir;
 use tome::index::query::{Candidate, QueryFilters};
 use tome::index::{self, OpenOptions, knn};
+use tome::plugin::identity::EntryKind;
 
 const DIM: usize = 384;
 const MATCH_CATALOG: &str = "match-cat";
@@ -107,6 +108,8 @@ fn global_ws_id(conn: &Connection) -> i64 {
 /// `searchable` and `enrol` are independent so a single helper can fabricate
 /// every exclusion class the post-JOIN filters care about: wrong catalog
 /// (via `catalog`), `searchable = 0`, and "not enrolled in the workspace".
+/// `kind` is the `s.kind` column literal (`skill`/`command`/`agent`) so the
+/// `--kind` (`IN (...)`) filter can be exercised across kinds.
 #[allow(clippy::too_many_arguments)]
 fn insert_row(
     conn: &Connection,
@@ -114,6 +117,7 @@ fn insert_row(
     catalog: &str,
     plugin: &str,
     name: &str,
+    kind: &str,
     embedding: Vec<u8>,
     searchable: bool,
     enrol: bool,
@@ -122,7 +126,7 @@ fn insert_row(
         "INSERT INTO skills
             (catalog, plugin, name, kind, description, plugin_version,
              path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
-         VALUES (?1, ?2, ?3, 'skill', 'desc', '0.0.0', ?4, ?5, ?6, 0, NULL, 0)",
+         VALUES (?1, ?2, ?3, ?7, 'desc', '0.0.0', ?4, ?5, ?6, 0, NULL, 0)",
         params![
             catalog,
             plugin,
@@ -132,13 +136,14 @@ fn insert_row(
             // hash index honest; not load-bearing for the query.
             format!("hash-{catalog}-{name}"),
             searchable as i64,
+            kind,
         ],
     )
     .expect("insert skill");
     let skill_id: i64 = conn
         .query_row(
-            "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind='skill' AND name=?3",
-            params![catalog, plugin, name],
+            "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind=?4 AND name=?3",
+            params![catalog, plugin, name, kind],
             |r| r.get(0),
         )
         .expect("skill id");
@@ -182,6 +187,7 @@ fn build_corpus(conn: &Connection, n_decoys: usize, n_matches: usize) -> Vec<Str
             DECOY_CATALOG,
             "decoy-plugin",
             &format!("decoy-{i}"),
+            "skill",
             decoy_vector_bytes(),
             true,
             true,
@@ -198,6 +204,7 @@ fn build_corpus(conn: &Connection, n_decoys: usize, n_matches: usize) -> Vec<Str
             MATCH_CATALOG,
             "match-plugin",
             &name,
+            "skill",
             match_vector_bytes(),
             true,
             true,
@@ -209,8 +216,8 @@ fn build_corpus(conn: &Connection, n_decoys: usize, n_matches: usize) -> Vec<Str
 
 fn run_knn(conn: &Connection, top_k: u32) -> Vec<Candidate> {
     let filters = QueryFilters {
-        catalog: Some(MATCH_CATALOG),
-        plugin: None,
+        catalogs: vec![MATCH_CATALOG],
+        ..Default::default()
     };
     knn(conn, "global", &query_vector(), top_k, &filters).expect("knn")
 }
@@ -343,6 +350,7 @@ fn widen_exhaustion_with_zero_matches_returns_empty_not_error() {
             MATCH_CATALOG,
             "p",
             &format!("hidden-{i}"),
+            "skill",
             match_vector_bytes(),
             false, // searchable = 0 → excluded by `s.searchable = 1`
             true,
@@ -353,5 +361,209 @@ fn widen_exhaustion_with_zero_matches_returns_empty_not_error() {
     assert!(
         hits.is_empty(),
         "all-unsearchable corpus must yield zero hits (no error), got {hits:?}",
+    );
+}
+
+// ---- #319: repeatable --catalog/--plugin + --kind filters ----------------
+//
+// These exercise the multi-value `IN (...)` filters end-to-end against a real
+// on-disk index: insert enrolled, searchable rows spanning several plugins and
+// kinds (all at the same cosine distance so ordering never hides a row), then
+// assert each filter dimension narrows to exactly the expected set. The rows
+// share the MATCH_CATALOG so the catalog dimension is neutral here.
+
+/// Insert an enrolled, searchable match-vector row of `kind` in `plugin`.
+fn insert_kind_row(conn: &Connection, ws: i64, plugin: &str, name: &str, kind: &str) {
+    insert_row(
+        conn,
+        ws,
+        MATCH_CATALOG,
+        plugin,
+        name,
+        kind,
+        match_vector_bytes(),
+        true,
+        true,
+    );
+}
+
+fn kinds_of(hits: &[Candidate]) -> std::collections::HashSet<&'static str> {
+    hits.iter().map(|c| c.kind.as_str()).collect()
+}
+
+/// `--kind skill` returns only skills; a corpus with skills + commands narrows
+/// to the skills alone.
+#[test]
+fn kind_filter_single_returns_only_that_kind() {
+    let (_tmp, conn) = fresh_index();
+    let ws = global_ws_id(&conn);
+    insert_kind_row(&conn, ws, "p", "sk-1", "skill");
+    insert_kind_row(&conn, ws, "p", "sk-2", "skill");
+    insert_kind_row(&conn, ws, "p", "cmd-1", "command");
+
+    let filters = QueryFilters {
+        kinds: vec![EntryKind::Skill],
+        ..Default::default()
+    };
+    let hits = knn(&conn, "global", &query_vector(), 10, &filters).expect("knn");
+    assert_eq!(
+        hits.len(),
+        2,
+        "only the two skills must survive, got {hits:?}"
+    );
+    assert_eq!(
+        kinds_of(&hits),
+        std::collections::HashSet::from(["skill"]),
+        "every returned row must be a skill",
+    );
+}
+
+/// `--kind skill --kind command` returns both kinds (OR within the dimension).
+#[test]
+fn kind_filter_multi_returns_the_union_of_kinds() {
+    let (_tmp, conn) = fresh_index();
+    let ws = global_ws_id(&conn);
+    insert_kind_row(&conn, ws, "p", "sk-1", "skill");
+    insert_kind_row(&conn, ws, "p", "cmd-1", "command");
+    // Agents are indexed with searchable = 0 in production; to prove the
+    // union is exactly {skill, command} we simply do not insert an agent row.
+
+    let filters = QueryFilters {
+        kinds: vec![EntryKind::Skill, EntryKind::Command],
+        ..Default::default()
+    };
+    let hits = knn(&conn, "global", &query_vector(), 10, &filters).expect("knn");
+    assert_eq!(hits.len(), 2, "both the skill and the command must survive");
+    assert_eq!(
+        kinds_of(&hits),
+        std::collections::HashSet::from(["skill", "command"]),
+        "the union of the two requested kinds must come back",
+    );
+}
+
+/// A `--kind` value with no matching searchable rows returns empty, NOT an
+/// error — e.g. `--kind agent` over a searchable corpus that holds no agents.
+#[test]
+fn kind_filter_with_no_matching_rows_returns_empty_not_error() {
+    let (_tmp, conn) = fresh_index();
+    let ws = global_ws_id(&conn);
+    insert_kind_row(&conn, ws, "p", "sk-1", "skill");
+    insert_kind_row(&conn, ws, "p", "cmd-1", "command");
+
+    let filters = QueryFilters {
+        kinds: vec![EntryKind::Agent],
+        ..Default::default()
+    };
+    let hits = knn(&conn, "global", &query_vector(), 10, &filters).expect("knn");
+    assert!(
+        hits.is_empty(),
+        "a kind with no searchable rows must yield [] (no error), got {hits:?}",
+    );
+}
+
+/// `--plugin a --plugin b` returns rows from EITHER plugin (OR within the
+/// plugin dimension), and excludes a third plugin.
+#[test]
+fn plugin_filter_multi_returns_union_of_named_plugins() {
+    let (_tmp, conn) = fresh_index();
+    let ws = global_ws_id(&conn);
+    insert_kind_row(&conn, ws, "plugin-a", "a-1", "skill");
+    insert_kind_row(&conn, ws, "plugin-b", "b-1", "skill");
+    insert_kind_row(&conn, ws, "plugin-c", "c-1", "skill"); // excluded
+
+    let filters = QueryFilters {
+        plugins: vec!["plugin-a", "plugin-b"],
+        ..Default::default()
+    };
+    let hits = knn(&conn, "global", &query_vector(), 10, &filters).expect("knn");
+    let plugins: std::collections::HashSet<&str> = hits.iter().map(|c| c.plugin.as_str()).collect();
+    assert_eq!(
+        plugins,
+        std::collections::HashSet::from(["plugin-a", "plugin-b"]),
+        "only the two named plugins may appear, got {plugins:?}",
+    );
+    assert_eq!(hits.len(), 2, "exactly one row per named plugin");
+}
+
+/// A SINGLE `--plugin` value behaves exactly as the pre-#319 `= ?` filter did:
+/// only that plugin's rows come back. Back-compat guard for the `IN (?4)` shape.
+#[test]
+fn plugin_filter_single_value_is_back_compatible() {
+    let (_tmp, conn) = fresh_index();
+    let ws = global_ws_id(&conn);
+    insert_kind_row(&conn, ws, "plugin-a", "a-1", "skill");
+    insert_kind_row(&conn, ws, "plugin-b", "b-1", "skill");
+
+    let filters = QueryFilters {
+        plugins: vec!["plugin-a"],
+        ..Default::default()
+    };
+    let hits = knn(&conn, "global", &query_vector(), 10, &filters).expect("knn");
+    assert_eq!(
+        hits.len(),
+        1,
+        "a single --plugin filters to exactly that plugin"
+    );
+    assert_eq!(hits[0].plugin, "plugin-a");
+}
+
+/// The three dimensions AND together: `--plugin` ∩ `--kind` narrows on both.
+#[test]
+fn combined_plugin_and_kind_filters_and_together() {
+    let (_tmp, conn) = fresh_index();
+    let ws = global_ws_id(&conn);
+    insert_kind_row(&conn, ws, "plugin-a", "a-skill", "skill");
+    insert_kind_row(&conn, ws, "plugin-a", "a-command", "command");
+    insert_kind_row(&conn, ws, "plugin-b", "b-skill", "skill");
+
+    // plugin-a AND kind=skill → exactly the one row.
+    let filters = QueryFilters {
+        plugins: vec!["plugin-a"],
+        kinds: vec![EntryKind::Skill],
+        ..Default::default()
+    };
+    let hits = knn(&conn, "global", &query_vector(), 10, &filters).expect("knn");
+    assert_eq!(
+        hits.len(),
+        1,
+        "plugin-a ∩ skill must be exactly one row, got {hits:?}"
+    );
+    assert_eq!(hits[0].name, "a-skill");
+    assert_eq!(hits[0].plugin, "plugin-a");
+    assert_eq!(hits[0].kind, EntryKind::Skill);
+}
+
+/// Multi-catalog: `--catalog x --catalog y` returns rows from either catalog
+/// and excludes a third. (`insert_kind_row` pins MATCH_CATALOG, so insert the
+/// distinct catalogs directly via `insert_row`.)
+#[test]
+fn catalog_filter_multi_returns_union_of_named_catalogs() {
+    let (_tmp, conn) = fresh_index();
+    let ws = global_ws_id(&conn);
+    for (cat, name) in [("cat-a", "a-1"), ("cat-b", "b-1"), ("cat-c", "c-1")] {
+        insert_row(
+            &conn,
+            ws,
+            cat,
+            "p",
+            name,
+            "skill",
+            match_vector_bytes(),
+            true,
+            true,
+        );
+    }
+
+    let filters = QueryFilters {
+        catalogs: vec!["cat-a", "cat-b"],
+        ..Default::default()
+    };
+    let hits = knn(&conn, "global", &query_vector(), 10, &filters).expect("knn");
+    let catalogs: std::collections::HashSet<&str> =
+        hits.iter().map(|c| c.catalog.as_str()).collect();
+    assert_eq!(
+        catalogs,
+        std::collections::HashSet::from(["cat-a", "cat-b"]),
+        "only the two named catalogs may appear, got {catalogs:?}",
     );
 }

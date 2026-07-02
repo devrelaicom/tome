@@ -334,11 +334,19 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // a strict floor would silently drop results with no visible signal to the
     // caller.  Leave `strict: false` / `min_score: None`.
     let no_rerank = !cfg.query.rerank.unwrap_or(true);
+    // #319 widened `QueryArgs` input fields to multi-value. The MCP tool keeps
+    // its single-value surface (`Input.query`/`catalog`/`plugin` are one each),
+    // so map them onto the vec/`query` forms: the query goes through the
+    // single-string `query` slot (leaving `text` empty), and the optional
+    // catalog/plugin become at-most-one-element vecs (an absent filter → empty
+    // vec → no filter). `--kind` has no MCP arg, so `kind` stays empty.
     let args = QueryArgs {
-        text: input.query.clone(),
+        text: Vec::new(),
+        query: Some(input.query.clone()),
         top_k: Some(effective_top_k),
-        catalog: input.catalog.clone(),
-        plugin: input.plugin.clone(),
+        catalog: input.catalog.clone().into_iter().collect(),
+        plugin: input.plugin.clone().into_iter().collect(),
+        kind: Vec::new(),
         no_rerank,
         strict: false,
         min_score: None,

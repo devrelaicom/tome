@@ -235,8 +235,8 @@ fn real_model_filtered_knn_returns_min_top_k_matches() {
 
     let top_k = 3u32;
     let filters = QueryFilters {
-        catalog: Some("target"),
-        plugin: None,
+        catalogs: vec!["target"],
+        ..Default::default()
     };
     let query_vec = embedder
         .embed("how do I run a database migration")

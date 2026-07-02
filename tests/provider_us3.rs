@@ -80,10 +80,12 @@ fn query_with_reranker(
     let config = Config::default();
     let embedder = tome::embedding::stub::StubEmbedder::new();
     let args = QueryArgs {
-        text: "anything".to_string(),
+        text: vec!["anything".to_string()],
+        query: None,
         top_k: Some(10),
-        catalog: None,
-        plugin: None,
+        catalog: Vec::new(),
+        plugin: Vec::new(),
+        kind: Vec::new(),
         no_rerank: reranker.is_none(),
         strict: false,
         min_score: None,

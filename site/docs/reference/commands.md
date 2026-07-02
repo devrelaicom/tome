@@ -68,14 +68,24 @@ exactly what to allow; `--autofix` applies mechanically-safe lint fixes.
 
 Semantic search across enabled skills and commands (KNN + reranker).
 
+The query text is given as one or more positional words, joined with a single
+space, so `tome query reset a counter` works without quoting. Alternatively pass
+a single quoted string with `-q`/`--query` (`tome query -q "reset a counter"`)
+when the query contains flag-like or shell-significant tokens. The two forms are
+mutually exclusive; giving neither is a usage error.
+
 | Flag | Meaning |
 | --- | --- |
+| `-q`, `--query <text>` | The query as a single quoted string, instead of positional words. |
 | `--top-k <n>` | Cap on returned results (post-rerank when reranking). Default `10`. |
-| `--catalog <name>` | Restrict the search to a single catalog. |
-| `--plugin <name>` | Restrict the search to a single plugin (across all catalogs unless `--catalog` is also set). |
+| `--catalog <name>` | Restrict the search to a catalog. Repeatable: pass `--catalog` several times to include entries from any of the named catalogs. |
+| `--plugin <name>` | Restrict the search to a plugin (across all catalogs unless `--catalog` is also set). Repeatable: include entries from any of the named plugins. |
+| `--kind <kind>` | Restrict the search to an entry kind (`skill`, `command`, or `agent`). Repeatable. Note that `query` only searches indexed, searchable entries, so `--kind agent` typically returns nothing. |
 | `--no-rerank` | Skip the reranker stage; scores are raw cosine similarity. |
 | `--strict` | Apply the score threshold and exit `40` on an empty result. |
 | `--min-score <s>` | Minimum score to retain a result (only enforced with `--strict`). Default `0.0` with the reranker on, `0.5` with `--no-rerank`. |
+
+Example: `tome query reset a counter --kind skill --plugin a --plugin b`.
 
 See [Search](../using-tome/search.md).
 

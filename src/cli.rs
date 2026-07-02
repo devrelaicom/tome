@@ -250,12 +250,19 @@ pub struct TierClearArgs {
     pub kind: Option<TierKindArg>,
 }
 
-/// CLI-facing entry-kind selector for tier disambiguation (tiers never apply to
-/// agents, so only skill/command are offered).
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+/// CLI-facing entry-kind selector.
+///
+/// Shared between the tier commands (`tome tier set`/`clear`, where it
+/// disambiguates a `<plugin>/<name>` collision) and `tome query --kind`. Tiers
+/// never apply to agents — `tiered_entries_for_workspace` hard-filters to
+/// `('skill', 'command')` — so passing `--kind agent` to a tier command simply
+/// resolves to zero matches (`EntryNotFound`); the variant exists for the query
+/// surface, which does filter on `agent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum TierKindArg {
     Skill,
     Command,
+    Agent,
 }
 
 /// `tome telemetry <subcommand>` — control the local-first telemetry subsystem.
@@ -1035,9 +1042,24 @@ pub struct PluginShowArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct QueryArgs {
-    /// The query text to search for. Embedded as-is — no name/description
-    /// composition is applied.
-    pub text: String,
+    /// The query text to search for, as one or more positional words. Multiple
+    /// words are joined with a single space, so `tome query reset a counter`
+    /// works unquoted. Embedded as-is — no name/description composition is
+    /// applied. Mutually exclusive with `-q`/`--query`; when neither is given
+    /// the command exits with a usage error.
+    #[arg(value_name = "QUERY", num_args = 0..)]
+    pub text: Vec<String>,
+
+    /// The query text as a single (already-quoted) string — an alternative to
+    /// the positional words for when the query itself contains flag-like or
+    /// shell-significant tokens. Mutually exclusive with the positional form.
+    #[arg(
+        short = 'q',
+        long = "query",
+        value_name = "QUERY",
+        conflicts_with = "text"
+    )]
+    pub query: Option<String>,
 
     /// Cap on returned results (post-rerank when reranking).
     /// When absent, falls back to `[query] top_k` in `~/.tome/config.toml`,
@@ -1045,14 +1067,24 @@ pub struct QueryArgs {
     #[arg(long = "top-k")]
     pub top_k: Option<u32>,
 
-    /// Restrict the search to a single catalog.
-    #[arg(long)]
-    pub catalog: Option<String>,
+    /// Restrict the search to one or more catalogs (repeatable). Results are
+    /// limited to entries whose catalog is any of the given names. A single
+    /// `--catalog x` behaves exactly as before.
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub catalog: Vec<String>,
 
-    /// Restrict the search to a single plugin (across all enabled catalogs
-    /// unless `--catalog` is also set).
-    #[arg(long)]
-    pub plugin: Option<String>,
+    /// Restrict the search to one or more plugins (repeatable, across all
+    /// enabled catalogs unless `--catalog` is also set). Results are limited to
+    /// entries whose plugin is any of the given names.
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub plugin: Vec<String>,
+
+    /// Restrict the search to one or more entry kinds (`skill`, `command`, or
+    /// `agent`; repeatable). Note that `query` only ever searches indexed,
+    /// searchable entries, so `--kind agent` typically returns nothing (agents
+    /// are not searchable).
+    #[arg(long, value_enum, action = clap::ArgAction::Append)]
+    pub kind: Vec<TierKindArg>,
 
     /// Skip the reranker stage; scores are cosine similarity.
     #[arg(long = "no-rerank")]

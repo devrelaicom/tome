@@ -174,6 +174,39 @@ fn tier_set_unknown_entry_exits_27() {
     );
 }
 
+/// `--kind agent` is INERT for the tier commands. `skill-a` is a real, existing
+/// entry (see `tier_set_then_list_roundtrip`), but `tome tier set ... --kind
+/// agent` filters against `tiered_entries_for_workspace`, which hard-filters to
+/// `kind IN ('skill','command')` — so the agent-kind filter matches zero rows
+/// and resolves to `EntryNotFound` (exit 27). This documents that the `Agent`
+/// variant added to `TierKindArg` for `tome query --kind` never tiers anything.
+#[test]
+fn tier_set_kind_agent_is_inert_and_exits_27() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled(&env, &tmp);
+
+    let out = env
+        .cmd()
+        .args([
+            "tier",
+            "set",
+            "plugin-alpha/skill-a",
+            "1",
+            "--kind",
+            "agent",
+        ])
+        .output()
+        .expect("spawn tier set --kind agent");
+    assert_eq!(
+        out.status.code(),
+        Some(27),
+        "--kind agent must be inert for tier (skill/command only) → EntryNotFound (27); stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
 #[test]
 fn tier_clear_resets_to_3() {
     let _fixture = Fixture::build_sample();
