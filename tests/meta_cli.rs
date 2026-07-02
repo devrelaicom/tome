@@ -86,7 +86,8 @@ fn project_scope(project_root: &Path) -> ResolvedScope {
 
 fn add_args(harnesses: Vec<String>, global: bool, force: bool) -> MetaAddArgs {
     MetaAddArgs {
-        skill_id: SKILL.into(),
+        skill_ids: vec![SKILL.into()],
+        all: false,
         harnesses,
         global,
         force,
@@ -247,7 +248,8 @@ fn add_unknown_skill_is_87() {
 
     let err = meta::run(
         MetaCommand::Add(MetaAddArgs {
-            skill_id: "no-such-skill".into(),
+            skill_ids: vec!["no-such-skill".into()],
+            all: false,
             harnesses: vec![],
             global: false,
             force: false,
@@ -299,7 +301,8 @@ fn remove_deletes_then_is_not_present() {
 
     meta::run(
         MetaCommand::Remove(MetaRemoveArgs {
-            skill_id: SKILL.into(),
+            skill_ids: vec![SKILL.into()],
+            all: false,
             harnesses: vec![],
             global: false,
         }),
@@ -317,7 +320,8 @@ fn remove_deletes_then_is_not_present() {
     // Second remove is a no-op (not an error).
     meta::run(
         MetaCommand::Remove(MetaRemoveArgs {
-            skill_id: SKILL.into(),
+            skill_ids: vec![SKILL.into()],
+            all: false,
             harnesses: vec![],
             global: false,
         }),
@@ -406,7 +410,8 @@ fn remove_symlinked_component_is_88_forward_progress_no_escape() {
 
     let err = meta::run(
         MetaCommand::Remove(MetaRemoveArgs {
-            skill_id: SKILL.into(),
+            skill_ids: vec![SKILL.into()],
+            all: false,
             harnesses: vec![],
             global: false,
         }),
@@ -699,7 +704,8 @@ fn remove_unknown_skill_is_87() {
 
     let err = meta::run(
         MetaCommand::Remove(MetaRemoveArgs {
-            skill_id: "no-such-skill".into(),
+            skill_ids: vec!["no-such-skill".into()],
+            all: false,
             harnesses: vec![],
             global: false,
         }),
@@ -729,7 +735,8 @@ fn human_output_paths_do_not_panic() {
     .unwrap();
     meta::run(
         MetaCommand::Remove(MetaRemoveArgs {
-            skill_id: SKILL.into(),
+            skill_ids: vec![SKILL.into()],
+            all: false,
             harnesses: vec![],
             global: false,
         }),
@@ -738,4 +745,251 @@ fn human_output_paths_do_not_panic() {
     )
     .unwrap();
     meta::run(MetaCommand::List(MetaListArgs {}), &scope, Mode::Human).unwrap();
+}
+
+// ── issue #315: variadic + --all ─────────────────────────────────────────────
+
+/// (b) `meta add --all` installs every BUNDLED meta skill. Today that set is a
+/// single skill (`convert-marketplace`); the test asserts every bundled id
+/// lands so it stays correct as more skills are embedded.
+#[test]
+fn add_all_installs_every_bundled_skill() {
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let _reg = HarnessModulesGuard::install(vec![stub("alpha", true)]);
+    let project = TempDir::new().unwrap();
+    let scope = project_scope(project.path());
+
+    meta::run(
+        MetaCommand::Add(MetaAddArgs {
+            skill_ids: vec![],
+            all: true,
+            harnesses: vec![],
+            global: false,
+            force: false,
+        }),
+        &scope,
+        Mode::Human,
+    )
+    .expect("add --all");
+
+    for skill in tome::authoring::meta::all() {
+        assert!(
+            project
+                .path()
+                .join(format!(".alpha/skills/{}/SKILL.md", skill.id))
+                .is_file(),
+            "bundled skill {} installed by --all",
+            skill.id,
+        );
+    }
+}
+
+/// `meta remove --all` removes every installed meta skill from every target.
+#[test]
+fn remove_all_removes_every_installed_skill() {
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let _reg = HarnessModulesGuard::install(vec![stub("alpha", true)]);
+    let project = TempDir::new().unwrap();
+    let scope = project_scope(project.path());
+
+    // Seed via --all, then remove via --all.
+    meta::run(
+        MetaCommand::Add(MetaAddArgs {
+            skill_ids: vec![],
+            all: true,
+            harnesses: vec![],
+            global: false,
+            force: false,
+        }),
+        &scope,
+        Mode::Human,
+    )
+    .expect("seed add --all");
+    assert!(
+        project.path().join(".alpha/skills").exists(),
+        "skills seeded",
+    );
+
+    meta::run(
+        MetaCommand::Remove(MetaRemoveArgs {
+            skill_ids: vec![],
+            all: true,
+            harnesses: vec![],
+            global: false,
+        }),
+        &scope,
+        Mode::Human,
+    )
+    .expect("remove --all");
+
+    for skill in tome::authoring::meta::all() {
+        assert!(
+            !project
+                .path()
+                .join(format!(".alpha/skills/{}", skill.id))
+                .exists(),
+            "bundled skill {} removed by --all",
+            skill.id,
+        );
+    }
+}
+
+/// (d) Forward-progress: `--all` over two targets where one is a symlinked
+/// component still installs into the CLEAN target and surfaces the first error
+/// (88). Mirrors the single-skill symlink test but drives the `--all` path.
+#[cfg(unix)]
+#[test]
+fn add_all_symlinked_component_is_88_forward_progress() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let _reg = HarnessModulesGuard::install(vec![stub("alpha", true), stub("beta", true)]);
+    let project = TempDir::new().unwrap();
+    let scope = project_scope(project.path());
+
+    // Plant a symlinked component at `<project>/.alpha`.
+    let outside = TempDir::new().unwrap();
+    symlink(outside.path(), project.path().join(".alpha")).unwrap();
+
+    let err = meta::run(
+        MetaCommand::Add(MetaAddArgs {
+            skill_ids: vec![],
+            all: true,
+            harnesses: vec![],
+            global: false,
+            force: false,
+        }),
+        &scope,
+        Mode::Human,
+    )
+    .expect_err("symlinked alpha must fail");
+    assert_eq!(err.exit_code(), 88);
+    // Forward-progress: beta (clean) got every bundled skill.
+    for skill in tome::authoring::meta::all() {
+        assert!(
+            project
+                .path()
+                .join(format!(".beta/skills/{}/SKILL.md", skill.id))
+                .is_file(),
+            "beta installed {} despite alpha's failure",
+            skill.id,
+        );
+    }
+}
+
+/// (e) Single-item back-compat: an explicit id with no `--all` behaves exactly
+/// as before (installs the named skill, exit 0).
+#[test]
+fn add_single_explicit_id_unchanged() {
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let _reg = HarnessModulesGuard::install(vec![stub("alpha", true)]);
+    let project = TempDir::new().unwrap();
+    let scope = project_scope(project.path());
+
+    meta::run(
+        MetaCommand::Add(MetaAddArgs {
+            skill_ids: vec![SKILL.into()],
+            all: false,
+            harnesses: vec![],
+            global: false,
+            force: false,
+        }),
+        &scope,
+        Mode::Human,
+    )
+    .expect("add single id");
+    assert!(
+        project
+            .path()
+            .join(".alpha/skills/convert-marketplace/SKILL.md")
+            .is_file()
+    );
+}
+
+/// Neither ids nor `--all` on `meta add` → a usage error (exit 2).
+#[test]
+fn add_with_no_selection_is_usage_2() {
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let _reg = HarnessModulesGuard::install(vec![stub("alpha", true)]);
+    let project = TempDir::new().unwrap();
+    let scope = project_scope(project.path());
+
+    let err = meta::run(
+        MetaCommand::Add(MetaAddArgs {
+            skill_ids: vec![],
+            all: false,
+            harnesses: vec![],
+            global: false,
+            force: false,
+        }),
+        &scope,
+        Mode::Human,
+    )
+    .expect_err("no selection");
+    assert_eq!(err.exit_code(), 2);
+}
+
+/// Duplicate positional ids are order-preserving deduped (installed once).
+#[test]
+fn add_duplicate_ids_dedupe() {
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let _reg = HarnessModulesGuard::install(vec![stub("alpha", true)]);
+    let project = TempDir::new().unwrap();
+    let scope = project_scope(project.path());
+
+    // Two copies of the one bundled id must not error (no double-install crash).
+    meta::run(
+        MetaCommand::Add(MetaAddArgs {
+            skill_ids: vec![SKILL.into(), SKILL.into()],
+            all: false,
+            harnesses: vec![],
+            global: false,
+            force: false,
+        }),
+        &scope,
+        Mode::Human,
+    )
+    .expect("dedupe add");
+    assert!(
+        project
+            .path()
+            .join(".alpha/skills/convert-marketplace/SKILL.md")
+            .is_file()
+    );
+}
+
+/// `meta add --all <id>` and `meta remove --all <id>` are clap conflicts.
+#[test]
+fn meta_all_with_positional_is_a_clap_conflict() {
+    use clap::Parser;
+    use tome::cli::Cli;
+
+    assert!(
+        Cli::try_parse_from(["tome", "meta", "add", "--all", SKILL]).is_err(),
+        "`meta add --all <id>` must be rejected as a conflict",
+    );
+    assert!(
+        Cli::try_parse_from(["tome", "meta", "remove", "--all", SKILL]).is_err(),
+        "`meta remove --all <id>` must be rejected as a conflict",
+    );
+}
+
+/// `tome meta add a b` parses into the variadic `skill_ids` vec; `--all` false.
+#[test]
+fn meta_add_parses_variadic_ids() {
+    use clap::Parser;
+    use tome::cli::{Cli, Command, MetaCommand as Mc};
+
+    let cli = Cli::try_parse_from(["tome", "meta", "add", "one", "two"]).expect("parse");
+    let Command::Meta(Mc::Add(args)) = cli.command else {
+        panic!("expected meta add");
+    };
+    assert_eq!(args.skill_ids, vec!["one", "two"]);
+    assert!(!args.all);
 }

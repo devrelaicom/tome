@@ -87,7 +87,7 @@ Manage the local embedding and rerank models, against a pinned registry.
 | --- | --- | --- |
 | `download` | `--force` | Download every registered model that is missing. `--force` re-downloads even when the on-disk manifest records a complete install. |
 | `list` | `--verify` | List every model with its on-disk state. `--verify` rehashes installed files against their pinned SHA-256 (slower, catches silent corruption). |
-| `remove <name>` | `--force` | Remove an installed model directory and its manifest. `--force` skips the confirmation prompt (required on a non-TTY). |
+| `remove [<name>...]` | `--all`, `--force` | Remove installed model directories and their manifests. Name one or more models, or pass `--all` to evict every installed model. `--force` skips the confirmation prompt — asked once for the whole set (required on a non-TTY). A failure on one model still processes the rest, then surfaces the first error's exit code. |
 
 ## `tome reindex`
 
@@ -159,7 +159,7 @@ OpenCode). Bare `tome harness` enumerates every supported harness.
 | --- | --- | --- |
 | `list [<workspace>]` | | List the effective harness list for the resolved project, or a named workspace's directly-declared list. |
 | `use [<name>...]` | `--all`, `--include-opt-in`, `--scope`, `--force` | Configure one or more harnesses in the chosen scope and run the sync. With **names**, exactly those (aliases and the opt-in targets `generic`/`generic-op` resolve by name). With **no names and no `--all`**, every auto-detected harness. With **`--all`**, every auto-detectable harness — but NOT the opt-in `generic`/`generic-op` targets; when it skips them it prints a one-line `note:` on stderr naming them (human output only, suppressed under `--json`). Add **`--include-opt-in`** (requires `--all`) to ALSO configure those opt-in targets. `--scope` is `project` (default), `workspace`, or `global`. `--force` overrides a harness-clash on the MCP config write (otherwise exit `19`). |
-| `remove <name>` | `--scope` | Remove a harness from the chosen scope and run the cleanup pass. |
+| `remove [<name>...]` | `--all`, `--scope` | Remove one or more harnesses from the chosen scope and run the cleanup pass. Name harnesses, or pass `--all` to clear every harness configured in the resolved scope. (Unlike `use`, an empty selection with no `--all` is a usage error — there is no "all detected" default for a destructive op.) A per-harness failure still processes the rest, then surfaces the first error. |
 | `info <name>` | | Per-harness details for the current project: detection, targets, integration state, source-of-scope. |
 | `preview <name>` | `--plugin` | Preview what `harness sync` would deliver vs drop for one harness, per enabled entry: agents native/persona/unrepresented (with dropped model/tools), skills/commands MCP-routing, and hooks native vs `GUARDRAILS.md` fallback. `--plugin` scopes the preview to one enabled plugin. Read-only. |
 | `sync` | | Reconcile the project's filesystem against the effective harness list. Byte-for-byte idempotent. |
@@ -210,8 +210,8 @@ agent how to use Tome itself — into your detected harnesses.
 | Subcommand | Flags | Purpose |
 | --- | --- | --- |
 | `list` | | List the bundled meta skills and their per-harness install status. |
-| `add <skill_id>` | `--harness`, `--global`, `--force` | Install a bundled meta skill. Default: project scope, every detected harness that consumes native skills. `--harness <name>` (repeatable) targets specific harnesses; `--global` installs into the user-level skills dir; `--force` re-writes even when the on-disk copy is current. |
-| `remove <skill_id>` | `--harness`, `--global` | Remove an installed meta skill from the selected harnesses. |
+| `add [<skill_id>...]` | `--all`, `--harness`, `--global`, `--force` | Install bundled meta skills. Name one or more skill ids, or pass `--all` to install every bundled skill. Default: project scope, every detected harness that consumes native skills. `--harness <name>` (repeatable) targets specific harnesses; `--global` installs into the user-level skills dir; `--force` re-writes even when the on-disk copy is current. A per-location failure still processes the rest, then surfaces the first error. |
+| `remove [<skill_id>...]` | `--all`, `--harness`, `--global` | Remove installed meta skills from the selected harnesses. Name one or more skill ids, or pass `--all` to remove every bundled skill (a not-present location is a no-op). |
 
 See [Meta skills](../using-tome/meta-skills.md).
 

@@ -117,12 +117,11 @@ pub fn run(args: HarnessArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
             use_::run(a, scope, &paths, mode)
         }
         Some(HarnessCommand::Remove(a)) => {
-            let name = a.name.clone();
-            let r = remove::run(a, scope, &paths, mode);
-            if r.is_ok() {
-                emit_harness_action(&name, crate::telemetry::event::HarnessAction::Remove);
-            }
-            r
+            // Issue #315: `remove` is now multi-harness — telemetry is emitted
+            // per successfully-removed harness inside `remove::run` (it knows the
+            // resolved selection + which harnesses succeeded), so the dispatcher
+            // no longer references a single name.
+            remove::run(a, scope, &paths, mode)
         }
         Some(HarnessCommand::Info(a)) => info::run(a, scope, &paths, mode),
         Some(HarnessCommand::Preview(a)) => preview::run(a, scope, &paths, mode),

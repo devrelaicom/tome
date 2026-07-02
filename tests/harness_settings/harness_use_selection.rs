@@ -10,7 +10,9 @@
 //! failure are deterministic) and drive `run_inner` against a project marker.
 
 use crate::common::{HarnessModulesGuard, HomeGuard, ToolEnv, paths_for, seed_workspace};
-use tome::cli::{HarnessScopeArg, HarnessUseArgs};
+use tome::cli::{HarnessRemoveArgs, HarnessScopeArg, HarnessUseArgs};
+use tome::commands::harness::remove;
+use tome::commands::harness::remove::HarnessRemoveResult;
 use tome::commands::harness::use_;
 use tome::commands::harness::use_::{HarnessUseOutcome, HarnessUseReport, HarnessUseResult};
 use tome::harness::StubHarness;
@@ -519,6 +521,36 @@ fn use_all_with_explicit_name_is_a_clap_conflict() {
     );
 }
 
+/// Issue #315: `tome harness remove --all foo` is a clap conflict.
+#[test]
+fn remove_all_with_explicit_name_is_a_clap_conflict() {
+    use clap::Parser;
+    use tome::cli::Cli;
+
+    let res = Cli::try_parse_from(["tome", "harness", "remove", "--all", "cursor"]);
+    assert!(
+        res.is_err(),
+        "`remove --all <name>` must be rejected as a conflict",
+    );
+}
+
+/// Issue #315: `tome harness remove a b` parses into the variadic `names` vec.
+#[test]
+fn remove_parses_variadic_names() {
+    use clap::Parser;
+    use tome::cli::{Cli, Command, HarnessCommand};
+
+    let cli = Cli::try_parse_from(["tome", "harness", "remove", "codex", "cursor"]).expect("parse");
+    let Command::Harness(h) = cli.command else {
+        panic!("expected the harness subcommand");
+    };
+    let Some(HarnessCommand::Remove(args)) = h.command else {
+        panic!("expected the remove subcommand");
+    };
+    assert_eq!(args.names, vec!["codex", "cursor"]);
+    assert!(!args.all);
+}
+
 /// `tome harness use a b c` parses into the variadic `names` vec; `--all`
 /// defaults false.
 #[test]
@@ -782,4 +814,88 @@ fn all_opt_in_skip_note_suppressed_under_json() {
         stdout.contains("\"selection\":\"all\""),
         "the --json envelope must still be emitted on stdout; got: {stdout}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #315: `harness remove` forward-progress — mirror of the `use` test
+// above. A mid-list per-item failure (a harness whose cleanup reconcile hits a
+// symlinked MCP sink) must NOT abort the loop: every selected harness is
+// attempted (its result recorded) and the FIRST failure's exit code surfaces.
+//
+// Same full-reconcile-per-harness coupling as `use` (`remove_one` builds its
+// `SyncDeps` with `only_harness = None`), so a broken PEER poisons the healthy
+// harness's pass too — both results come back `Failed` with exit 7. We assert
+// the HONEST observed variants (per the `use` test's F3b precedent).
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn remove_forward_progress_attempts_all_and_surfaces_first_error() {
+    use std::os::unix::fs::symlink;
+
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(StubHarness::default().with_name("stub_ok")),
+        Box::new(
+            StubHarness::default()
+                .with_name("stub_fail")
+                .with_failing_mcp(),
+        ),
+    ]);
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    seed_workspace(&paths, "demo");
+
+    // A project whose marker declares BOTH harnesses in its effective list, so
+    // removing one still leaves `stub_fail` in the reconcile set.
+    let project = env.home_path().join("project");
+    let marker_dir = project.join(".tome");
+    std::fs::create_dir_all(&marker_dir).unwrap();
+    std::fs::write(
+        marker_dir.join("config.toml"),
+        "workspace = \"demo\"\nharnesses = [\"stub_ok\", \"stub_fail\"]\n",
+    )
+    .unwrap();
+    std::fs::write(marker_dir.join("RULES.md"), "# rules\n").unwrap();
+    let _home = HomeGuard::install(env.home_path());
+
+    // Make `stub_fail`'s MCP PARENT a SYMLINK so the read+write symlink guard
+    // refuses it → the reconcile errors (exit 7) whenever `stub_fail` is in the
+    // effective set (which it is, for every pass of this batch).
+    let real = env.home_path().join("elsewhere");
+    std::fs::create_dir_all(&real).unwrap();
+    symlink(&real, project.join("stub_fail_MCP_BROKEN")).unwrap();
+
+    let args = HarnessRemoveArgs {
+        names: vec!["stub_ok".to_string(), "stub_fail".to_string()],
+        all: false,
+        scope: Some(HarnessScopeArg::Project),
+    };
+    let ri = remove::run_inner(args, &project_scope("demo", project.clone()), &paths)
+        .expect("selection resolves");
+    let (report, err) = (ri.report, ri.first_error);
+
+    // Forward-progress: BOTH harnesses were attempted (no early abort).
+    assert_eq!(
+        report.results.len(),
+        2,
+        "both harnesses must be attempted (no early abort); report: {report:?}",
+    );
+    // `stub_ok`'s removal reconcile is poisoned by the broken `stub_fail` peer →
+    // it is recorded as a Failed result with exit 7 (the honest observed variant,
+    // per the `use` F3b coupling).
+    let stub_ok_code = report.results.iter().find_map(|r| match r {
+        HarnessRemoveResult::Failed {
+            name, exit_code, ..
+        } if name == "stub_ok" => Some(*exit_code),
+        _ => None,
+    });
+    assert_eq!(stub_ok_code, Some(7), "stub_ok recorded Failed with exit 7");
+    // The FIRST failure's exit code is surfaced for the process exit.
+    let err = err.expect("a failure must surface an error");
+    assert_eq!(err.exit_code(), 7, "first failure's exit code; got {err:?}");
 }

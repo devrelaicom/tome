@@ -118,6 +118,7 @@
           "--verify"
         ],
         "remove": [
+          "--all",
           "--force",
           "--verbose"
         ]
@@ -219,6 +220,7 @@
           "--verbose"
         ],
         "remove": [
+          "--all",
           "--scope",
           "--verbose"
         ],
@@ -289,12 +291,14 @@
           "--verbose"
         ],
         "add": [
+          "--all",
           "--force",
           "--global",
           "--harness",
           "--verbose"
         ],
         "remove": [
+          "--all",
           "--global",
           "--harness",
           "--verbose"
