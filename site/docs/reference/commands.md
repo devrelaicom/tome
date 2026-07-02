@@ -20,7 +20,7 @@ the authoring commands for creating new ones.
 | `list` | | List registered catalogs. |
 | `update [<name>]` | `--force` | Refresh one catalog, or every registered catalog when the name is omitted. (`--force` is accepted but currently a no-op.) |
 | `show <name>` | | Show a catalog's manifest and registration metadata. |
-| `create <name>` | `--template`, `--output`, `--force` | Scaffold a new catalog from a template. See [Creating](../authoring/create.md). |
+| `create <name>` | `--template`, `--output`, `--description`, `--author`, `--dry-run`, `--force` | Scaffold a new catalog from a template. `--description` sets the manifest description; `--author` sets the catalog owner (otherwise a `Your Name` placeholder); `--dry-run` previews the files without writing them. See [Creating](../authoring/create.md). |
 | `convert <source> [<name>]` | `--name`, `--from`, `--output`, `--into`, `--force`, `--dry-run`, `--strict`, `--allow`, `--no-fetch` | Convert a Claude Code marketplace into a native Tome catalog — a copy; the source is never modified. `--no-fetch` skips fetching the marketplace's remote-source plugins (they are warned-and-skipped). See [Converting](../authoring/convert.md). |
 | `lint <path>` | `--autofix`, `--dry-run`, `--strict` | Validate a Tome catalog and every plugin/skill it nests. CI-ready exit codes. See [Linting](../authoring/lint.md). |
 
@@ -35,7 +35,7 @@ catalog → plugin → action picker (refused on a non-TTY, exit `54`).
 | `disable <catalog>/<plugin>` | `--force`, `--sync` | Disable a plugin; embeddings stay on disk so re-enable is cheap. `--force` skips the confirmation prompt. `--sync` applies the change to your harnesses inline (runs the same propagation as `tome sync` over every bound project); without it, disable prints a reminder to run `tome sync`. |
 | `list` | `--catalog`, `--enabled-only` | List plugins across every catalog, grouping Skills and Commands with per-entry annotations. |
 | `show <catalog>/<plugin>` | | Show one plugin's metadata, component counts, and index status. |
-| `create <name>` | `--template`, `--output`, `--into`, `--force` | Scaffold a new plugin from a template. `--into` registers it in an existing catalog's `tome-catalog.toml`. See [Creating](../authoring/create.md). |
+| `create <name>` | `--template`, `--output`, `--into`, `--description`, `--author`, `--dry-run`, `--force` | Scaffold a new plugin from a template. `--into` registers it in an existing catalog's `tome-catalog.toml`. `--description` sets the manifest description; `--author` records the plugin's `[author]`; `--dry-run` previews the files without writing them. See [Creating](../authoring/create.md). |
 | `convert <source> [<name>]` | `--name`, `--from`, `--output`, `--into`, `--force`, `--dry-run`, `--strict`, `--allow`, `--no-fetch` | Convert a Claude Code plugin (or a Codex project) into a native Tome plugin. (`--no-fetch` is accepted but only meaningful for `catalog convert`.) See [Converting](../authoring/convert.md). |
 | `lint <path>` | `--autofix`, `--dry-run`, `--strict` | Validate a Tome plugin and every skill it nests. See [Linting](../authoring/lint.md). |
 
@@ -45,7 +45,7 @@ Author, convert, and validate standalone skills.
 
 | Subcommand | Flags | Purpose |
 | --- | --- | --- |
-| `create <name>` | `--template`, `--bare`, `--plugin-name`, `--output`, `--into`, `--force` | Scaffold a new skill. Wraps it in a minimal plugin by default; `--bare` emits only a `<name>/SKILL.md`; `--plugin-name` names the wrapping plugin; `--into` drops the skill into an existing plugin's `skills/`. See [Creating](../authoring/create.md). |
+| `create <name>` | `--template`, `--bare`, `--plugin-name`, `--output`, `--into`, `--description`, `--author`, `--dry-run`, `--force` | Scaffold a new skill. Wraps it in a minimal plugin by default; `--bare` emits only a `<name>/SKILL.md`; `--plugin-name` names the wrapping plugin; `--into` drops the skill into an existing plugin's `skills/`. `--description` sets the skill description; `--author` records the wrapping plugin's `[author]`; `--dry-run` previews the files without writing them. See [Creating](../authoring/create.md). |
 | `convert <source> [<name>]` | `--name`, `--from`, `--output`, `--into`, `--force`, `--dry-run`, `--strict`, `--allow`, `--no-fetch` | Convert a foreign skill — a native `SKILL.md` from Claude Code, Cursor, OpenCode, Cline, or a generic Agent Skill. (`--no-fetch` is accepted but only meaningful for `catalog convert`.) See [Converting](../authoring/convert.md). |
 | `lint <path>` | `--autofix`, `--dry-run`, `--strict` | Validate a Tome skill: structure correctness plus residual harness-isms. See [Linting](../authoring/lint.md). |
 

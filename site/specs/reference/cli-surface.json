@@ -23,6 +23,9 @@
           "--verbose"
         ],
         "create": [
+          "--author",
+          "--description",
+          "--dry-run",
           "--force",
           "--output",
           "--template",
@@ -72,6 +75,9 @@
           "--verbose"
         ],
         "create": [
+          "--author",
+          "--description",
+          "--dry-run",
           "--force",
           "--into",
           "--output",
@@ -243,7 +249,10 @@
     "skill": {
       "subcommands": {
         "create": [
+          "--author",
           "--bare",
+          "--description",
+          "--dry-run",
           "--force",
           "--into",
           "--output",

@@ -127,6 +127,80 @@ fn a_non_kebab_name_is_a_usage_error() {
     assert_eq!(err.exit_code(), 2);
 }
 
+#[test]
+fn description_and_author_land_and_still_lint_clean() {
+    // #325: a scaffold given --description + --author carries both into the
+    // emitted files AND still satisfies the "lint-clean by construction"
+    // invariant (a supplied author does not introduce an `owner-missing` or
+    // author-email finding).
+    let tmp = tempfile::tempdir().unwrap();
+    let mut p = params("toolkit");
+    p.description = Some("QA helpers".to_owned());
+    p.author_name = Some("Acme".to_owned());
+    let root = scaffold_to_disk(tmp.path(), ArtifactLevel::Plugin, &p);
+
+    let manifest = fs::read_to_string(root.join("tome-plugin.toml")).unwrap();
+    assert!(
+        manifest.contains("description = \"QA helpers\""),
+        "manifest description: {manifest}"
+    );
+    assert!(
+        manifest.contains("name = \"Acme\""),
+        "manifest [author]: {manifest}"
+    );
+    let skill = fs::read_to_string(root.join("skills/toolkit/SKILL.md")).unwrap();
+    assert!(skill.contains("QA helpers"), "skill body: {skill}");
+
+    assert_lints_clean(&root);
+}
+
+#[test]
+fn blank_author_emits_no_author_table_byte_identical_to_omitting_it() {
+    // #325 review Minor: `plugin create x --author ""` (and whitespace-only)
+    // must emit NO `[author]` table — byte-identical to omitting the flag —
+    // never a lint-tripping `name = ""`.
+    let baseline_tmp = tempfile::tempdir().unwrap();
+    let baseline = scaffold_to_disk(
+        baseline_tmp.path(),
+        ArtifactLevel::Plugin,
+        &params("toolkit"),
+    );
+    let baseline_manifest = fs::read_to_string(baseline.join("tome-plugin.toml")).unwrap();
+    assert!(
+        !baseline_manifest.contains("[author]"),
+        "sanity: omitted author has no [author] table"
+    );
+
+    for blank in ["", "   ", "\t"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = params("toolkit");
+        p.author_name = Some(blank.to_owned());
+        let root = scaffold_to_disk(tmp.path(), ArtifactLevel::Plugin, &p);
+        let manifest = fs::read_to_string(root.join("tome-plugin.toml")).unwrap();
+        assert_eq!(
+            manifest, baseline_manifest,
+            "blank author {blank:?} must be byte-identical to omitting --author"
+        );
+        assert_lints_clean(&root);
+    }
+}
+
+#[test]
+fn catalog_author_sets_the_owner_and_lints_clean() {
+    // #325: --author on a catalog replaces the `Your Name` owner placeholder
+    // and the result still lints clean.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut p = params("my-catalog");
+    p.author_name = Some("Acme".to_owned());
+    let root = scaffold_to_disk(tmp.path(), ArtifactLevel::Catalog, &p);
+
+    let manifest = fs::read_to_string(root.join("tome-catalog.toml")).unwrap();
+    assert!(manifest.contains("name = \"Acme\""), "owner: {manifest}");
+    assert!(!manifest.contains("Your Name"), "placeholder: {manifest}");
+
+    assert_lints_clean(&root);
+}
+
 #[cfg(unix)]
 #[test]
 fn emit_refuses_a_symlinked_target_parent() {
