@@ -264,6 +264,55 @@ mod tests {
     }
 
     #[test]
+    fn explicit_profile_overrides_a_populated_db_recording_a_different_active_profile() {
+        // The `Some(profile)` branch must select the EXPLICIT tier's targets
+        // even when a POPULATED index DB records a DIFFERENT active profile.
+        // Bootstrap a real DB stamped with `active_profile == Small`, then ask
+        // `resolve_targets` for `--profile large`: the returned targets must be
+        // the LARGE pair (the stored Small is irrelevant on the explicit branch).
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        std::fs::create_dir_all(paths.index_db.parent().unwrap()).unwrap();
+
+        // Open (bootstrap) the DB with the active profile seeded to Small.
+        let (embedder, reranker, summariser) = crate::commands::plugin::registry_seeds();
+        let conn = crate::index::open(
+            &paths.index_db,
+            &crate::index::OpenOptions {
+                embedder,
+                reranker,
+                summariser,
+                profile: Some(Profile::Small),
+            },
+        )
+        .unwrap();
+        // Sanity: the DB really records Small as the active profile.
+        assert_eq!(
+            crate::index::meta::active_profile(&conn).unwrap(),
+            Profile::Small,
+            "precondition: the populated DB's active profile is Small",
+        );
+        drop(conn);
+        assert!(
+            paths.index_db.is_file(),
+            "the DB now exists and is populated"
+        );
+
+        // The explicit `--profile large` wins for target selection.
+        let targets = resolve_targets(&paths, false, Some(Profile::Large)).unwrap();
+        assert_eq!(
+            names(&targets),
+            vec![
+                "bge-large-en-v1.5",
+                "bge-reranker-v2-m3",
+                "qwen2.5-0.5b-instruct"
+            ],
+            "explicit --profile large must select the LARGE tier's targets, \
+             not the Small tier the DB records",
+        );
+    }
+
+    #[test]
     fn no_profile_no_db_falls_back_to_default_tier() {
         // Without `--profile` and without a DB, the default profile (Medium)
         // set is targeted — byte-identical to the pre-`--profile` behaviour.
