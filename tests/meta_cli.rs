@@ -88,7 +88,7 @@ fn add_args(harnesses: Vec<String>, global: bool, force: bool) -> MetaAddArgs {
     MetaAddArgs {
         skill_ids: vec![SKILL.into()],
         all: false,
-        harnesses,
+        harness: harnesses,
         global,
         force,
     }
@@ -250,7 +250,7 @@ fn add_unknown_skill_is_87() {
         MetaCommand::Add(MetaAddArgs {
             skill_ids: vec!["no-such-skill".into()],
             all: false,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
             force: false,
         }),
@@ -303,7 +303,7 @@ fn remove_deletes_then_is_not_present() {
         MetaCommand::Remove(MetaRemoveArgs {
             skill_ids: vec![SKILL.into()],
             all: false,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
         }),
         &scope,
@@ -322,7 +322,7 @@ fn remove_deletes_then_is_not_present() {
         MetaCommand::Remove(MetaRemoveArgs {
             skill_ids: vec![SKILL.into()],
             all: false,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
         }),
         &scope,
@@ -412,7 +412,7 @@ fn remove_symlinked_component_is_88_forward_progress_no_escape() {
         MetaCommand::Remove(MetaRemoveArgs {
             skill_ids: vec![SKILL.into()],
             all: false,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
         }),
         &scope,
@@ -706,7 +706,7 @@ fn remove_unknown_skill_is_87() {
         MetaCommand::Remove(MetaRemoveArgs {
             skill_ids: vec!["no-such-skill".into()],
             all: false,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
         }),
         &scope,
@@ -737,7 +737,7 @@ fn human_output_paths_do_not_panic() {
         MetaCommand::Remove(MetaRemoveArgs {
             skill_ids: vec![SKILL.into()],
             all: false,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
         }),
         &scope,
@@ -764,7 +764,7 @@ fn add_all_installs_every_bundled_skill() {
         MetaCommand::Add(MetaAddArgs {
             skill_ids: vec![],
             all: true,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
             force: false,
         }),
@@ -799,7 +799,7 @@ fn remove_all_removes_every_installed_skill() {
         MetaCommand::Add(MetaAddArgs {
             skill_ids: vec![],
             all: true,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
             force: false,
         }),
@@ -816,7 +816,7 @@ fn remove_all_removes_every_installed_skill() {
         MetaCommand::Remove(MetaRemoveArgs {
             skill_ids: vec![],
             all: true,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
         }),
         &scope,
@@ -858,7 +858,7 @@ fn add_all_symlinked_component_is_88_forward_progress() {
         MetaCommand::Add(MetaAddArgs {
             skill_ids: vec![],
             all: true,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
             force: false,
         }),
@@ -894,7 +894,7 @@ fn add_single_explicit_id_unchanged() {
         MetaCommand::Add(MetaAddArgs {
             skill_ids: vec![SKILL.into()],
             all: false,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
             force: false,
         }),
@@ -923,7 +923,7 @@ fn add_with_no_selection_is_usage_2() {
         MetaCommand::Add(MetaAddArgs {
             skill_ids: vec![],
             all: false,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
             force: false,
         }),
@@ -948,7 +948,7 @@ fn add_duplicate_ids_dedupe() {
         MetaCommand::Add(MetaAddArgs {
             skill_ids: vec![SKILL.into(), SKILL.into()],
             all: false,
-            harnesses: vec![],
+            harness: vec![],
             global: false,
             force: false,
         }),
@@ -992,4 +992,45 @@ fn meta_add_parses_variadic_ids() {
     };
     assert_eq!(args.skill_ids, vec!["one", "two"]);
     assert!(!args.all);
+}
+
+/// #327: the internal field rename (`harnesses` → `harness`) keeps the
+/// `--harness` FLAG unchanged. Repeatable `--harness a --harness b` still parses
+/// into the (now-renamed) `harness` vec for both `add` and `remove`.
+#[test]
+fn meta_repeatable_harness_flag_parses_after_field_rename() {
+    use clap::Parser;
+    use tome::cli::{Cli, Command, MetaCommand as Mc};
+
+    let cli = Cli::try_parse_from([
+        "tome",
+        "meta",
+        "add",
+        SKILL,
+        "--harness",
+        "cursor",
+        "--harness",
+        "codex",
+    ])
+    .expect("parse `meta add --harness cursor --harness codex`");
+    let Command::Meta(Mc::Add(args)) = cli.command else {
+        panic!("expected meta add");
+    };
+    assert_eq!(args.harness, vec!["cursor", "codex"]);
+
+    let cli = Cli::try_parse_from([
+        "tome",
+        "meta",
+        "remove",
+        SKILL,
+        "--harness",
+        "cursor",
+        "--harness",
+        "codex",
+    ])
+    .expect("parse `meta remove --harness cursor --harness codex`");
+    let Command::Meta(Mc::Remove(args)) = cli.command else {
+        panic!("expected meta remove");
+    };
+    assert_eq!(args.harness, vec!["cursor", "codex"]);
 }

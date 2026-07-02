@@ -69,7 +69,8 @@ supports:
 
 ```bash
 tome harness list          # show configured harnesses
-tome harness info <name>   # show what Tome manages for a harness
+tome harness info          # show what Tome manages for every effective harness
+tome harness info <name>   # ...or just one harness
 tome harness sync          # re-write native config from current state
 tome harness remove <name> # remove Tome-managed config for a harness
 ```
