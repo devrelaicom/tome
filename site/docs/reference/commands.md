@@ -113,10 +113,33 @@ Force re-embedding outside the `tome catalog update` schedule — for embedder
 upgrades or integrity recovery.
 
 ```bash
-tome reindex                      # everything
-tome reindex <catalog>            # one catalog
-tome reindex <catalog>/<plugin>   # one plugin
+tome reindex                              # everything (whole-index)
+tome reindex <catalog>                    # one catalog
+tome reindex <catalog>/<plugin>           # one plugin
+tome reindex <catalog>/compact-*          # every matching plugin in a catalog
+tome reindex mid-* other                  # multiple scopes, unioned + deduped
+tome reindex --catalog midnight           # a whole catalog (named flag form)
+tome reindex --catalog 'mid-*'            # every enrolled catalog matching the glob
+tome reindex --plugin midnight/compact-*  # a plugin glob (named flag form)
+tome reindex --catalog a --plugin b/c     # combine --catalog + --plugin (union)
 ```
+
+Scopes are variadic. Each positional token is a `<catalog>` (whole catalog), a
+`<catalog>/<plugin>` (one plugin), or a `*` glob (`<catalog>/*`,
+`<catalog>/compact-*`, or a bare `mid-*` matching enrolled catalog **names**).
+Multiple tokens are unioned and deduplicated.
+
+- `--catalog <name>` (repeatable) reindexes every enabled plugin in the named
+  catalog(s); a `*` glob matches enrolled catalog names.
+- `--plugin <catalog>/<plugin>` (repeatable) reindexes the named plugin(s); a
+  `*` glob is allowed in the plugin segment.
+- `--catalog` and `--plugin` may be combined (their targets union), but neither
+  can be mixed with positional `<scope>` tokens.
+- A glob that matches nothing is a usage error (never a silent no-op).
+
+Only the **whole-index** form (no scopes and no `--catalog`/`--plugin`) restamps
+the global embedder identity; any explicit selection is refused under embedder
+drift (run a bare `tome reindex` to switch embedders).
 
 `--force` re-embeds every in-scope skill regardless of its content hash.
 

@@ -408,3 +408,142 @@ fn reindex_empty_scope_with_no_enabled_plugins_is_a_clean_zero() {
         "expected 'Nothing to reindex' message, got: {stdout}",
     );
 }
+
+// ---- issue #316: --catalog / --plugin flags + globs / multi-scope --------
+//
+// The parse/resolution error paths don't need an embedder — the same boundary
+// as the FF2 exit-code tests above. Cases that actually re-embed enabled
+// plugins (glob expansion, multi-scope union) are covered at the library level
+// in the `resolve_explicit` unit tests (no `FastembedEmbedder` on-disk model)
+// and the whole-index invariant is proven in `tests/model_tiering.rs`.
+
+#[test]
+fn reindex_positional_conflicts_with_catalog_flag_exits_2() {
+    // clap `conflicts_with = "scopes"` rejects mixing a positional token and
+    // `--catalog` → usage error (exit 2) before any resolution runs.
+    let env = ToolEnv::new();
+    let out = env
+        .cmd()
+        .args(["reindex", "some-catalog", "--catalog", "other"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn reindex_positional_conflicts_with_plugin_flag_exits_2() {
+    let env = ToolEnv::new();
+    let out = env
+        .cmd()
+        .args(["reindex", "some-catalog", "--plugin", "cat/plug"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn reindex_catalog_glob_zero_match_exits_2() {
+    // A `*` glob that matches no enrolled catalog is a usage error (exit 2),
+    // NOT a silent no-op.
+    let env = ToolEnv::new();
+    let paths = crate::common::paths_for(&env);
+    crate::common::stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["reindex", "--catalog", "ghost-*"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a catalog glob matching nothing must be Usage (exit 2); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("ghost-*"),
+        "the error must echo the pattern",
+    );
+}
+
+#[test]
+fn reindex_plugin_glob_zero_match_exits_2() {
+    let env = ToolEnv::new();
+    let paths = crate::common::paths_for(&env);
+    crate::common::stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+
+    // No plugins are ENABLED in the staged catalog, so ANY plugin glob matches
+    // zero → exit 2 (echoing the pattern).
+    let out = env
+        .cmd()
+        .args(["reindex", "--plugin", "sample-plugin-catalog/*"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a plugin glob matching nothing must be Usage (exit 2); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn reindex_catalog_flag_empty_catalog_is_a_clean_zero() {
+    // `--catalog <enrolled-but-empty>`: the catalog RESOLVES (no exit 3) and has
+    // no enabled plugins → the benign "Nothing to reindex" (exit 0). This is an
+    // exact selection, so the empty target set is NOT collapsed to a glob error.
+    let env = ToolEnv::new();
+    let paths = crate::common::paths_for(&env);
+    crate::common::stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["reindex", "--catalog", "sample-plugin-catalog"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an enrolled-but-empty catalog reindexes to a clean zero; stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Nothing to reindex"),
+        "no enabled plugins → clean zero",
+    );
+}
+
+#[test]
+fn reindex_catalog_flag_unknown_catalog_exits_3() {
+    // `--catalog <unknown>` preserves the CatalogNotFound (exit 3) contract.
+    let env = ToolEnv::new();
+    let paths = crate::common::paths_for(&env);
+    crate::common::stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["reindex", "--catalog", "ghost"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+}
+
+#[test]
+fn reindex_plugin_flag_known_catalog_unknown_plugin_exits_20() {
+    // `--plugin <known>/<unknown>` preserves PluginNotFound (exit 20).
+    let env = ToolEnv::new();
+    let paths = crate::common::paths_for(&env);
+    crate::common::stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["reindex", "--plugin", "sample-plugin-catalog/ghost-plugin"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(20),
+        "known catalog + unknown plugin via --plugin must be PluginNotFound (20); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}

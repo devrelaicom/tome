@@ -372,6 +372,14 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
     // Re-embedding only one plugin while stamping the GLOBAL meta would leave
     // out-of-scope rows at the old dimension — the exact corruption. Only a
     // whole-index reindex may switch the embedder.
+    //
+    // Issue #316 note: `whole_index = false` is EXACTLY what any explicit #316
+    // selection resolves to — a positional `<catalog>`, a `--catalog`, a
+    // `--plugin`, or a glob (even one that happens to cover every plugin). So
+    // this assertion pins the invariant that a scoped-via-new-flags reindex is
+    // refused under embedder drift with exit 47 (and, since the policy returns
+    // Err, never reaches `stamp_embedder_after_whole_index`). See the dedicated
+    // `explicit_selection_is_never_whole_index` test below for the resolver side.
     let scoped_refusal = reindex::embedder_change_policy(
         &conn,
         /* whole_index = */ false,
@@ -474,6 +482,101 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
     assert!(
         !hits.is_empty(),
         "the consistent 768-d index must return hits for a 768-d query",
+    );
+}
+
+// ===========================================================================
+// Issue #316 — an EXPLICIT selection (via the new `--catalog`/`--plugin` flags
+// or a positional token) is NON-whole-index end-to-end: driven through the REAL
+// `reindex::run` entry point, a `--catalog <c>` reindex under embedder drift is
+// REFUSED with exit 47 and does NOT stamp the global `meta` embedder identity.
+//
+// This is the production-path complement to the resolver-side unit tests
+// (`resolve_explicit` asserts `!whole_index`) and to step (3c) of the scenario
+// above (which drives the policy gate directly). Here the FULL command runs:
+// `run_inner` resolves the `--catalog` selection to `whole_index = false`, then
+// `embedder_change_policy(whole_index = false, …)` refuses BEFORE any embedder
+// model load — so the meta stamp is unreachable and the stored identity stays
+// the OLD one.
+// ===========================================================================
+
+#[test]
+fn explicit_catalog_selection_under_drift_is_refused_and_does_not_stamp() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().to_path_buf();
+    let _home_guard = HomeGuard::install(&home);
+    let paths = lifecycle_paths(&home.join(".tome"));
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
+
+    let ws_scope = WsScope(WorkspaceName::global());
+    let alpha: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
+
+    // Enable a plugin with a 384-d stub so the `--catalog` selection resolves to
+    // a non-empty target set (it must not short-circuit to "Nothing to reindex").
+    let embedder_384 = StubEmbedder::with_dim(384);
+    {
+        let deps = LifecycleDeps {
+            paths: &paths,
+            scope: &ws_scope,
+            config: &config,
+            embedder: &embedder_384,
+            embedder_seed: MetaSeed {
+                name: MEDIUM_EMBEDDER.into(),
+                version: "1.5".into(),
+            },
+            reranker_seed: stub_reranker_seed(),
+            summariser_seed: stub_summariser_seed(),
+            allow_model_download: false,
+        };
+        lifecycle::enable(&alpha, &deps).expect("enable alpha with 384-d stub");
+    }
+
+    // Pin the baseline meta identity to the MEDIUM embedder, then flip the active
+    // profile to `large` so the configured embedder drifts from the stored one.
+    let conn = open_writable(&paths);
+    meta::write(&conn, MetaKey::EmbedderName, MEDIUM_EMBEDDER).unwrap();
+    meta::write(&conn, MetaKey::EmbedderVersion, "1.5").unwrap();
+    meta::write(&conn, MetaKey::ModelProfile, "large").unwrap();
+    drop(conn);
+
+    // Drive the REAL `reindex::run` with an explicit `--catalog` selection. It
+    // resolves to `whole_index = false`, so the drift policy refuses (exit 47)
+    // before loading any embedder model.
+    let scope = ResolvedScope {
+        scope: WsScope(WorkspaceName::global()),
+        source: ScopeSource::GlobalFallback,
+        project_root: None,
+        overridden_project_marker: None,
+    };
+    let err = reindex::run(
+        tome::cli::ReindexArgs {
+            scopes: Vec::new(),
+            catalog: vec!["sample-plugin-catalog".to_owned()],
+            plugin: Vec::new(),
+            force: false,
+        },
+        &scope,
+        Mode::Json,
+    )
+    .expect_err("an explicit --catalog selection under drift must be refused");
+    assert_eq!(
+        err.exit_code(),
+        47,
+        "explicit selection under embedder drift is ReindexScopedEmbedderChange (47)",
+    );
+
+    // The global meta embedder identity is UNCHANGED — the refusal fired before
+    // `stamp_embedder_after_whole_index`, so no partial-stamp corruption.
+    let conn = open_writable(&paths);
+    let stored_name = meta::read(&conn, MetaKey::EmbedderName).unwrap().unwrap();
+    assert_eq!(
+        stored_name, MEDIUM_EMBEDDER,
+        "a refused scoped reindex must NOT restamp the global embedder identity",
     );
 }
 

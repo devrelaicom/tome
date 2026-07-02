@@ -157,7 +157,9 @@
     "reindex": {
       "subcommands": {},
       "flags": [
+        "--catalog",
         "--force",
+        "--plugin",
         "--verbose"
       ]
     },
