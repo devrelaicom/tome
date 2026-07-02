@@ -32,7 +32,7 @@ use super::{ModelState, cheap_state};
 
 pub fn run(args: ModelsProfileArgs, mode: Mode) -> Result<(), TomeError> {
     match args.tier {
-        Some(tier) => set(&tier, mode),
+        Some(tier) => set(tier, mode),
         None => show(mode),
     }
 }
@@ -49,16 +49,9 @@ fn show(mode: Mode) -> Result<(), TomeError> {
 }
 
 /// `tome models profile set <tier>` — switch the active profile.
-fn set(tier: &str, mode: Mode) -> Result<(), TomeError> {
-    // clap's `value_parser` already restricts `tier` to the three valid
-    // strings, so `from_tier_str` cannot fail here; the `?`-style fallback
-    // keeps the function total without an unreachable panic.
-    let new_profile = Profile::from_tier_str(tier).ok_or_else(|| {
-        TomeError::Usage(format!(
-            "unknown model profile `{tier}` (expected small/medium/large)"
-        ))
-    })?;
-
+fn set(new_profile: Profile, mode: Mode) -> Result<(), TomeError> {
+    // `tier` is now a clap `ValueEnum`, so the parse-and-validate step happens
+    // during argument parsing; here we receive the already-validated `Profile`.
     let paths = Paths::resolve()?;
 
     // The profile lives in the index `meta`, so the DB must exist to record

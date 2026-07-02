@@ -6,11 +6,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::embedding::registry::{ModelEntry, lookup};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Profile {
+    /// Small tier: `bge-small-en-v1.5` + `bge-reranker-base`.
+    #[value(name = "small")]
     Small,
+    /// Medium tier (default): `bge-base-en-v1.5` + `bge-reranker-large`.
+    #[value(name = "medium")]
     Medium,
+    /// Large tier: `bge-large-en-v1.5` + `bge-reranker-v2-m3`.
+    #[value(name = "large")]
     Large,
 }
 

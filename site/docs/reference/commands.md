@@ -85,9 +85,11 @@ Manage the local embedding and rerank models, against a pinned registry.
 
 | Subcommand | Flags | Purpose |
 | --- | --- | --- |
-| `download` | `--force` | Download every registered model that is missing. `--force` re-downloads even when the on-disk manifest records a complete install. |
+| `download` | `--force`, `--all`, `--profile <tier>` | Download the active profile's missing models. `--force` re-downloads even when the on-disk manifest records a complete install. `--all` fetches every registered model (every tier). `--profile <small\|medium\|large>` fetches a SPECIFIC tier's models WITHOUT changing the stored active profile — pre-fetch another tier's weights before switching to it (mutually exclusive with `--all`). |
 | `list` | `--verify` | List every model with its on-disk state. `--verify` rehashes installed files against their pinned SHA-256 (slower, catches silent corruption). |
 | `remove [<name>...]` | `--all`, `--force` | Remove installed model directories and their manifests. Name one or more models, or pass `--all` to evict every installed model. `--force` skips the confirmation prompt — asked once for the whole set (required on a non-TTY). A failure on one model still processes the rest, then surfaces the first error's exit code. |
+| `profile [<tier>]` | — | Show or set the active model profile (`small\|medium\|large`). Omit `<tier>` to show the current profile; pass one to switch. The profile selects which embedder + reranker Tome uses; changing the embedder prints a `tome reindex` notice (never auto-reindexes). |
+| `test <capability>` | `--verify` | Run ONE real round-trip against the active model for `summariser`, `embedding`, or `reranker` (the configured remote provider, else the bundled local model) and report success. `--verify` additionally rehashes the active bundled model's on-disk primary artefact against its pinned SHA-256 (the same check `status`/`doctor`/`list` perform); a no-op for a remote provider (no on-disk artefact). Read-only — writes no stored state. |
 
 ## `tome reindex`
 

@@ -789,6 +789,14 @@ pub struct ModelsTestArgs {
     /// The capability to test: `summariser`, `embedding`, or `reranker`.
     #[arg(value_enum)]
     pub capability: TestCapability,
+    /// After the live round-trip, ALSO rehash the active bundled model's
+    /// on-disk primary artefact against its pinned SHA-256 (the same check
+    /// `status`/`doctor`/`models list` perform under `--verify`). A no-op for a
+    /// capability configured to use a remote provider (there is no on-disk
+    /// artefact to verify). Slower (several seconds for a large reranker) but
+    /// catches silent on-disk corruption.
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -799,13 +807,19 @@ pub struct ModelsDownloadArgs {
     /// Download every registered model, not just the active profile's set.
     #[arg(long)]
     pub all: bool,
+    /// Download the models for a SPECIFIC profile tier (small/medium/large)
+    /// instead of the active one — WITHOUT changing the stored active profile.
+    /// Mutually exclusive with `--all` (which already spans every tier). Useful
+    /// to pre-fetch another tier's weights before switching to it.
+    #[arg(long, value_enum, conflicts_with = "all")]
+    pub profile: Option<crate::embedding::Profile>,
 }
 
 #[derive(Debug, clap::Args)]
 pub struct ModelsProfileArgs {
     /// Set the active model profile. Omit to show the current profile.
-    #[arg(value_parser = ["small", "medium", "large"])]
-    pub tier: Option<String>,
+    #[arg(value_enum)]
+    pub tier: Option<crate::embedding::Profile>,
 }
 
 #[derive(Debug, clap::Args)]

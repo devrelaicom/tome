@@ -111,6 +111,8 @@
       "subcommands": {
         "download": [
           "--force",
+          "--all",
+          "--profile",
           "--verbose"
         ],
         "list": [
@@ -120,6 +122,13 @@
         "remove": [
           "--all",
           "--force",
+          "--verbose"
+        ],
+        "profile": [
+          "--verbose"
+        ],
+        "test": [
+          "--verify",
           "--verbose"
         ]
       },
