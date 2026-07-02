@@ -218,11 +218,12 @@ mod tests {
         3 + filters.catalogs.len() + filters.plugins.len() + filters.kinds.len()
     }
 
-    /// Count `?N` occurrences with N >= 4 in the SQL — i.e. the FILTER
-    /// placeholders (?1/?2/?3 are the fixed vector/workspace/LIMIT). This is the
-    /// SQL side of the lockstep; the param side is `filter value count`.
-    fn filter_placeholder_count(sql: &str) -> usize {
-        let mut n = 0;
+    /// The FILTER placeholders (`?N` with N >= 4) in the SQL, in order of
+    /// appearance. `?1`/`?2`/`?3` (the fixed vector/workspace/LIMIT) are
+    /// excluded. This is the SQL side of the lockstep — the sequence here must
+    /// match, contiguously from 4, the order `knn` binds the filter params.
+    fn filter_placeholders(sql: &str) -> Vec<u32> {
+        let mut nums = Vec::new();
         let bytes = sql.as_bytes();
         for (i, &b) in bytes.iter().enumerate() {
             if b == b'?' {
@@ -234,12 +235,18 @@ mod tests {
                 if j > i + 1 {
                     let num: u32 = sql[i + 1..j].parse().unwrap();
                     if num >= 4 {
-                        n += 1;
+                        nums.push(num);
                     }
                 }
             }
         }
-        n
+        nums
+    }
+
+    /// The count of filter placeholders — a thin wrapper preserved for the
+    /// count-only assertions.
+    fn filter_placeholder_count(sql: &str) -> usize {
+        filter_placeholders(sql).len()
     }
 
     #[test]
@@ -394,12 +401,30 @@ mod tests {
         ];
         for f in &combos {
             let sql = build_knn_sql(f);
-            let placeholders = filter_placeholder_count(&sql);
+            let placeholders = filter_placeholders(&sql);
             let params = expected_param_count(f) - 3;
+            // Count parity: the number of filter placeholders equals the number
+            // of filter params `knn` pushes.
             assert_eq!(
-                placeholders, params,
-                "filter placeholder count ({placeholders}) must equal filter param count \
-                 ({params}) for {f:?}; SQL: {sql}"
+                placeholders.len(),
+                params,
+                "filter placeholder count ({}) must equal filter param count \
+                 ({params}) for {f:?}; SQL: {sql}",
+                placeholders.len(),
+            );
+            // Contiguity + ordering: the filter placeholders must be EXACTLY the
+            // contiguous sequence ?4, ?5, …, ?(3+params) — no gaps, no dupes, no
+            // reordering. Since `knn` binds its filter params positionally in
+            // ascending order (catalogs → plugins → kinds), a `?N` that skipped a
+            // number, repeated one, or ran out of order would silently bind a
+            // value to the wrong placeholder. This makes the SQL-side test
+            // self-sufficient — the positional alignment no longer relies on the
+            // end-to-end recall tests to be caught.
+            let expected: Vec<u32> = (4..4 + params as u32).collect();
+            assert_eq!(
+                placeholders, expected,
+                "filter placeholders must be the contiguous sequence {expected:?} \
+                 (no gaps/dupes/reorders) for {f:?}; SQL: {sql}"
             );
         }
     }

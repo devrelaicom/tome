@@ -156,6 +156,13 @@ pub fn resolve_query_args(args: QueryArgs, qcfg: &crate::config::QueryConfig) ->
     }
 }
 
+/// The single Usage message for a missing / empty / whitespace-only query,
+/// shared by the CLI `run` gate and the `pipeline` backstop so a user hits the
+/// SAME helpful guidance whether they type bare `tome query`, `-q ""`, or a
+/// whitespace-only positional word.
+const EMPTY_QUERY_USAGE: &str =
+    "provide a query: positional words (`tome query reset a counter`), or -q/--query <text>";
+
 /// Resolve the effective query string from the two mutually-exclusive input
 /// forms: the single-string `-q`/`--query` (highest precedence) or the variadic
 /// positional words joined with a single space. `None` when neither was given
@@ -178,11 +185,7 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
     // `-q`/`--query` given is a usage error (the two forms are mutually
     // exclusive by clap `conflicts_with`, so at most one is ever set).
     if effective_query_text(&args).is_none() {
-        return Err(TomeError::Usage(
-            "provide a query: positional words (`tome query reset a counter`), \
-             or -q/--query <text>"
-                .into(),
-        ));
+        return Err(TomeError::Usage(EMPTY_QUERY_USAGE.into()));
     }
 
     let paths = Paths::resolve()?;
@@ -504,7 +507,10 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
     let query_text = effective_query_text(args).unwrap_or_default();
     let text = query_text.trim();
     if text.is_empty() {
-        return Err(TomeError::Usage("query text is empty".into()));
+        // Same rich guidance as the `run` gate (shared SSOT), so `tome query
+        // -q ""` and a whitespace-only positional both get the actionable form
+        // rather than a terse "query text is empty".
+        return Err(TomeError::Usage(EMPTY_QUERY_USAGE.into()));
     }
 
     let conn = open_index_for_read(deps.paths, deps.scope)?;

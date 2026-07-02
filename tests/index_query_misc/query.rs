@@ -593,6 +593,62 @@ fn run_with_deps_rejects_empty_query_text() {
     assert!(matches!(err, tome::error::TomeError::Usage(_)));
 }
 
+/// The `pipeline` empty-query backstop must surface the SAME rich guidance as
+/// the `run` gate (shared `EMPTY_QUERY_USAGE` SSOT), for BOTH a whitespace-only
+/// positional and an empty `-q ""` — the latter passes the `run` `None` gate
+/// (`Some("")`) and can only be caught by the backstop. A user must never get a
+/// terse "query text is empty" from either form.
+#[test]
+fn run_with_deps_empty_query_uses_the_rich_usage_message() {
+    let env = build_query_env();
+
+    // The exact SSOT string both call sites share (mirrors `EMPTY_QUERY_USAGE`).
+    const RICH: &str =
+        "provide a query: positional words (`tome query reset a counter`), or -q/--query <text>";
+
+    // Case A: whitespace-only positional word.
+    {
+        let embedder = StubEmbedder::new();
+        let deps = QueryDeps {
+            paths: &env.paths,
+            scope: &Scope(WorkspaceName::global()),
+            config: &env.config,
+            embedder: &embedder,
+            reranker: None,
+            embedder_seed: stub_embedder_seed(),
+            reranker_seed: stub_reranker_seed(),
+        };
+        let err = run_with_deps(args_for("   ", 5), deps, Mode::Json)
+            .expect_err("whitespace positional must error");
+        match err {
+            tome::error::TomeError::Usage(msg) => assert_eq!(msg, RICH, "whitespace positional"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    // Case B: `-q ""` (empty single-string form) — reaches only the backstop.
+    {
+        let embedder = StubEmbedder::new();
+        let mut args = args_for("ignored", 5);
+        args.text = Vec::new();
+        args.query = Some(String::new());
+        let deps = QueryDeps {
+            paths: &env.paths,
+            scope: &Scope(WorkspaceName::global()),
+            config: &env.config,
+            embedder: &embedder,
+            reranker: None,
+            embedder_seed: stub_embedder_seed(),
+            reranker_seed: stub_reranker_seed(),
+        };
+        let err = run_with_deps(args, deps, Mode::Json).expect_err("empty -q must error");
+        match err {
+            tome::error::TomeError::Usage(msg) => assert_eq!(msg, RICH, "empty -q"),
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn run_with_deps_strict_returns_query_no_results_on_empty_match() {
     let env = build_query_env();
