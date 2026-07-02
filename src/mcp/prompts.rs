@@ -117,7 +117,7 @@ fn truncate_description(s: &str) -> String {
 /// `argument-hint`. Per the contract's "Argument schema derivation —
 /// Case B".
 const CATCHALL_DEFAULT_DESCRIPTION: &str =
-    "Optional free-form input passed to the entry as a single positional argument.";
+    "Optional free-form input, passed to the entry as a single positional argument named `args`.";
 
 // --- Agent personas (Phase 6 / FR-060–FR-067) -----------------------------
 

@@ -515,6 +515,45 @@ Please fix issue $ARGUMENTS
 }
 
 #[test]
+fn catchall_without_argument_hint_uses_default_description_naming_args() {
+    // #332: an entry referencing `$ARGUMENTS` but carrying NO `argument-hint`
+    // frontmatter falls back to the generic `CATCHALL_DEFAULT_DESCRIPTION`. The
+    // reworded default now names the argument key (`args`) so an agent reading
+    // `prompts/list` knows what to send. Positive pin on that key text.
+    let cmd_body = "---
+name: fix-issue
+description: Fix a GitHub issue.
+---
+Please fix issue $ARGUMENTS
+";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("fix-issue", cmd_body)]);
+
+    let conn = open_index(&paths);
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
+    let descriptors: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
+    let args = descriptors[0]
+        .arguments
+        .as_ref()
+        .expect("catch-all `args` exposed when body references $ARGUMENTS");
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].name, "args");
+    let description = args[0]
+        .description
+        .as_deref()
+        .expect("catch-all default description present when no argument-hint");
+    assert!(
+        description.contains("`args`"),
+        "the default catch-all description must name the `args` key so the agent \
+         knows which key to send; got: {description:?}",
+    );
+}
+
+#[test]
 fn no_args_and_no_arguments_reference_yields_arguments_none() {
     let cmd_body = "---
 name: bare

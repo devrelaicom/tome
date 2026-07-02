@@ -237,6 +237,56 @@ fn meta_tool_symlinked_target_is_meta_install_failed() {
     );
 }
 
+/// #332: the `meta` tool's input schema (what `tools/list` exposes to an agent)
+/// must advertise `action` as OPTIONAL — it now carries `#[serde(default)]` and
+/// the `Action` enum defaults to `Install`, so a caller may omit it. `skill_id`
+/// stays required; `action` and `scope` (both defaulted) must NOT be in
+/// `required`. Asserts the `required` array unconditionally so a future schemars
+/// change that silently promoted/omitted a field fails here.
+#[test]
+fn meta_tool_input_schema_action_is_optional() {
+    use tome::mcp::server::Server;
+
+    let tools = Server::tool_router().list_all();
+    let meta_tool = tools
+        .iter()
+        .find(|t| t.name == "meta")
+        .expect("meta tool advertised");
+
+    let schema = &meta_tool.input_schema;
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .expect("meta input schema has a `required` array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+
+    assert!(
+        required.contains(&"skill_id"),
+        "`skill_id` must remain required; got: {required:?}",
+    );
+    assert!(
+        !required.contains(&"action"),
+        "`action` is defaulted (optional) and must not appear in `required`; got: {required:?}",
+    );
+    assert!(
+        !required.contains(&"scope"),
+        "`scope` is defaulted (optional) and must not appear in `required`; got: {required:?}",
+    );
+
+    // Back-compat, at the wire level: a request that OMITS `action` still
+    // deserialises, defaulting to `Install`. Existing callers passing
+    // `action: "install"` are unaffected (covered by the other tests).
+    let omitted: meta::Input =
+        serde_json::from_value(serde_json::json!({ "skill_id": "convert-marketplace" }))
+            .expect("`action` may be omitted; defaults to Install");
+    assert!(
+        matches!(omitted.action, meta::Action::Install),
+        "omitting `action` must default to Install",
+    );
+}
+
 /// FIX F (Test Minor #2): the `tome mcp --harness <name>` arg → `McpState.
 /// host_harness` hop. Two halves cover the full chain without a server
 /// handshake:

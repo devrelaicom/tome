@@ -646,7 +646,7 @@ fn persona_list_descriptors_are_byte_stable() {
             "arguments": [
                 {
                     "name": "args",
-                    "description": "Optional free-form input passed to the entry as a single positional argument.",
+                    "description": "Optional free-form input, passed to the entry as a single positional argument named `args`.",
                     "required": false
                 }
             ]

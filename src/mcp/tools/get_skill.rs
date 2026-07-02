@@ -25,7 +25,10 @@ use crate::substitution::{self, SubstitutionContext, SubstitutionError};
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
+    /// The catalog name, as returned by `search_skills` (e.g. `midnight-expert`).
     pub catalog: String,
+    /// The plugin name within the catalog, as returned by `search_skills`
+    /// (e.g. `compact-core`). Plugin name only, NOT `<catalog>/<plugin>`.
     pub plugin: String,
     /// The skill `name` field as returned by `search_skills`.
     pub name: String,

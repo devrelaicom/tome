@@ -25,10 +25,12 @@ use crate::mcp::state::McpState;
 use crate::mcp::tools::common::{error_data, error_data_with_code};
 
 /// The tool action. Only `install` ships; the enum is left open for a future
-/// `list`/`get` without a breaking input change.
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+/// `list`/`get` without a breaking input change. `install` is the default so a
+/// caller may omit `action` entirely.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
+    #[default]
     Install,
 }
 
@@ -54,9 +56,12 @@ impl Scope {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
-    /// The action to perform. Only `install` is supported.
+    /// The action to perform. `install` (the only supported value) is the
+    /// default, so this may be omitted.
+    #[serde(default)]
     pub action: Action,
-    /// The bundled skill id (e.g. `convert-marketplace`).
+    /// The id of a bundled Tome meta-skill (e.g. `convert-marketplace`). Run
+    /// `tome meta list` to discover the available ids.
     pub skill_id: String,
     /// `project` (default) or `global`.
     #[serde(default)]
