@@ -87,6 +87,7 @@ fn get_skill_plugin_data_dir_unwritable_exits_9() {
             catalog: staged.catalog_name.clone(),
             plugin: staged.plugin_name.clone(),
             name: "needs-data".into(),
+            raw: false,
         })
         .expect_err("plugin-data dir creation must fail when the root is a file");
 
@@ -170,6 +171,7 @@ fn get_skill_with_missing_plugin_dir_exits_27() {
             catalog: staged.catalog_name.clone(),
             plugin: staged.plugin_name.clone(),
             name: "ghost".into(),
+            raw: false,
         })
         .expect_err("missing plugin dir must surface EntryNotFound");
 

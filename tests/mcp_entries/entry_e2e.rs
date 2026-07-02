@@ -344,6 +344,7 @@ fn enable_search_get_skill_with_substitution() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "pipe-skill".into(),
+                raw: false,
             },
         ))
         .expect("get_skill ok");
@@ -364,6 +365,117 @@ fn enable_search_get_skill_with_substitution() {
         "no Stage-1 references must survive in the rendered body; got: {:?}",
         output.content,
     );
+}
+
+/// #331: `get_skill` in the DEFAULT (rendered) vs `raw: true` (no-substitution)
+/// modes over the SAME `${TOME_*}`-bearing skill body.
+///
+/// - Default (`raw: false`): the Stage-1 built-in `${TOME_SKILL_NAME}` is
+///   substituted (token gone, value present) and `substitutions_applied` is
+///   `true` — byte-identical to the pre-#331 behaviour.
+/// - Raw (`raw: true`): the literal `${TOME_SKILL_NAME}` token is preserved
+///   verbatim and `substitutions_applied` is `false` — exactly what an
+///   authoring/converting agent needs to see the source tokens.
+///
+/// Both modes still resolve the entry (`kind`, `path`) — raw mode only skips
+/// the substitution render, not the fetch.
+#[test]
+fn get_skill_raw_mode_preserves_tokens_default_mode_substitutes() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+
+    // A body referencing a Stage-1 built-in token. `${TOME_SKILL_NAME}`
+    // resolves deterministically from the entry name in both fixtures, so the
+    // rendered/raw distinction is unambiguous.
+    let skill_body =
+        "---\nname: raw-skill\ndescription: raw.\n---\nname=${TOME_SKILL_NAME} literal\n";
+    stage_workspace(&tmp, &paths, &[("raw-skill", skill_body)], &[]);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // (1) Default mode: substitution runs.
+    let rendered = rt
+        .block_on(get_skill::handle(
+            build_state(&paths, PromptRegistry::default()),
+            get_skill::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "raw-skill".into(),
+                raw: false,
+            },
+        ))
+        .expect("get_skill (rendered) ok");
+
+    assert!(
+        rendered.substitutions_applied,
+        "default mode must report substitutions_applied = true",
+    );
+    assert!(
+        rendered.content.contains("name=raw-skill"),
+        "default mode must substitute ${{TOME_SKILL_NAME}}; got: {:?}",
+        rendered.content,
+    );
+    assert!(
+        !rendered.content.contains("${TOME_SKILL_NAME}"),
+        "default mode must leave NO literal token behind; got: {:?}",
+        rendered.content,
+    );
+
+    // (2) Raw mode: substitution SKIPPED, literal token preserved.
+    let raw = rt
+        .block_on(get_skill::handle(
+            build_state(&paths, PromptRegistry::default()),
+            get_skill::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "raw-skill".into(),
+                raw: true,
+            },
+        ))
+        .expect("get_skill (raw) ok");
+
+    assert!(
+        !raw.substitutions_applied,
+        "raw mode must report substitutions_applied = false",
+    );
+    assert!(
+        raw.content.contains("${TOME_SKILL_NAME}"),
+        "raw mode must preserve the literal ${{TOME_SKILL_NAME}} token; got: {:?}",
+        raw.content,
+    );
+    assert!(
+        !raw.content.contains("name=raw-skill"),
+        "raw mode must NOT substitute the token; got: {:?}",
+        raw.content,
+    );
+
+    // Both modes resolve the SAME entry — raw only skips the render.
+    assert_eq!(rendered.kind, raw.kind, "kind identical across modes");
+    assert_eq!(rendered.path, raw.path, "path identical across modes");
+}
+
+/// #331 back-compat: an `Input` JSON that OMITS `raw` deserializes to
+/// `raw == false` — existing callers keep the rendered default under
+/// `#[serde(deny_unknown_fields)]` because `raw` carries `#[serde(default)]`.
+#[test]
+fn get_skill_input_omitting_raw_defaults_to_false() {
+    let input: get_skill::Input =
+        serde_json::from_value(json!({ "catalog": "acme", "plugin": "plug", "name": "s" }))
+            .expect("legacy Input (no `raw`) must still deserialize");
+    assert!(
+        !input.raw,
+        "omitting `raw` must default to false (rendered mode preserved)",
+    );
+
+    // And an explicit `raw: true` round-trips.
+    let explicit: get_skill::Input = serde_json::from_value(
+        json!({ "catalog": "acme", "plugin": "plug", "name": "s", "raw": true }),
+    )
+    .expect("explicit raw:true must deserialize");
+    assert!(explicit.raw, "explicit `raw: true` must set the flag");
 }
 
 /// User-invocable command rendered through `prompts/get` with caller
@@ -451,6 +563,7 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "deploy".into(),
+                raw: false,
             },
         ))
         .expect("get_skill must resolve the command, not return unknown_skill");

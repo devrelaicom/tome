@@ -164,7 +164,7 @@ impl Server {
             .map(Json)
     }
 
-    /// Fetch the body of one skill by `(catalog, plugin, name)` — typically a triple returned by a prior `search_skills` call. Returns the skill body with frontmatter stripped, plus the absolute paths of every sibling resource file in the skill's directory.
+    /// Fetch the body of one skill by `(catalog, plugin, name)` — typically a triple returned by a prior `search_skills` call. Returns the skill body with frontmatter stripped, plus the absolute paths of every sibling resource file in the skill's directory. Pass `raw: true` to receive the body with literal `${TOME_*}` substitution tokens preserved — for authoring/conversion workflows.
     #[tool(name = "get_skill")]
     async fn get_skill(
         &self,
