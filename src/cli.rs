@@ -782,10 +782,26 @@ pub struct StatusArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct ReindexArgs {
-    /// Scope. Omit to reindex every enabled plugin across every catalog;
-    /// pass `<catalog>` to scope to one catalog; pass `<catalog>/<plugin>`
-    /// to scope to one plugin.
-    pub scope: Option<String>,
+    /// Scopes. Omit ALL of `<scope>`, `--catalog`, and `--plugin` to reindex
+    /// every enabled plugin (the whole-index form — the only form that restamps
+    /// the global embedder identity). Each positional token is one of:
+    /// `<catalog>` (every enabled plugin in that catalog), `<catalog>/<plugin>`
+    /// (one plugin), or a `*` glob (`<catalog>/*`, `<catalog>/compact-*`, or a
+    /// bare `mycat-*` matching enrolled catalog names). Multiple tokens are
+    /// unioned. Issue #316.
+    #[arg(num_args = 0..)]
+    pub scopes: Vec<String>,
+    /// Reindex every enabled plugin in the named catalog(s). Repeatable; a `*`
+    /// glob matches enrolled catalog names. Cannot be combined with positional
+    /// `<scope>` tokens (use one form or the other), but MAY be combined with
+    /// `--plugin` (their targets union).
+    #[arg(long, action = clap::ArgAction::Append, conflicts_with = "scopes")]
+    pub catalog: Vec<String>,
+    /// Reindex the named `<catalog>/<plugin>`. Repeatable; a `*` glob is allowed
+    /// in the plugin segment (`<catalog>/compact-*`). Cannot be combined with
+    /// positional `<scope>` tokens, but MAY be combined with `--catalog`.
+    #[arg(long, action = clap::ArgAction::Append, conflicts_with = "scopes")]
+    pub plugin: Vec<String>,
     /// Re-embed every in-scope skill regardless of `content_hash`. Used for
     /// embedder upgrades and integrity recovery.
     #[arg(long)]

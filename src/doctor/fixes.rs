@@ -551,8 +551,13 @@ fn repair_harness_sync_with(ctx: &FixContext<'_>, force: bool) -> Result<(), Tom
 fn repair_corrupt_index(ctx: &FixContext<'_>) -> Result<(), TomeError> {
     use crate::cli::ReindexArgs;
     crate::commands::reindex::run(
+        // No positional scopes / `--catalog` / `--plugin` → the WHOLE-INDEX form,
+        // exactly what a corrupt-index repair needs (re-embed every row + restamp
+        // the global embedder identity/dimension).
         ReindexArgs {
-            scope: None,
+            scopes: Vec::new(),
+            catalog: Vec::new(),
+            plugin: Vec::new(),
             force: true,
         },
         ctx.scope,

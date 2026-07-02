@@ -1,14 +1,29 @@
-//! `tome reindex [<scope>] [--force]`.
+//! `tome reindex [<scope>...] [--catalog <name>...] [--plugin <id>...] [--force]`.
 //!
 //! Explicit re-embedding outside the `tome catalog update` schedule.
 //! Used for embedder upgrades (FR-016 recovery path) and integrity recovery.
 //! See `contracts/reindex.md`.
 //!
-//! The scope grammar is:
+//! Selection grammar (issue #316 — widened from a single optional slash-string):
 //!
-//! * omitted — every enabled plugin across every registered catalog;
-//! * `<catalog>` — every enabled plugin in one catalog;
-//! * `<catalog>/<plugin>` — exactly one plugin.
+//! * NOTHING (no positional scopes AND no `--catalog` AND no `--plugin`) — the
+//!   WHOLE-INDEX form: every enabled plugin across every enrolled catalog. This
+//!   is the ONLY form that restamps the global embedder identity + dimension and
+//!   is permitted under embedder drift.
+//! * a positional token WITHOUT `/` — a whole `<catalog>` (every enabled plugin
+//!   in it); a `*` glob matches enrolled catalog NAMES.
+//! * a positional token WITH `/` — a `<catalog>/<plugin>`; a `*` glob in either
+//!   half matches against the enabled-plugin set.
+//! * `--catalog <name>` (repeatable) — same as a bare positional token; a `*`
+//!   glob matches enrolled catalog names.
+//! * `--plugin <catalog>/<plugin>` (repeatable) — same as a slash positional; a
+//!   `*` glob is allowed in the plugin segment.
+//!
+//! ANY explicit selection (even one that happens to cover every plugin) is a
+//! NON-whole-index run: it never restamps `meta`, and it is REFUSED under
+//! embedder drift with [`TomeError::ReindexScopedEmbedderChange`] (exit 47).
+//! Reindexing only some plugins while advertising a global dimension is the
+//! mixed-dimension corruption the policy prevents.
 
 use std::io::Write;
 use std::str::FromStr;
@@ -19,11 +34,12 @@ use serde::Serialize;
 use crate::cli::ReindexArgs;
 use crate::error::TomeError;
 use crate::index::skills::ReindexSummary;
-use crate::index::{self, OpenOptions, enabled_plugins_for_catalog};
+use crate::index::{self, OpenOptions};
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
 use crate::plugin::PluginId;
 use crate::plugin::lifecycle::{self, LifecycleDeps};
+use crate::plugin::selector::{glob_match, is_glob};
 use crate::presentation::colour;
 use crate::workspace::ResolvedScope;
 
@@ -34,13 +50,16 @@ use crate::index::meta::{self, MetaKey, ModelIdent};
 // catalog / plugin). To avoid a name collision with the Phase 3
 // `workspace::Scope`, the workspace scope is always referenced as
 // `&ResolvedScope` (or `&crate::workspace::Scope`) at function boundaries.
+// Since issue #316 `Scope` is retained ONLY as the library-test entry-point
+// shape (`run_with_deps`); the production path resolves a `Selection` instead.
 
 pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let forced = args.force;
-    // Derive the telemetry scope structurally from the raw arg (before
-    // validation) so a failure during `parse_scope` still carries the right
-    // dimension. omitted→All, `<catalog>/<plugin>`→Plugin, `<catalog>`→Catalog.
-    let tele_scope = reindex_scope_of(args.scope.as_deref());
+    // Derive the telemetry scope structurally from the raw args (before
+    // validation) so a failure during resolution still carries the right
+    // dimension. No selection→All; any `--plugin`/slash-positional→Plugin; any
+    // other explicit selection (bare positional / `--catalog`)→Catalog.
+    let tele_scope = reindex_scope_of(&args);
 
     let result = run_inner(args, ws, mode);
 
@@ -60,15 +79,21 @@ pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), Tome
     result
 }
 
-/// Structurally map the raw `<scope>` arg to the telemetry
+/// Structurally map the raw args to the telemetry
 /// [`ReindexScope`](crate::telemetry::event::ReindexScope) — no validation, so
-/// it is meaningful even when `parse_scope` later rejects the value.
-fn reindex_scope_of(raw: Option<&str>) -> crate::telemetry::event::ReindexScope {
+/// it is meaningful even when resolution later rejects a token. Whole-index (no
+/// selection) → `All`; any `--plugin` or slash-bearing positional token →
+/// `Plugin`; any other explicit selection (`--catalog` or a bare positional) →
+/// `Catalog`.
+fn reindex_scope_of(args: &ReindexArgs) -> crate::telemetry::event::ReindexScope {
     use crate::telemetry::event::ReindexScope;
-    match raw {
-        None => ReindexScope::All,
-        Some(s) if s.contains('/') => ReindexScope::Plugin,
-        Some(_) => ReindexScope::Catalog,
+    let no_selection = args.scopes.is_empty() && args.catalog.is_empty() && args.plugin.is_empty();
+    if no_selection {
+        ReindexScope::All
+    } else if !args.plugin.is_empty() || args.scopes.iter().any(|s| s.contains('/')) {
+        ReindexScope::Plugin
+    } else {
+        ReindexScope::Catalog
     }
 }
 
@@ -80,12 +105,24 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
     // remote whole-index run) the established dimension can be persisted.
     let cfg = crate::config::load(&paths)?;
 
-    let scope = parse_scope(args.scope.as_deref(), &paths, &ws.scope)?;
-    let plugins = resolve_targets(&scope, &paths, &ws.scope)?;
+    // Issue #316: resolve the variadic scopes / `*` globs / `--catalog` /
+    // `--plugin` into a deduped target set plus the load-bearing `whole_index`
+    // bool and a human label. Resolution is FAIL-FAST (the first invalid token
+    // errors) — the meta-stamp policy below depends on an all-or-nothing target
+    // set, so this deliberately does NOT use the selector's forward-progress.
+    let Selection {
+        targets: plugins,
+        whole_index,
+        label,
+    } = resolve_selection(&args, &paths, &ws.scope)?;
 
     if plugins.is_empty() {
-        // No enabled plugins anywhere in scope: nothing to reindex. Exit 0
-        // with a small notice so the user knows this wasn't a silent failure.
+        // A VALID exact selection with no enabled plugins in scope (e.g. an
+        // enrolled-but-empty catalog, or the whole-index form on a fresh
+        // install). A glob that matched zero already errored in
+        // `resolve_selection` (Usage/2), so this branch is only the benign case.
+        // Exit 0 with a small notice so the user knows this wasn't a silent
+        // failure.
         if mode == Mode::Human {
             let mut out = std::io::stdout().lock();
             writeln!(out, "Nothing to reindex (no enabled plugins in scope).")?;
@@ -95,8 +132,9 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
 
     // B1: a profile-driven embedder change requires a WHOLE-INDEX re-embed; the
     // GLOBAL `meta` embedder stamp is gated on it. Open one writable handle for
-    // the active-embedder read + the (post-commit) stamp. `Scope::All` is the
-    // "no catalog/plugin scope" discriminant from `parse_scope` above.
+    // the active-embedder read + the (post-commit) stamp. `whole_index` is the
+    // "no explicit selection at all" discriminant from `resolve_selection`
+    // above — ANY `--catalog`/`--plugin`/positional token makes it `false`.
     let policy_conn = {
         let (e_seed, r_seed, s_seed) = registry_seeds();
         index::open(
@@ -109,7 +147,6 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
             },
         )?
     };
-    let whole_index = matches!(scope, Scope::All);
     let configured = meta::active_embedder(&policy_conn)?;
     // Phase 12: the configured identity is the ACTIVE (remote-or-bundled)
     // embedder. The policy gate compares THIS against the stored `meta` stamp,
@@ -157,7 +194,7 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
     // (41), `plugin enable`/`catalog update` hit `guard_embedder_drift` (41/42),
     // and `vec_distance_cosine` hard-errors on any mixed-dimension row. A re-run
     // of `tome reindex --force` re-embeds everything and is fully self-healing.
-    let aggregate = execute(&scope, &plugins, &deps, force)?;
+    let aggregate = execute_targets(&plugins, &deps, force)?;
 
     // B1: stamp the GLOBAL `meta` embedder rows ONLY after a WHOLE-INDEX
     // re-embed commits. Never stamp after a partial (scoped) re-embed — the
@@ -187,7 +224,7 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
         crate::summarise::regenerate_for_trigger(ws.scope.name(), &paths)?;
     }
 
-    emit(&scope, &aggregate, mode)
+    emit_label(&label, &aggregate, mode)
 }
 
 /// Resolved scope. `Catalog`s and `Plugin`s carry strings rather than
@@ -209,114 +246,213 @@ impl Scope {
     }
 }
 
-fn parse_scope(
-    raw: Option<&str>,
-    paths: &Paths,
-    ws_scope: &crate::workspace::Scope,
-) -> Result<Scope, TomeError> {
-    let Some(s) = raw else {
-        return Ok(Scope::All);
-    };
-    // FF2: catalog existence is checked against the `workspace_catalogs` DB
-    // enrolment, not `config.toml [catalogs]` (never written in production →
-    // every scoped reindex failed with exit 3 on a fresh install). The
-    // exit-code contract is unchanged: unknown catalog → CatalogNotFound (3);
-    // known catalog + unknown plugin → PluginNotFound (20).
-    let conn = open_index_for_read(paths, ws_scope)?;
-    let workspace_name = ws_scope.name().as_str();
-    if s.contains('/') {
-        let id = PluginId::from_str(s)
-            .map_err(|e| TomeError::Usage(format!("invalid plugin id `{s}`: {e}")))?;
-        if index::workspace_catalogs::find(&conn, workspace_name, &id.catalog)?.is_none() {
-            return Err(TomeError::CatalogNotFound(id.catalog));
-        }
-        // Plugin existence is enforced at the reindex step (PluginNotFound /
-        // PluginManifestParseError surface from lifecycle::reindex_plugin). We
-        // also cross-check the index here so a typo on a plugin that has
-        // never been enabled exits 20 immediately rather than emerging from
-        // the lifecycle's resolver.
-        let enabled = read_enabled_plugins(paths, ws_scope, &id.catalog)?;
-        if !enabled.iter().any(|p| p == &id.plugin) {
-            return Err(TomeError::PluginNotFound(id.to_string()));
-        }
-        Ok(Scope::Plugin(id))
-    } else {
-        if index::workspace_catalogs::find(&conn, workspace_name, s)?.is_none() {
-            return Err(TomeError::CatalogNotFound(s.to_owned()));
-        }
-        Ok(Scope::Catalog(s.to_owned()))
-    }
+/// The resolved outcome of the #316 selection: the deduped, order-preserving
+/// target set, the load-bearing `whole_index` flag (true ONLY for the no-selection
+/// form), and a human label for emit.
+#[derive(Debug)]
+struct Selection {
+    targets: Vec<PluginId>,
+    whole_index: bool,
+    label: String,
 }
 
-fn resolve_targets(
-    scope: &Scope,
+/// Resolve the variadic scopes / `*` globs / `--catalog` / `--plugin` flags into
+/// a [`Selection`]. FAIL-FAST: validate every token and error on the first
+/// invalid one (the meta-stamp policy depends on an all-or-nothing target set —
+/// see the module header). This deliberately does NOT reuse
+/// `selector::resolve`, whose bare-token = plugin-name semantics are wrong here:
+/// a bare token to `reindex` is a whole CATALOG, not a plugin name.
+///
+/// Exit-code contract (preserved from the pre-#316 `parse_scope`, pinned by
+/// `tests/index_query_misc/reindex.rs`):
+/// * a malformed slash literal (`bad/id/extra`) → [`TomeError::Usage`] (2);
+/// * an unknown catalog → [`TomeError::CatalogNotFound`] (3);
+/// * a known catalog + unknown/not-enabled plugin → [`TomeError::PluginNotFound`]
+///   (20);
+/// * a glob matching zero → [`TomeError::Usage`] (2), never a silent no-op.
+fn resolve_selection(
+    args: &ReindexArgs,
+    paths: &Paths,
+    ws_scope: &crate::workspace::Scope,
+) -> Result<Selection, TomeError> {
+    let no_selection = args.scopes.is_empty() && args.catalog.is_empty() && args.plugin.is_empty();
+
+    // ---- WHOLE-INDEX: no selection at all ---------------------------------
+    if no_selection {
+        let targets = enabled_plugin_ids_for_workspace(paths, ws_scope)?;
+        return Ok(Selection {
+            targets,
+            whole_index: true,
+            label: "all".to_owned(),
+        });
+    }
+
+    // Any explicit selection: read the candidate universe ONCE, then resolve
+    // purely (no I/O) so the classification + glob expansion is unit-testable.
+    let candidates = enabled_plugin_ids_for_workspace(paths, ws_scope)?;
+    let enrolled_catalogs = enrolled_catalog_names(paths, ws_scope)?;
+    resolve_explicit(args, &candidates, &enrolled_catalogs)
+}
+
+/// Pure resolution of an EXPLICIT selection (at least one of scopes / catalog /
+/// plugin is non-empty) against the pre-read candidate universe. No I/O — the
+/// enabled-plugin candidate set and enrolled catalog names are passed in — so
+/// the token classification + `*` expansion is unit-testable without a DB.
+///
+/// FAIL-FAST: validates every token in order and returns the FIRST error. The
+/// meta-stamp policy depends on an all-or-nothing target set, so this does NOT
+/// use forward-progress (unlike `selector::resolve`). It also does NOT reuse
+/// `selector::resolve`: a bare token to reindex is a whole CATALOG, not a plugin
+/// name.
+fn resolve_explicit(
+    args: &ReindexArgs,
+    candidates: &[PluginId],
+    enrolled_catalogs: &[String],
+) -> Result<Selection, TomeError> {
+    // Classify each source into catalog-level vs plugin-level tokens. A
+    // `--catalog` value and a slash-free positional are catalog-level; a
+    // `--plugin` value and a slash-bearing positional are plugin-level.
+    let mut catalog_tokens: Vec<&str> = Vec::new();
+    let mut plugin_tokens: Vec<&str> = Vec::new();
+    for tok in &args.catalog {
+        catalog_tokens.push(tok.as_str());
+    }
+    for tok in &args.plugin {
+        plugin_tokens.push(tok.as_str());
+    }
+    for tok in &args.scopes {
+        if tok.contains('/') {
+            plugin_tokens.push(tok.as_str());
+        } else {
+            catalog_tokens.push(tok.as_str());
+        }
+    }
+
+    let mut targets: Vec<PluginId> = Vec::new();
+    let push_unique = |targets: &mut Vec<PluginId>, id: PluginId| {
+        if !targets.contains(&id) {
+            targets.push(id);
+        }
+    };
+
+    // ---- catalog-level tokens ---------------------------------------------
+    for tok in &catalog_tokens {
+        if is_glob(tok) {
+            // Match the pattern against enrolled catalog NAMES; each match
+            // expands to that catalog's enabled plugins. Zero catalog matches
+            // is a usage error, echoing the pattern (never a silent no-op).
+            let mut any = false;
+            for cat in enrolled_catalogs {
+                if glob_match(tok, cat) {
+                    any = true;
+                    for cand in candidates.iter().filter(|c| &c.catalog == cat) {
+                        push_unique(&mut targets, cand.clone());
+                    }
+                }
+            }
+            if !any {
+                return Err(TomeError::Usage(format!(
+                    "pattern `{tok}` matched no enrolled catalogs\n\
+                     hint: run `tome catalog list` to see enrolled catalogs"
+                )));
+            }
+        } else {
+            // Exact catalog: must be enrolled else CatalogNotFound (3). Expand
+            // to its enabled plugins (may be empty — a valid empty selection).
+            if !enrolled_catalogs.iter().any(|c| c == tok) {
+                return Err(TomeError::CatalogNotFound((*tok).to_owned()));
+            }
+            for cand in candidates.iter().filter(|c| c.catalog == **tok) {
+                push_unique(&mut targets, cand.clone());
+            }
+        }
+    }
+
+    // ---- plugin-level tokens ----------------------------------------------
+    for tok in &plugin_tokens {
+        if is_glob(tok) {
+            // Split on the FIRST `/` into (cat_pat, plug_pat); a slash-free
+            // `--plugin` glob has no catalog half, so match its whole value
+            // against the plugin segment across every enrolled catalog.
+            let (cat_pat, plug_pat) = match tok.split_once('/') {
+                Some((c, p)) => (c, p),
+                None => ("*", *tok),
+            };
+            let mut any = false;
+            for cand in candidates {
+                if glob_match(cat_pat, &cand.catalog) && glob_match(plug_pat, &cand.plugin) {
+                    any = true;
+                    push_unique(&mut targets, cand.clone());
+                }
+            }
+            if !any {
+                return Err(TomeError::Usage(format!(
+                    "pattern `{tok}` matched no enabled plugins\n\
+                     hint: run `tome plugin list` to see enabled `<catalog>/<plugin>` ids"
+                )));
+            }
+        } else {
+            // Literal `<catalog>/<plugin>`: parse via the PluginId SSOT so a
+            // malformed id (`bad/id/extra`) is Usage/2 (preserving the pin);
+            // then enforce existence exactly as the pre-#316 `parse_scope` did —
+            // catalog enrolled? else CatalogNotFound/3; plugin in the enabled
+            // set? else PluginNotFound/20.
+            let id = PluginId::from_str(tok)
+                .map_err(|e| TomeError::Usage(format!("invalid plugin id `{tok}`: {e}")))?;
+            if !enrolled_catalogs.iter().any(|c| c == &id.catalog) {
+                return Err(TomeError::CatalogNotFound(id.catalog));
+            }
+            if !candidates
+                .iter()
+                .any(|c| c.catalog == id.catalog && c.plugin == id.plugin)
+            {
+                return Err(TomeError::PluginNotFound(id.to_string()));
+            }
+            push_unique(&mut targets, id);
+        }
+    }
+
+    let label = selection_label(&catalog_tokens, &plugin_tokens, targets.len());
+    Ok(Selection {
+        targets,
+        whole_index: false,
+        label,
+    })
+}
+
+/// A concise human label describing an explicit selection, e.g.
+/// `midnight, other/* (3 plugins)`. Used only for the human/JSON emit summary;
+/// the actual re-embed is driven by the resolved target set.
+fn selection_label(catalog_tokens: &[&str], plugin_tokens: &[&str], count: usize) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    parts.extend(catalog_tokens.iter().map(|t| (*t).to_owned()));
+    parts.extend(plugin_tokens.iter().map(|t| (*t).to_owned()));
+    let joined = parts.join(", ");
+    format!(
+        "{joined} ({count} plugin{})",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
+/// Every enrolled catalog NAME for the resolved workspace — the match universe
+/// for catalog-level globs and the exact-catalog existence check.
+fn enrolled_catalog_names(
+    paths: &Paths,
+    ws_scope: &crate::workspace::Scope,
+) -> Result<Vec<String>, TomeError> {
+    let conn = open_index_for_read(paths, ws_scope)?;
+    let enrolments =
+        index::workspace_catalogs::list_for_workspace(&conn, ws_scope.name().as_str())?;
+    Ok(enrolments.into_iter().map(|e| e.catalog_name).collect())
+}
+
+/// Every enabled plugin (as a [`PluginId`]) across every catalog for the
+/// resolved workspace, ordered by `(catalog, plugin)`. The whole-index target
+/// set AND the candidate universe for #316 glob matching.
+fn enabled_plugin_ids_for_workspace(
     paths: &Paths,
     ws_scope: &crate::workspace::Scope,
 ) -> Result<Vec<PluginId>, TomeError> {
-    match scope {
-        Scope::Plugin(id) => Ok(vec![id.clone()]),
-        Scope::Catalog(c) => {
-            let names = read_enabled_plugins(paths, ws_scope, c)?;
-            Ok(names
-                .into_iter()
-                .map(|p| PluginId {
-                    catalog: c.clone(),
-                    plugin: p,
-                })
-                .collect())
-        }
-        Scope::All => {
-            // Walk every catalog row in the index, group by catalog. We do
-            // this once via a single SQL query rather than iterating
-            // catalogs and re-opening the connection. Scope: the resolved
-            // workspace.
-            let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
-            let workspace_name = ws_scope.name().as_str();
-            let conn = index::open(
-                &paths.index_db,
-                &OpenOptions {
-                    embedder: embedder_seed,
-                    reranker: reranker_seed,
-                    summariser: summariser_seed,
-                    profile: None,
-                },
-            )?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT DISTINCT s.catalog, s.plugin
-                     FROM skills AS s
-                     JOIN workspace_skills AS ws ON ws.skill_id = s.id
-                     JOIN workspaces       AS w  ON w.id = ws.workspace_id
-                     WHERE w.name = ?1
-                     ORDER BY s.catalog, s.plugin",
-                )
-                .map_err(|e| {
-                    TomeError::IndexIntegrityCheckFailure(format!("prepare all-scope: {e}"))
-                })?;
-            let rows = stmt
-                .query_map(rusqlite::params![workspace_name], |row| {
-                    let c: String = row.get(0)?;
-                    let p: String = row.get(1)?;
-                    Ok(PluginId {
-                        catalog: c,
-                        plugin: p,
-                    })
-                })
-                .map_err(|e| {
-                    TomeError::IndexIntegrityCheckFailure(format!("query all-scope: {e}"))
-                })?;
-            rows.collect::<Result<_, _>>().map_err(|e| {
-                TomeError::IndexIntegrityCheckFailure(format!("collect all-scope: {e}"))
-            })
-        }
-    }
-}
-
-fn read_enabled_plugins(
-    paths: &Paths,
-    ws_scope: &crate::workspace::Scope,
-    catalog: &str,
-) -> Result<Vec<String>, TomeError> {
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let conn = index::open(
         &paths.index_db,
@@ -327,7 +463,11 @@ fn read_enabled_plugins(
             profile: None,
         },
     )?;
-    enabled_plugins_for_catalog(&conn, ws_scope.name().as_str(), catalog)
+    let pairs = index::skills::enabled_plugins_for_workspace(&conn, ws_scope.name().as_str())?;
+    Ok(pairs
+        .into_iter()
+        .map(|(catalog, plugin)| PluginId { catalog, plugin })
+        .collect())
 }
 
 fn load_embedder(
@@ -473,12 +613,10 @@ impl ReindexAggregate {
 
 /// Execute a reindex against a pre-built `LifecycleDeps`. Loops over every
 /// plugin in `plugins`, calling `lifecycle::reindex_plugin` per plugin.
-/// `force` is propagated to each call.
-///
-/// Exposed for tests that want to drive the library API with `StubEmbedder`
-/// rather than spawning the CLI binary (which loads `FastembedEmbedder`).
-pub fn execute(
-    _scope: &Scope,
+/// `force` is propagated to each call. FAIL-FAST: stops on the first per-plugin
+/// error (the meta-stamp policy in `run_inner` depends on an all-or-nothing
+/// target set).
+fn execute_targets(
     plugins: &[PluginId],
     deps: &LifecycleDeps<'_>,
     force: bool,
@@ -504,24 +642,38 @@ pub fn execute(
     Ok(aggregate)
 }
 
+/// Test/library entry-point shim: drive [`execute_targets`] from a legacy
+/// [`Scope`] value. The `Scope` no longer drives production selection (that is
+/// `resolve_selection` → `execute_targets`); it survives only so the pre-#316
+/// `run_with_deps` tests keep compiling and describing their intent. Existence
+/// is NOT validated here — tests pass an already-resolved plugin list.
+pub fn execute(
+    _scope: &Scope,
+    plugins: &[PluginId],
+    deps: &LifecycleDeps<'_>,
+    force: bool,
+) -> Result<ReindexAggregate, TomeError> {
+    execute_targets(plugins, deps, force)
+}
+
 fn duration_ms(started: Instant) -> u64 {
     let elapsed = started.elapsed().as_millis();
     elapsed.min(u128::from(u64::MAX)) as u64
 }
 
-fn emit(scope: &Scope, aggregate: &ReindexAggregate, mode: Mode) -> Result<(), TomeError> {
+fn emit_label(label: &str, aggregate: &ReindexAggregate, mode: Mode) -> Result<(), TomeError> {
     match mode {
-        Mode::Human => emit_human(scope, aggregate),
-        Mode::Json => emit_json(scope, aggregate),
+        Mode::Human => emit_human(label, aggregate),
+        Mode::Json => emit_json(label, aggregate),
     }
 }
 
-fn emit_human(scope: &Scope, agg: &ReindexAggregate) -> Result<(), TomeError> {
+fn emit_human(label: &str, agg: &ReindexAggregate) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
     writeln!(
         out,
         "Reindexed {} ({} plugin{}, {} skill{} checked)",
-        scope.label(),
+        label,
         agg.plugins_visited,
         if agg.plugins_visited == 1 { "" } else { "s" },
         agg.skills_checked,
@@ -549,9 +701,9 @@ struct ReindexRecord<'a> {
     _phantom: std::marker::PhantomData<&'a ()>,
 }
 
-fn emit_json(scope: &Scope, agg: &ReindexAggregate) -> Result<(), TomeError> {
+fn emit_json(label: &str, agg: &ReindexAggregate) -> Result<(), TomeError> {
     let record = ReindexRecord {
-        scope: scope.label(),
+        scope: label.to_owned(),
         plugins_visited: agg.plugins_visited,
         skills_checked: agg.skills_checked,
         skills_re_embedded: agg.skills_re_embedded,
@@ -564,7 +716,8 @@ fn emit_json(scope: &Scope, agg: &ReindexAggregate) -> Result<(), TomeError> {
 
 /// Helper for tests: take an already-built scope, plugin list, and deps, and
 /// drive `execute` directly. Re-exports the same function with no scope
-/// validation so tests can scope by plugin without registering a catalog.
+/// validation so tests can scope by plugin without registering a catalog. The
+/// emitted `scope` label uses the legacy [`Scope::label`] (test-only path).
 pub fn run_with_deps(
     scope: Scope,
     plugins: &[PluginId],
@@ -573,6 +726,251 @@ pub fn run_with_deps(
     mode: Mode,
 ) -> Result<ReindexAggregate, TomeError> {
     let aggregate = execute(&scope, plugins, deps, force)?;
-    emit(&scope, &aggregate, mode)?;
+    emit_label(&scope.label(), &aggregate, mode)?;
     Ok(aggregate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(catalog: &str, plugin: &str) -> PluginId {
+        PluginId {
+            catalog: catalog.to_owned(),
+            plugin: plugin.to_owned(),
+        }
+    }
+
+    /// The enabled-plugin candidate universe shared across the #316 resolution
+    /// tests: two catalogs, one of them holding a `compact-*` family.
+    fn candidates() -> Vec<PluginId> {
+        vec![
+            id("midnight", "compact-lint"),
+            id("midnight", "compact-fmt"),
+            id("midnight", "audit"),
+            id("other", "helper"),
+        ]
+    }
+
+    fn catalogs() -> Vec<String> {
+        vec!["midnight".to_owned(), "other".to_owned()]
+    }
+
+    /// Build a `ReindexArgs` directly (bypassing clap) for the pure resolver.
+    fn args(scopes: &[&str], catalog: &[&str], plugin: &[&str]) -> ReindexArgs {
+        ReindexArgs {
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            catalog: catalog.iter().map(|s| (*s).to_owned()).collect(),
+            plugin: plugin.iter().map(|s| (*s).to_owned()).collect(),
+            force: false,
+        }
+    }
+
+    fn resolve(scopes: &[&str], catalog: &[&str], plugin: &[&str]) -> Result<Selection, TomeError> {
+        resolve_explicit(&args(scopes, catalog, plugin), &candidates(), &catalogs())
+    }
+
+    // ---- whole-catalog (bare positional) ----------------------------------
+
+    #[test]
+    fn bare_positional_expands_a_whole_catalog() {
+        let sel = resolve(&["midnight"], &[], &[]).expect("resolve");
+        assert!(
+            !sel.whole_index,
+            "an explicit selection is NEVER whole-index"
+        );
+        assert_eq!(
+            sel.targets,
+            vec![
+                id("midnight", "compact-lint"),
+                id("midnight", "compact-fmt"),
+                id("midnight", "audit"),
+            ],
+        );
+    }
+
+    #[test]
+    fn unknown_catalog_bare_positional_is_catalog_not_found() {
+        let err = resolve(&["ghost"], &[], &[]).expect_err("unknown catalog");
+        assert_eq!(err.exit_code(), 3);
+        assert!(matches!(err, TomeError::CatalogNotFound(c) if c == "ghost"));
+    }
+
+    #[test]
+    fn enrolled_catalog_with_no_enabled_plugins_is_a_valid_empty_selection() {
+        // `midnight`/`other` are enrolled; a THIRD enrolled catalog with zero
+        // enabled plugins resolves to an empty target set (the benign
+        // "Nothing to reindex" path), NOT an error.
+        let cats = vec!["midnight".to_owned(), "empty-cat".to_owned()];
+        let sel = resolve_explicit(&args(&["empty-cat"], &[], &[]), &candidates(), &cats)
+            .expect("empty-but-enrolled catalog resolves");
+        assert!(sel.targets.is_empty());
+        assert!(!sel.whole_index);
+    }
+
+    // ---- --catalog flag ----------------------------------------------------
+
+    #[test]
+    fn catalog_flag_matches_bare_positional_semantics() {
+        let sel = resolve(&[], &["midnight"], &[]).expect("resolve");
+        assert_eq!(
+            sel.targets,
+            vec![
+                id("midnight", "compact-lint"),
+                id("midnight", "compact-fmt"),
+                id("midnight", "audit"),
+            ],
+        );
+    }
+
+    #[test]
+    fn catalog_glob_matches_enrolled_names() {
+        // `*` matches BOTH enrolled catalogs → every enabled plugin, deduped.
+        let sel = resolve(&[], &["*"], &[]).expect("resolve");
+        assert_eq!(
+            sel.targets,
+            vec![
+                id("midnight", "compact-lint"),
+                id("midnight", "compact-fmt"),
+                id("midnight", "audit"),
+                id("other", "helper"),
+            ],
+        );
+    }
+
+    #[test]
+    fn catalog_glob_zero_match_is_usage_error() {
+        let err = resolve(&[], &["ghost-*"], &[]).expect_err("zero catalog match");
+        assert_eq!(err.exit_code(), 2, "a glob matching nothing is Usage/2");
+        assert!(matches!(&err, TomeError::Usage(m) if m.contains("ghost-*")));
+    }
+
+    // ---- plugin-level (slash positional / --plugin) -----------------------
+
+    #[test]
+    fn slash_positional_single_plugin() {
+        let sel = resolve(&["midnight/audit"], &[], &[]).expect("resolve");
+        assert_eq!(sel.targets, vec![id("midnight", "audit")]);
+    }
+
+    #[test]
+    fn plugin_flag_single_plugin() {
+        let sel = resolve(&[], &[], &["other/helper"]).expect("resolve");
+        assert_eq!(sel.targets, vec![id("other", "helper")]);
+    }
+
+    #[test]
+    fn plugin_glob_expands_within_catalog() {
+        let sel = resolve(&["midnight/compact-*"], &[], &[]).expect("resolve");
+        assert_eq!(
+            sel.targets,
+            vec![
+                id("midnight", "compact-lint"),
+                id("midnight", "compact-fmt")
+            ],
+        );
+    }
+
+    #[test]
+    fn plugin_glob_zero_match_is_usage_error() {
+        let err = resolve(&["midnight/xyz-*"], &[], &[]).expect_err("zero plugin match");
+        assert_eq!(err.exit_code(), 2);
+        assert!(matches!(&err, TomeError::Usage(m) if m.contains("midnight/xyz-*")));
+    }
+
+    #[test]
+    fn malformed_slash_literal_is_usage() {
+        // The `bad/id/extra` pin: two slashes → invalid id → Usage/2, NOT a
+        // hand-split catalog. Preserves `reindex_invalid_scope_format_exits_2`.
+        let err = resolve(&["bad/id/extra"], &[], &[]).expect_err("malformed id");
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn slash_literal_unknown_catalog_is_catalog_not_found() {
+        let err = resolve(&["ghost/audit"], &[], &[]).expect_err("unknown catalog");
+        assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn slash_literal_known_catalog_unknown_plugin_is_plugin_not_found() {
+        let err = resolve(&["midnight/ghost"], &[], &[]).expect_err("unknown plugin");
+        assert_eq!(err.exit_code(), 20);
+        assert!(matches!(&err, TomeError::PluginNotFound(p) if p == "midnight/ghost"));
+    }
+
+    // ---- union + dedupe ----------------------------------------------------
+
+    #[test]
+    fn multiple_positional_scopes_union_and_dedupe() {
+        // A whole catalog + one of its plugins (already covered) + a plugin in
+        // the other catalog: `midnight/audit` must appear ONCE.
+        let sel =
+            resolve(&["midnight", "midnight/audit", "other/helper"], &[], &[]).expect("resolve");
+        assert_eq!(
+            sel.targets,
+            vec![
+                id("midnight", "compact-lint"),
+                id("midnight", "compact-fmt"),
+                id("midnight", "audit"),
+                id("other", "helper"),
+            ],
+            "midnight/audit is not duplicated by the whole-catalog token",
+        );
+    }
+
+    #[test]
+    fn catalog_and_plugin_flags_combine_as_a_union() {
+        // `--catalog other` (→ other/helper) unioned with `--plugin
+        // midnight/audit`.
+        let sel = resolve(&[], &["other"], &["midnight/audit"]).expect("resolve");
+        assert_eq!(
+            sel.targets,
+            vec![id("other", "helper"), id("midnight", "audit")],
+        );
+    }
+
+    // ---- label -------------------------------------------------------------
+
+    #[test]
+    fn label_reflects_tokens_and_count() {
+        let sel = resolve(&["midnight/compact-*"], &[], &[]).expect("resolve");
+        assert_eq!(sel.label, "midnight/compact-* (2 plugins)");
+        let one = resolve(&["midnight/audit"], &[], &[]).expect("resolve");
+        assert_eq!(one.label, "midnight/audit (1 plugin)");
+    }
+
+    // ---- telemetry scope classification -----------------------------------
+
+    #[test]
+    fn tele_scope_all_when_no_selection() {
+        use crate::telemetry::event::ReindexScope;
+        assert_eq!(reindex_scope_of(&args(&[], &[], &[])), ReindexScope::All);
+    }
+
+    #[test]
+    fn tele_scope_plugin_when_slash_or_plugin_flag() {
+        use crate::telemetry::event::ReindexScope;
+        assert_eq!(
+            reindex_scope_of(&args(&["midnight/audit"], &[], &[])),
+            ReindexScope::Plugin,
+        );
+        assert_eq!(
+            reindex_scope_of(&args(&[], &[], &["midnight/audit"])),
+            ReindexScope::Plugin,
+        );
+    }
+
+    #[test]
+    fn tele_scope_catalog_for_bare_or_catalog_flag() {
+        use crate::telemetry::event::ReindexScope;
+        assert_eq!(
+            reindex_scope_of(&args(&["midnight"], &[], &[])),
+            ReindexScope::Catalog,
+        );
+        assert_eq!(
+            reindex_scope_of(&args(&[], &["midnight"], &[])),
+            ReindexScope::Catalog,
+        );
+    }
 }
