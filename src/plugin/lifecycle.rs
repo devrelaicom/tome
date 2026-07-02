@@ -953,7 +953,7 @@ fn parse_one_entry(
 
     // Argument-name validation (FR-013c sibling — Phase 5). Illegal
     // names are a parse-class failure with exit 29.
-    if let Err(reason) = validate_argument_names(&parsed.frontmatter.arguments) {
+    if let Err(reason) = validate_argument_names(&parsed.frontmatter.argument_names()) {
         return Err(TomeError::InvalidArgumentFrontmatter {
             file: file.to_path_buf(),
             reason,

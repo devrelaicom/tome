@@ -64,10 +64,13 @@ pub struct SkillFrontmatter {
     /// embedding-text composition (see `entry-schema-p5.md`).
     #[serde(default, rename = "when_to_use")]
     pub when_to_use: Option<String>,
-    /// Phase 5 — argument names. Accepts either a space-separated string
-    /// (`arguments: a b c`) or a YAML list. Both forms produce a `Vec<String>`.
+    /// Phase 5 — declared arguments. Accepts a space-separated string
+    /// (`arguments: a b c`) or a YAML list whose entries are each either a
+    /// bare name string or a `{ name, description }` mapping (issue #312).
+    /// Every form produces a `Vec<ArgumentSpec>`; use [`Self::argument_names`]
+    /// where only the names are needed.
     #[serde(default, deserialize_with = "deserialize_arguments")]
-    pub arguments: Vec<String>,
+    pub arguments: Vec<ArgumentSpec>,
     /// Phase 5 — human-facing argument-hint text shown to invocation
     /// surfaces. Tome ingests but does not interpret.
     #[serde(default)]
@@ -86,47 +89,179 @@ pub struct SkillFrontmatter {
     pub prompt_name: Option<String>,
 }
 
+/// A single declared prompt argument: a name and an optional human-readable
+/// description (issue #312).
+///
+/// The description flows through to the MCP `prompts/list` argument schema
+/// (`PromptArgument::with_description`) so an agent sees a hint about the
+/// expected format rather than a bare name.
+///
+/// # Serialisation contract (back-compat)
+///
+/// `Serialize` is deliberately hand-written so that an entry **without** a
+/// description round-trips as a bare YAML string, byte-identical to the
+/// pre-#312 `Vec<String>` representation (relied on by `authoring::emit`'s
+/// `convert` round-trip and the `plugin show --json` wire pin). Only when a
+/// description is present does the entry serialise as a `{ name, description }`
+/// mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArgumentSpec {
+    /// The argument name (validated against `^[a-z_][a-z0-9_]*$` at enable
+    /// time by [`validate_argument_names`]).
+    pub name: String,
+    /// Optional human-readable description surfaced to invocation clients.
+    pub description: Option<String>,
+}
+
+impl ArgumentSpec {
+    /// Construct a name-only spec (no description).
+    fn name_only(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+        }
+    }
+}
+
+impl serde::Serialize for ArgumentSpec {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match &self.description {
+            // No description → emit a bare string, byte-identical to the
+            // legacy `Vec<String>` form (back-compat, see the type docs).
+            None => serializer.serialize_str(&self.name),
+            Some(desc) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("name", &self.name)?;
+                map.serialize_entry("description", desc)?;
+                map.end()
+            }
+        }
+    }
+}
+
 /// Custom deserialiser for the `arguments` field per
 /// `contracts/frontmatter-p5.md` § "arguments accepts both string and list
-/// forms".
+/// forms", extended for per-argument descriptions (issue #312).
 ///
 /// Accepted shapes:
 /// * Absent → `Vec::new()` (handled by `#[serde(default)]`).
 /// * Empty string or string of only whitespace → `Vec::new()`.
-/// * Space-separated string `"a b c"` → `vec!["a", "b", "c"]`.
-/// * YAML list `[a, b, c]` → `vec!["a", "b", "c"]`.
-/// * Any other shape (integer, mapping, list-of-non-strings) → deser error;
-///   the caller maps this to `TomeError::InvalidArgumentFrontmatter`
-///   (exit 29).
+/// * Space-separated string `"a b c"` → three name-only specs.
+/// * YAML list whose entries are each either:
+///     * a bare name string `foo` → a name-only spec, or
+///     * a mapping `{ name: foo, description: "…" }` → a spec with the
+///       description threaded through. This is **third-party** frontmatter:
+///       the mapping parses leniently (no `deny_unknown_fields`), so an
+///       unrecognised key inside the entry is tolerated and dropped rather
+///       than rejected. A mapping missing `name` degrades to being skipped
+///       rather than aborting the whole list.
+/// * Any other scalar shape (integer, etc.) → deser error; the caller maps
+///   this to `TomeError::InvalidArgumentFrontmatter` (exit 29).
 ///
 /// S-M1 (US1.d reviewer pass): the parser enforces a 256-entry hard cap
-/// on the resulting `Vec<String>` to defend against DoS at plugin-enable
-/// time. See [`MAX_ARGUMENTS`].
-fn deserialize_arguments<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+/// on the resulting `Vec` to defend against DoS at plugin-enable time.
+/// See [`MAX_ARGUMENTS`].
+fn deserialize_arguments<'de, D>(deserializer: D) -> Result<Vec<ArgumentSpec>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     use serde::de::{Error, Visitor};
     use std::fmt;
 
+    /// One list element: a bare string or a `{ name, description, .. }`
+    /// mapping. Deserialised via an untagged enum so a mixed list works.
+    /// The mapping arm is lenient (extra keys tolerated) because this is
+    /// third-party frontmatter.
+    enum RawArg {
+        Name(String),
+        Full {
+            name: String,
+            description: Option<String>,
+        },
+    }
+
+    impl<'de> serde::Deserialize<'de> for RawArg {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            struct RawArgVisitor;
+
+            impl<'de> Visitor<'de> for RawArgVisitor {
+                type Value = RawArg;
+
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("an argument name or a { name, description } mapping")
+                }
+
+                fn visit_str<E: Error>(self, v: &str) -> Result<RawArg, E> {
+                    Ok(RawArg::Name(v.to_owned()))
+                }
+
+                fn visit_string<E: Error>(self, v: String) -> Result<RawArg, E> {
+                    Ok(RawArg::Name(v))
+                }
+
+                fn visit_map<M>(self, mut map: M) -> Result<RawArg, M::Error>
+                where
+                    M: serde::de::MapAccess<'de>,
+                {
+                    let mut name: Option<String> = None;
+                    let mut description: Option<String> = None;
+                    // Lenient: consume every key; recognise `name` and
+                    // `description`, ignore anything else (third-party input).
+                    while let Some(key) = map.next_key::<String>()? {
+                        match key.as_str() {
+                            "name" => name = Some(map.next_value::<String>()?),
+                            "description" => {
+                                description = map.next_value::<Option<String>>()?;
+                            }
+                            _ => {
+                                let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                            }
+                        }
+                    }
+                    match name {
+                        Some(name) => Ok(RawArg::Full { name, description }),
+                        // A mapping with no `name` is malformed; represent it
+                        // with an empty name so the outer visitor can skip it
+                        // gracefully rather than aborting the list.
+                        None => Ok(RawArg::Full {
+                            name: String::new(),
+                            description: None,
+                        }),
+                    }
+                }
+            }
+
+            deserializer.deserialize_any(RawArgVisitor)
+        }
+    }
+
     struct ArgsVisitor;
 
     impl<'de> Visitor<'de> for ArgsVisitor {
-        type Value = Vec<String>;
+        type Value = Vec<ArgumentSpec>;
 
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("a space-separated string or a list of strings")
+            f.write_str(
+                "a space-separated string or a list of names / { name, description } mappings",
+            )
         }
 
         fn visit_str<E: Error>(self, v: &str) -> Result<Self::Value, E> {
-            let mut out: Vec<String> = Vec::new();
+            let mut out: Vec<ArgumentSpec> = Vec::new();
             for tok in v.split_whitespace() {
                 if out.len() >= MAX_ARGUMENTS {
                     return Err(E::custom(format!(
                         "arguments list exceeds {MAX_ARGUMENTS} entries"
                     )));
                 }
-                out.push(tok.to_owned());
+                out.push(ArgumentSpec::name_only(tok));
             }
             Ok(out)
         }
@@ -139,17 +274,26 @@ where
         where
             S: serde::de::SeqAccess<'de>,
         {
-            let mut out: Vec<String> = match seq.size_hint() {
+            let mut out: Vec<ArgumentSpec> = match seq.size_hint() {
                 Some(n) => Vec::with_capacity(n.min(MAX_ARGUMENTS)),
                 None => Vec::new(),
             };
-            while let Some(elem) = seq.next_element::<String>()? {
+            while let Some(elem) = seq.next_element::<RawArg>()? {
                 if out.len() >= MAX_ARGUMENTS {
                     return Err(<S::Error as Error>::custom(format!(
                         "arguments list exceeds {MAX_ARGUMENTS} entries"
                     )));
                 }
-                out.push(elem);
+                let spec = match elem {
+                    RawArg::Name(name) => ArgumentSpec::name_only(name),
+                    RawArg::Full { name, description } => ArgumentSpec { name, description },
+                };
+                // Drop a malformed name-less mapping entry rather than
+                // aborting the whole list (lenient third-party parse).
+                if spec.name.is_empty() {
+                    continue;
+                }
+                out.push(spec);
             }
             Ok(out)
         }
@@ -174,6 +318,13 @@ where
 }
 
 impl SkillFrontmatter {
+    /// The declared argument names, in declaration order, with descriptions
+    /// dropped. Convenience for the many consumers that only need names
+    /// (validation, `plugin show`, the substitution `declared_args`).
+    pub fn argument_names(&self) -> Vec<String> {
+        self.arguments.iter().map(|a| a.name.clone()).collect()
+    }
+
     /// Resolved `searchable` value per `contracts/frontmatter-p5.md`
     /// § Resolved defaults. Equivalent to
     /// `!disable_model_invocation.unwrap_or(false)` — i.e. searchable by

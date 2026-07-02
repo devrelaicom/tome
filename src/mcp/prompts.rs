@@ -43,7 +43,7 @@ use crate::mcp::prompt_name::{derive_name, derive_suffixed_name};
 use crate::mcp::state::McpState;
 use crate::mcp::tools::common::error_data_with_code;
 use crate::paths::Paths;
-use crate::plugin::frontmatter::parse_skill_frontmatter;
+use crate::plugin::frontmatter::{ArgumentSpec, parse_skill_frontmatter};
 use crate::plugin::identity::EntryKind;
 use crate::substitution::{self, ArgumentValues, SubstitutionContext, SubstitutionError};
 use crate::workspace::WorkspaceName;
@@ -276,8 +276,9 @@ pub struct PromptEntry {
     /// re-resolution, both lossy (non-UTF8 paths) and pointless (the
     /// resolver short-circuits on `is_absolute`).
     pub path: PathBuf,
-    /// Named arguments declared in the entry's frontmatter.
-    pub arguments: Vec<String>,
+    /// Named arguments declared in the entry's frontmatter, each carrying an
+    /// optional per-argument description (issue #312).
+    pub arguments: Vec<ArgumentSpec>,
     /// Frontmatter `argument-hint`, used as the `args` description in
     /// the catch-all case.
     pub argument_hint: Option<String>,
@@ -339,11 +340,20 @@ impl PromptEntry {
 
         let arguments = if !self.arguments.is_empty() {
             // Case A — named arguments. All required strings per FR-070,
-            // declaration order preserved.
+            // declaration order preserved. A per-argument `description`
+            // (issue #312) is threaded through when present; when absent the
+            // `description` field is omitted from the wire (rmcp's
+            // `skip_serializing_if`), keeping name-only args byte-identical.
             Some(
                 self.arguments
                     .iter()
-                    .map(|n| PromptArgument::new(n.clone()).with_required(true))
+                    .map(|spec| {
+                        let arg = PromptArgument::new(spec.name.clone()).with_required(true);
+                        match &spec.description {
+                            Some(desc) => arg.with_description(desc.clone()),
+                            None => arg,
+                        }
+                    })
                     .collect(),
             )
         } else if self.body_uses_arguments {
@@ -1071,7 +1081,9 @@ fn render_for_get(
             message: err.to_string(),
         }
     })?;
-    let declared_args = parsed.frontmatter.arguments.clone();
+    // The get-pipeline only needs the argument NAMES (for caller-arg
+    // matching + substitution); descriptions are a prompts/list concern.
+    let declared_args = parsed.frontmatter.argument_names();
     let body = parsed.body;
 
     // (4) Map caller args → ArgumentValues.
