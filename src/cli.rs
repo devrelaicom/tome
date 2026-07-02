@@ -334,10 +334,12 @@ pub struct MetaAddArgs {
     /// Install EVERY bundled meta skill. Mutually exclusive with explicit ids.
     #[arg(long)]
     pub all: bool,
-    /// Target a specific harness (repeatable). Default: every detected
-    /// harness that consumes native skills.
+    /// Target a specific harness (repeatable: `--harness a --harness b`).
+    /// Default: every detected harness that consumes native skills. The field
+    /// name matches `sync`'s `--harness` selector; the CLI flag stays
+    /// `--harness`.
     #[arg(long = "harness")]
-    pub harnesses: Vec<String>,
+    pub harness: Vec<String>,
     /// Install into the user-level skills dir instead of the project.
     #[arg(long)]
     pub global: bool,
@@ -354,10 +356,12 @@ pub struct MetaRemoveArgs {
     /// Remove EVERY installed meta skill. Mutually exclusive with explicit ids.
     #[arg(long)]
     pub all: bool,
-    /// Target a specific harness (repeatable). Default: every detected
-    /// harness that consumes native skills.
+    /// Target a specific harness (repeatable: `--harness a --harness b`).
+    /// Default: every detected harness that consumes native skills. The field
+    /// name matches `sync`'s `--harness` selector; the CLI flag stays
+    /// `--harness`.
     #[arg(long = "harness")]
-    pub harnesses: Vec<String>,
+    pub harness: Vec<String>,
     /// Remove from the user-level skills dir instead of the project.
     #[arg(long)]
     pub global: bool,
@@ -437,6 +441,12 @@ pub struct HarnessUseArgs {
     /// auto-detected harness is configured. With names, exactly those are
     /// configured (aliases + opt-in targets resolve by name). Mutually
     /// exclusive with `--all`.
+    ///
+    /// NOTE: `use`/`remove` take the multi-select as a bare POSITIONAL, the
+    /// deliberate exception (#315) to the `--harness` flag used by `sync` and
+    /// `meta add`/`remove`. A positional reads naturally for the "configure
+    /// these harnesses" verb; the flag suits commands where the harness is a
+    /// filter on some other subject.
     #[arg(conflicts_with = "all")]
     pub names: Vec<String>,
     /// Configure every supported (auto-detectable) harness, regardless of
@@ -488,8 +498,10 @@ pub struct HarnessRemoveArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct HarnessInfoArgs {
-    /// Harness name.
-    pub name: String,
+    /// Harness name. When omitted, reports one section per harness in the
+    /// effective list (the same set `harness list` reports), like
+    /// `workspace info`. An unknown explicit name errors `HarnessNotSupported`.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

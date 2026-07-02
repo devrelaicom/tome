@@ -152,6 +152,82 @@ pub fn run(
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
+    match args.name.as_deref() {
+        // Single-harness form — BYTE-IDENTICAL to the pre-#327 behaviour
+        // (human section AND a single `--json` object).
+        Some(name) => {
+            let outcome = build_info(name, scope, paths)?;
+            match mode {
+                Mode::Human => emit_human(&outcome),
+                Mode::Json => write_json(&outcome),
+            }
+        }
+        // No name — report one section per harness in the effective list (the
+        // same set `harness list` reports). Human: a section per harness with a
+        // blank-line separator. Json: an ARRAY of the per-harness outcomes.
+        None => run_effective(scope, paths, mode),
+    }
+}
+
+/// No-name `tome harness info` — build a `HarnessInfoOutcome` for every harness
+/// in the effective list and emit them as sections (human) / an array (json).
+///
+/// The effective NAME set is resolved via [`resolve_effective_list`], mirroring
+/// `harness list`. An empty effective set degrades gracefully: a one-line hint
+/// (human) / `[]` (json), exit 0 — never an error.
+fn run_effective(scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
+    let outcomes = build_effective_outcomes(scope, paths)?;
+    match mode {
+        Mode::Human => emit_human_sections(&outcomes),
+        Mode::Json => write_json(&outcomes),
+    }
+}
+
+/// Build a [`HarnessInfoOutcome`] for every harness in the effective list (the
+/// same set `harness list` reports). Emit-free, so a caller/test can serialise
+/// the returned vec to inspect the real no-name `--json` ARRAY wire shape. An
+/// empty effective set yields an empty vec (serialises as `[]`), never an error.
+pub fn build_effective_outcomes(
+    scope: &ResolvedScope,
+    paths: &Paths,
+) -> Result<Vec<HarnessInfoOutcome>, TomeError> {
+    let names = effective_harness_names(scope, paths)?;
+    let mut outcomes = Vec::with_capacity(names.len());
+    for name in &names {
+        outcomes.push(build_info(name, scope, paths)?);
+    }
+    Ok(outcomes)
+}
+
+/// Resolve the effective harness NAMES for the current project, mirroring
+/// `harness list`'s `list_effective`. Returns an empty vec (not an error) when
+/// nothing is configured.
+fn effective_harness_names(scope: &ResolvedScope, paths: &Paths) -> Result<Vec<String>, TomeError> {
+    let marker = super::list::load_project_marker_for_use(scope)?;
+    let workspace_settings = super::list::load_workspace_settings_for_use(scope, paths)?;
+    let global_settings = super::list::load_global_settings_for_use(paths)?;
+    let provider = super::CentralDbScopeProvider::new(paths);
+
+    let resolved = resolve_effective_list(
+        marker.as_ref(),
+        workspace_settings.as_ref(),
+        &global_settings,
+        &provider,
+    )
+    .map_err(TomeError::from)?;
+
+    Ok(resolved.harnesses.into_iter().map(|h| h.name).collect())
+}
+
+/// Build the [`HarnessInfoOutcome`] for a single harness `name`. Extracted from
+/// `run` so both the `Some(name)` single form and the `None` effective-list
+/// form share one resolution + probe + assembly path. An unknown explicit name
+/// resolves to `HarnessNotSupported` here (unchanged).
+fn build_info(
+    name: &str,
+    scope: &ResolvedScope,
+    paths: &Paths,
+) -> Result<HarnessInfoOutcome, TomeError> {
     let home = home_root()?;
     let project_root = scope.project_root.clone();
     // Snapshot the named module's fields. Build the `ModuleSnapshot` from a
@@ -180,12 +256,12 @@ pub fn run(
     // already matched when one is installed.
     let snap = with_effective_modules(|mods| {
         mods.iter()
-            .find(|m| m.name() == args.name)
+            .find(|m| m.name() == name)
             .map(|m| snapshot_of(*m))
     })
-    .or_else(|| crate::harness::lookup(&args.name).map(snapshot_of))
+    .or_else(|| crate::harness::lookup(name).map(snapshot_of))
     .ok_or_else(|| TomeError::HarnessNotSupported {
-        name: args.name.clone(),
+        name: name.to_string(),
     })?;
 
     let (rules_block_present, mcp_entry_present, mcp_tome_owned) =
@@ -339,7 +415,7 @@ pub fn run(
         &snippet_entry,
     ));
 
-    let outcome = HarnessInfoOutcome {
+    Ok(HarnessInfoOutcome {
         name: snap.name,
         description: snap.description,
         detected: snap.detected,
@@ -354,12 +430,7 @@ pub fn run(
         unrepresented_agents_notice,
         hook_translation_notice,
         hooks_notice,
-    };
-
-    match mode {
-        Mode::Human => emit_human(&outcome),
-        Mode::Json => write_json(&outcome),
-    }
+    })
 }
 
 fn probe_rules_block(
@@ -540,6 +611,35 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
     if let Some(notice) = &outcome.hooks_notice {
         writeln!(out)?;
         writeln!(out, "  Note: {notice}")?;
+    }
+    Ok(())
+}
+
+/// #327: render one `emit_human` section per outcome for the no-name
+/// `tome harness info` form, separated by a blank line. An empty set prints a
+/// helpful one-liner (never an error) — the effective list is empty when no
+/// harness is configured for this scope.
+fn emit_human_sections(outcomes: &[HarnessInfoOutcome]) -> Result<(), TomeError> {
+    if outcomes.is_empty() {
+        let mut out = std::io::stdout().lock();
+        writeln!(
+            out,
+            "No harnesses configured for this scope; run `tome harness use <name>`."
+        )?;
+        return Ok(());
+    }
+    // Reuse the single-harness renderer per section. `emit_human` locks stdout
+    // per call, so separate the sections with a blank line printed between (not
+    // after) them for clean, greppable output. The separator goes through a
+    // short-lived locked-handle `writeln!` that PROPAGATES `io::Error` — matching
+    // every other write in this file — rather than a bare `println!`, which
+    // panics on a broken pipe (`tome harness info | head`) and, under
+    // `panic = "abort"`, aborts.
+    for (i, outcome) in outcomes.iter().enumerate() {
+        if i > 0 {
+            writeln!(std::io::stdout().lock())?;
+        }
+        emit_human(outcome)?;
     }
     Ok(())
 }

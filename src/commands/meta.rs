@@ -248,7 +248,7 @@ fn add_run(args: MetaAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
             return Err(e);
         }
     };
-    let targets = match resolve_targets(&args.harnesses, args.global, scope) {
+    let targets = match resolve_targets(&args.harness, args.global, scope) {
         Ok(t) => t,
         Err(e) => {
             emit_meta_telemetry(crate::telemetry::event::MetaAction::Add, None);
@@ -404,7 +404,7 @@ fn remove_run(args: MetaRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
             return Err(e);
         }
     };
-    let targets = match resolve_targets(&args.harnesses, args.global, scope) {
+    let targets = match resolve_targets(&args.harness, args.global, scope) {
         Ok(t) => t,
         Err(e) => {
             emit_meta_telemetry(crate::telemetry::event::MetaAction::Remove, None);
