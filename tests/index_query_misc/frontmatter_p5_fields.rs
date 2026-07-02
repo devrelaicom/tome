@@ -34,12 +34,128 @@ fn arguments_string_or_list_both_parse() {
     );
 
     assert_eq!(
-        as_string.frontmatter.arguments,
+        as_string.frontmatter.argument_names(),
         vec!["component", "from", "to"],
     );
     assert_eq!(
-        as_list.frontmatter.arguments,
+        as_list.frontmatter.argument_names(),
         vec!["component", "from", "to"],
+    );
+    // String / bare-list forms carry no per-argument description.
+    assert!(
+        as_list
+            .frontmatter
+            .arguments
+            .iter()
+            .all(|a| a.description.is_none()),
+        "bare-list arguments must have no description",
+    );
+}
+
+#[test]
+fn arguments_object_form_carries_description() {
+    // Issue #312: a `{ name, description }` mapping entry threads the
+    // description through while keeping the name.
+    let parsed = parse(
+        "---\n\
+         name: foo\n\
+         description: d\n\
+         arguments:\n\
+        \x20 - name: issue_url\n\
+        \x20   description: the GitHub issue URL, e.g. https://github.com/org/repo/issues/1\n\
+         ---\n\
+         body\n",
+    );
+    assert_eq!(parsed.frontmatter.argument_names(), vec!["issue_url"]);
+    assert_eq!(
+        parsed.frontmatter.arguments[0].description.as_deref(),
+        Some("the GitHub issue URL, e.g. https://github.com/org/repo/issues/1"),
+    );
+}
+
+#[test]
+fn arguments_mixed_string_and_object_forms() {
+    // Issue #312: a single list may freely mix bare-name strings and
+    // `{ name, description }` mappings.
+    let parsed = parse(
+        "---\n\
+         name: foo\n\
+         description: d\n\
+         arguments:\n\
+        \x20 - plain\n\
+        \x20 - name: described\n\
+        \x20   description: has a hint\n\
+        \x20 - also_plain\n\
+         ---\n\
+         body\n",
+    );
+    assert_eq!(
+        parsed.frontmatter.argument_names(),
+        vec!["plain", "described", "also_plain"],
+    );
+    assert!(parsed.frontmatter.arguments[0].description.is_none());
+    assert_eq!(
+        parsed.frontmatter.arguments[1].description.as_deref(),
+        Some("has a hint"),
+    );
+    assert!(parsed.frontmatter.arguments[2].description.is_none());
+}
+
+#[test]
+fn arguments_object_unknown_key_is_tolerated() {
+    // Third-party frontmatter parses leniently: an unrecognised key inside
+    // the mapping is dropped, not rejected.
+    let parsed = parse(
+        "---\n\
+         name: foo\n\
+         description: d\n\
+         arguments:\n\
+        \x20 - name: issue_url\n\
+        \x20   description: a hint\n\
+        \x20   required: true\n\
+        \x20   whatever: ignored\n\
+         ---\n\
+         body\n",
+    );
+    assert_eq!(parsed.frontmatter.argument_names(), vec!["issue_url"]);
+    assert_eq!(
+        parsed.frontmatter.arguments[0].description.as_deref(),
+        Some("a hint"),
+    );
+}
+
+#[test]
+fn arguments_object_missing_name_is_skipped() {
+    // A mapping with no `name` is malformed; it degrades to being skipped
+    // rather than aborting the whole list (lenient third-party parse).
+    let parsed = parse(
+        "---\n\
+         name: foo\n\
+         description: d\n\
+         arguments:\n\
+        \x20 - name: good\n\
+        \x20 - description: orphan hint, no name\n\
+         ---\n\
+         body\n",
+    );
+    assert_eq!(parsed.frontmatter.argument_names(), vec!["good"]);
+}
+
+#[test]
+fn arguments_object_form_capped_at_256() {
+    // The 256-entry cap applies uniformly to the object form too.
+    let mut src = String::from("---\nname: foo\ndescription: d\narguments:\n");
+    for i in 0..300 {
+        use std::fmt::Write;
+        writeln!(src, "  - name: arg{i}\n    description: d{i}").unwrap();
+    }
+    src.push_str("---\nbody\n");
+
+    let err = parse_skill_frontmatter_str(&PathBuf::from("/tmp/SKILL.md"), &src)
+        .expect_err("oversized object-form arguments list must reject");
+    assert!(
+        err.to_string().contains("256"),
+        "rejection message must cite the 256-entry cap",
     );
 }
 
@@ -89,7 +205,7 @@ fn illegal_argument_name_fails() {
          ---\n\
          body\n",
     );
-    let err = validate_argument_names(&parsed.frontmatter.arguments)
+    let err = validate_argument_names(&parsed.frontmatter.argument_names())
         .expect_err("`1foo` must be rejected");
     assert!(
         err.contains("1foo"),
@@ -253,6 +369,71 @@ fn arguments_at_cap_still_parses() {
     let parsed = parse_skill_frontmatter_str(&PathBuf::from("/tmp/SKILL.md"), &src)
         .expect("256 entries is at the cap and must parse");
     assert_eq!(parsed.frontmatter.arguments.len(), 256);
+}
+
+// ---- Issue #312: ArgumentSpec serialisation round-trip ------------------
+
+#[test]
+fn argument_spec_without_description_serialises_as_bare_string() {
+    // Back-compat: a name-only spec must serialise byte-identically to the
+    // legacy `Vec<String>` form (a bare YAML scalar), so `convert`'s
+    // round-trip and every wire pin stays stable.
+    use tome::plugin::frontmatter::ArgumentSpec;
+    let specs = vec![
+        ArgumentSpec {
+            name: "one".to_owned(),
+            description: None,
+        },
+        ArgumentSpec {
+            name: "two".to_owned(),
+            description: None,
+        },
+    ];
+    let yaml = serde_yaml::to_string(&specs).unwrap();
+    // Legacy `Vec<String>` renders identically.
+    let legacy = serde_yaml::to_string(&vec!["one", "two"]).unwrap();
+    assert_eq!(yaml, legacy, "name-only specs must match the legacy form");
+}
+
+#[test]
+fn argument_spec_with_description_serialises_as_mapping() {
+    use tome::plugin::frontmatter::ArgumentSpec;
+    let specs = vec![ArgumentSpec {
+        name: "issue_url".to_owned(),
+        description: Some("the issue URL".to_owned()),
+    }];
+    let yaml = serde_yaml::to_string(&specs).unwrap();
+    assert!(yaml.contains("name: issue_url"), "got: {yaml}");
+    assert!(yaml.contains("description: the issue URL"), "got: {yaml}");
+}
+
+#[test]
+fn argument_spec_round_trips_through_parse() {
+    // Emit a mixed list, re-parse it, and confirm names + descriptions
+    // survive intact.
+    use tome::plugin::frontmatter::ArgumentSpec;
+    let specs = vec![
+        ArgumentSpec {
+            name: "plain".to_owned(),
+            description: None,
+        },
+        ArgumentSpec {
+            name: "described".to_owned(),
+            description: Some("a hint".to_owned()),
+        },
+    ];
+    let list_yaml = serde_yaml::to_string(&specs).unwrap();
+    let src = format!("---\nname: foo\ndescription: d\narguments:\n{list_yaml}---\nbody\n");
+    let parsed = parse(&src);
+    assert_eq!(
+        parsed.frontmatter.argument_names(),
+        vec!["plain", "described"]
+    );
+    assert!(parsed.frontmatter.arguments[0].description.is_none());
+    assert_eq!(
+        parsed.frontmatter.arguments[1].description.as_deref(),
+        Some("a hint"),
+    );
 }
 
 #[test]

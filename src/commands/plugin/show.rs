@@ -226,7 +226,11 @@ fn list_entries(
         let (arguments, argument_hint, prompt_name_override) =
             match absolute.as_deref().map(parse_skill_frontmatter) {
                 Some(Ok(parsed)) => (
-                    parsed.frontmatter.arguments.clone(),
+                    // Names only — `plugin show` surfaces the declared
+                    // argument names; per-argument descriptions (issue #312)
+                    // are a `prompts/list` concern and keep this wire pin
+                    // byte-stable.
+                    parsed.frontmatter.argument_names(),
                     parsed.frontmatter.argument_hint.clone(),
                     parsed.frontmatter.prompt_name.clone(),
                 ),

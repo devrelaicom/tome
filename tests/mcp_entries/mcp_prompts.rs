@@ -331,6 +331,157 @@ Run a deploy for $1 from $2 to $3
 }
 
 #[test]
+fn object_form_argument_carries_description_in_prompts_list() {
+    // Issue #312: an object-form argument threads its description into the
+    // `prompts/list` argument schema (PromptArgument.description).
+    let cmd_body = "---
+name: fix-issue
+description: Fix a GitHub issue.
+arguments:
+  - name: issue_url
+    description: the GitHub issue URL, e.g. https://github.com/org/repo/issues/1
+---
+Fix issue at $1
+";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("fix-issue", cmd_body)]);
+
+    let conn = open_index(&paths);
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
+    let descriptors: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
+    assert_eq!(descriptors.len(), 1);
+    let args = descriptors[0]
+        .arguments
+        .as_ref()
+        .expect("named args expose argument schema");
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].name, "issue_url");
+    assert_eq!(args[0].required, Some(true));
+    assert_eq!(
+        args[0].description.as_deref(),
+        Some("the GitHub issue URL, e.g. https://github.com/org/repo/issues/1"),
+        "object-form argument must carry its description into prompts/list",
+    );
+}
+
+#[test]
+fn string_form_argument_omits_description_in_prompts_list() {
+    // Issue #312 back-compat: a bare-string argument carries NO description
+    // — the wire must omit the `description` field entirely (name-only,
+    // byte-identical to the pre-#312 shape).
+    let cmd_body = "---
+name: deploy
+description: Deploy.
+arguments: [target]
+---
+Deploy $1
+";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("deploy", cmd_body)]);
+
+    let conn = open_index(&paths);
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
+    let descriptors: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
+    let args = descriptors[0]
+        .arguments
+        .as_ref()
+        .expect("named args expose argument schema");
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].name, "target");
+    assert_eq!(args[0].required, Some(true));
+    assert!(
+        args[0].description.is_none(),
+        "string-form argument must NOT carry a description (back-compat)",
+    );
+    // Prove the serialised wire omits the key entirely.
+    let wire = serde_json::to_value(&args[0]).unwrap();
+    assert!(
+        wire.get("description").is_none(),
+        "the `description` key must be absent from the wire; got {wire}",
+    );
+}
+
+#[test]
+fn mixed_string_and_object_arguments_in_prompts_list() {
+    // Issue #312: a mixed list — some string, some object — is threaded in
+    // declaration order, each carrying only its own description.
+    let cmd_body = "---
+name: deploy
+description: Deploy a component.
+arguments:
+  - component
+  - name: from
+    description: source version
+  - to
+---
+Deploy $1 from $2 to $3
+";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("deploy", cmd_body)]);
+
+    let conn = open_index(&paths);
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
+    let descriptors: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
+    let args = descriptors[0]
+        .arguments
+        .as_ref()
+        .expect("named args expose argument schema");
+    let names: Vec<&str> = args.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, vec!["component", "from", "to"]);
+    assert!(args[0].description.is_none());
+    assert_eq!(args[1].description.as_deref(), Some("source version"));
+    assert!(args[2].description.is_none());
+    for a in args {
+        assert_eq!(a.required, Some(true), "every named arg stays required");
+    }
+}
+
+#[test]
+fn malformed_object_argument_degrades_gracefully_in_prompts_list() {
+    // Issue #312: a name-less mapping entry is skipped (lenient parse), the
+    // registry builds, and the well-formed sibling still surfaces.
+    let cmd_body = "---
+name: deploy
+description: Deploy.
+arguments:
+  - name: good
+    description: a real hint
+  - description: orphan, no name
+---
+Deploy $1
+";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("deploy", cmd_body)]);
+
+    let conn = open_index(&paths);
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry despite a malformed argument entry");
+    let descriptors: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
+    let args = descriptors[0]
+        .arguments
+        .as_ref()
+        .expect("the well-formed argument still exposes a schema");
+    assert_eq!(args.len(), 1, "the name-less entry is dropped");
+    assert_eq!(args[0].name, "good");
+    assert_eq!(args[0].description.as_deref(), Some("a real hint"));
+}
+
+#[test]
 fn no_named_args_with_arguments_in_body_becomes_optional_catchall() {
     let cmd_body = "---
 name: fix-issue

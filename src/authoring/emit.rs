@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use crate::authoring::ir::{Artifact, CatalogIr, EntryIr, McpServerIr, McpTransport, PluginIr};
 use crate::catalog::manifest::{CatalogManifest, Owner, PluginDeclaration};
 use crate::error::TomeError;
+use crate::plugin::frontmatter::ArgumentSpec;
 use crate::plugin::identity::EntryKind;
 use crate::plugin::manifest::TomePluginManifest;
 
@@ -276,9 +277,11 @@ struct FrontmatterEmit<'a> {
     #[serde(rename = "when_to_use", skip_serializing_if = "Option::is_none")]
     when_to_use: Option<&'a str>,
     // Owned (not a slice ref) so `Vec::is_empty` is a clean skip predicate; the
-    // clone is a handful of short strings.
+    // clone is a handful of short specs. `ArgumentSpec` serialises as a bare
+    // string when it carries no description (byte-identical to the legacy
+    // form) and as a `{ name, description }` mapping otherwise (issue #312).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    arguments: Vec<String>,
+    arguments: Vec<ArgumentSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     argument_hint: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
