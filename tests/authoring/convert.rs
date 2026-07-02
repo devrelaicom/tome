@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tome::authoring::convert::{ConvertConfig, run};
-use tome::authoring::detect::ArtifactLevel;
+use tome::authoring::detect::{ArtifactLevel, SourceHarness};
 use tome::authoring::lint::parse::parse_artifact;
 use tome::plugin::manifest::read_plugin_manifest;
 
@@ -349,10 +349,10 @@ fn level_mismatch_is_a_usage_error() {
     assert_eq!(err.exit_code(), 2);
 }
 
-fn skill_config(output_dir: PathBuf, from: Option<&str>) -> ConvertConfig {
+fn skill_config(output_dir: PathBuf, from: Option<SourceHarness>) -> ConvertConfig {
     ConvertConfig {
         level: ArtifactLevel::Skill,
-        from: from.map(str::to_owned),
+        from,
         new_name: None,
         strict: false,
         allow: Vec::new(),
@@ -404,7 +404,7 @@ fn cline_skill_remaps_docs_to_references() {
     let out = tmp.path().join("out");
     fs::create_dir(&out).unwrap();
 
-    let outcome = run(&src, &skill_config(out.clone(), Some("cline"))).unwrap();
+    let outcome = run(&src, &skill_config(out.clone(), Some(SourceHarness::Cline))).unwrap();
     let target = out.join(&outcome.final_name);
     assert!(target.join("references/guide.md").exists());
     assert!(

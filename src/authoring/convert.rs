@@ -38,9 +38,10 @@ use crate::plugin::identity::{SegmentRejection, validate_segment};
 pub struct ConvertConfig {
     /// The artifact level the invoking command expects.
     pub level: ArtifactLevel,
-    /// `--from` harness override.
-    pub from: Option<String>,
-    /// Explicit new name (`<NAME>`/`--name`); `None` derives `<current>-tome`.
+    /// `--from` harness override (a parsed [`SourceHarness`]; clap closes the
+    /// surface at parse time).
+    pub from: Option<SourceHarness>,
+    /// Explicit new name (`<NAME>`); `None` derives `<current>-tome`.
     pub new_name: Option<String>,
     /// `--strict`: abort (writing nothing) on anything Tome cannot represent.
     pub strict: bool,
@@ -84,26 +85,10 @@ pub struct ConvertOutcome {
     pub strict_blocked: Option<String>,
 }
 
-/// Resolve the requested new name from the positional `<NAME>` and `--name`
-/// flag: both present and disagreeing is a usage error (FR-007).
-pub fn resolve_requested_name(
-    positional: Option<&str>,
-    flag: Option<&str>,
-) -> Result<Option<String>, TomeError> {
-    match (positional, flag) {
-        (Some(a), Some(b)) if a != b => Err(TomeError::Usage(format!(
-            "conflicting new names: positional `{a}` vs `--name {b}` — supply one"
-        ))),
-        (Some(a), _) => Ok(Some(a.to_owned())),
-        (None, Some(b)) => Ok(Some(b.to_owned())),
-        (None, None) => Ok(None),
-    }
-}
-
 /// Run a conversion end-to-end. `source_root` must be a local directory.
 pub fn run(source_root: &Path, cfg: &ConvertConfig) -> Result<ConvertOutcome, TomeError> {
     let root = UntrustedRoot::open(source_root)?;
-    let detected = detect(&root, cfg.from.as_deref(), cfg.level)?;
+    let detected = detect(&root, cfg.from, cfg.level)?;
 
     // The fetch context owns the temp clones for remote-source marketplace
     // plugins. The clones MUST outlive `emit` — planned `Copy` files are read
@@ -324,25 +309,6 @@ fn is_strict_blocking(rule_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn resolve_requested_name_handles_positional_flag_and_conflict() {
-        assert_eq!(resolve_requested_name(None, None).unwrap(), None);
-        assert_eq!(
-            resolve_requested_name(Some("a"), None).unwrap(),
-            Some("a".to_owned())
-        );
-        assert_eq!(
-            resolve_requested_name(None, Some("b")).unwrap(),
-            Some("b".to_owned())
-        );
-        assert_eq!(
-            resolve_requested_name(Some("a"), Some("a")).unwrap(),
-            Some("a".to_owned())
-        );
-        let err = resolve_requested_name(Some("a"), Some("b")).unwrap_err();
-        assert_eq!(err.exit_code(), 2);
-    }
 
     #[test]
     fn validate_new_name_rejects_unsafe() {

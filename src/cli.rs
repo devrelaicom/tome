@@ -892,7 +892,7 @@ pub enum CatalogCommand {
     Create(CatalogCreateArgs),
     /// Convert a Claude Code marketplace into a native Tome catalog (a copy;
     /// the source is never modified).
-    Convert(ConvertArgs),
+    Convert(CatalogConvertArgs),
     /// Validate a Tome catalog (and every plugin/skill it nests). CI-ready.
     Lint(LintArgs),
 }
@@ -1218,23 +1218,23 @@ pub struct SkillCreateArgs {
 }
 
 /// Shared `convert` arguments across all three artifact levels.
+///
+/// `--no-fetch` is intentionally NOT here — it only applies to `catalog
+/// convert` (marketplace remote-plugin recursion), so it lives on
+/// [`CatalogConvertArgs`] alone. `plugin`/`skill convert` therefore reject it at
+/// parse time (exit 2) rather than silently accepting an inert flag.
 #[derive(Debug, clap::Args)]
 pub struct ConvertArgs {
     /// Source to convert: a local path, an `owner/repo` shorthand, or a git
     /// URL. Remote sources are fetched into a temp clone (cleaned up on every
     /// exit path). The source is never modified.
     pub source: String,
-    /// New name for the converted artifact (also settable via `--name`).
-    /// Defaults to `<source-name>-tome`. Supplying both the positional and
-    /// `--name` with different values is a usage error.
+    /// New name for the converted artifact. Defaults to `<source-name>-tome`.
     pub name: Option<String>,
-    /// New name for the converted artifact (same as the positional `<NAME>`).
-    #[arg(long = "name")]
-    pub name_flag: Option<String>,
-    /// Override source-format detection: claude-code | codex | cursor |
-    /// opencode | cline | agent-skills.
-    #[arg(long = "from")]
-    pub from: Option<String>,
+    /// Override source-format detection (closed set): claude-code | codex |
+    /// cursor | opencode | cline | agent-skills (aliases: `claude`, `agent`).
+    #[arg(long = "from", value_enum)]
+    pub from: Option<crate::authoring::detect::SourceHarness>,
     /// Parent directory the converted copy lands under. Mutually exclusive
     /// with `--into`. Defaults to the current directory.
     #[arg(long, conflicts_with = "into")]
@@ -1259,10 +1259,19 @@ pub struct ConvertArgs {
     /// Only meaningful together with `--strict`.
     #[arg(long = "allow", value_name = "RULE-ID")]
     pub allow: Vec<String>,
-    /// Do not fetch the marketplace's remote-source plugins (`catalog convert`
-    /// only); they are warned-and-skipped instead. The SOURCE argument itself
-    /// may still be a remote clone.
-    #[arg(long = "no-fetch")]
+}
+
+/// `catalog convert` arguments: the shared [`ConvertArgs`] plus `--no-fetch`,
+/// which is meaningful only for a marketplace's remote-source plugin recursion.
+#[derive(Debug, clap::Args)]
+pub struct CatalogConvertArgs {
+    #[command(flatten)]
+    pub common: ConvertArgs,
+    /// Do not fetch the marketplace's remote-source plugins; they are
+    /// warned-and-skipped instead. The SOURCE argument itself may still be a
+    /// remote clone. `--local-only` is an accepted alias (the same flag under a
+    /// non-double-negative name).
+    #[arg(long = "no-fetch", visible_alias = "local-only")]
     pub no_fetch: bool,
 }
 
@@ -1275,8 +1284,9 @@ pub struct LintArgs {
     /// report fixed vs. still-manual.
     #[arg(long)]
     pub autofix: bool,
-    /// With `--autofix`, report would-be fixes but change nothing on disk.
-    #[arg(long = "dry-run")]
+    /// Report would-be fixes but change nothing on disk. Requires `--autofix`
+    /// (it only qualifies that pass); a bare `--dry-run` is a usage error.
+    #[arg(long = "dry-run", requires = "autofix")]
     pub dry_run: bool,
     /// Warnings also cause a non-zero exit (CI-strict).
     #[arg(long)]
@@ -1433,5 +1443,119 @@ mod tests {
             panic!("expected Status");
         };
         assert_eq!(args.name.as_deref(), Some("pos"));
+    }
+
+    // ---- issue #324: authoring flag consistency --------------------------
+
+    /// Parse a `skill convert` and pluck out its [`ConvertArgs`], or panic.
+    fn skill_convert(args: &[&str]) -> super::ConvertArgs {
+        let cli = parse(args);
+        let Command::Skill(super::SkillCommand::Convert(a)) = cli.command else {
+            panic!("expected `skill convert`");
+        };
+        a
+    }
+
+    /// Parse a `catalog convert` and pluck out its [`CatalogConvertArgs`].
+    fn catalog_convert(args: &[&str]) -> super::CatalogConvertArgs {
+        let cli = parse(args);
+        let Command::Catalog(super::CatalogCommand::Convert(a)) = cli.command else {
+            panic!("expected `catalog convert`");
+        };
+        a
+    }
+
+    /// The exit code clap surfaces for a rejected parse (usage → 2).
+    fn parse_exit(args: &[&str]) -> i32 {
+        Cli::try_parse_from(args)
+            .expect_err("parse should be rejected")
+            .exit_code()
+    }
+
+    #[test]
+    fn convert_from_is_a_closed_value_enum_with_aliases() {
+        use crate::authoring::detect::SourceHarness;
+        // Canonical kebab names resolve to the matching variant.
+        assert_eq!(
+            skill_convert(&["tome", "skill", "convert", "src", "--from", "claude-code"]).from,
+            Some(SourceHarness::ClaudeCode)
+        );
+        assert_eq!(
+            skill_convert(&["tome", "skill", "convert", "src", "--from", "cline"]).from,
+            Some(SourceHarness::Cline)
+        );
+        // The historical `claude`/`agent` aliases still parse (back-compat).
+        assert_eq!(
+            skill_convert(&["tome", "skill", "convert", "src", "--from", "claude"]).from,
+            Some(SourceHarness::ClaudeCode)
+        );
+        assert_eq!(
+            skill_convert(&["tome", "skill", "convert", "src", "--from", "agent"]).from,
+            Some(SourceHarness::AgentSkills)
+        );
+        // Omitted → None.
+        assert_eq!(
+            skill_convert(&["tome", "skill", "convert", "src"]).from,
+            None
+        );
+    }
+
+    #[test]
+    fn convert_from_rejects_an_unknown_value_at_parse_time() {
+        // A bogus `--from` is a clap usage error (exit 2), not a runtime failure.
+        assert_eq!(
+            parse_exit(&["tome", "skill", "convert", "src", "--from", "bogus"]),
+            2
+        );
+    }
+
+    #[test]
+    fn convert_name_is_a_positional_and_the_name_flag_is_gone() {
+        // The positional `<NAME>` still works.
+        assert_eq!(
+            skill_convert(&["tome", "skill", "convert", "src", "renamed"])
+                .name
+                .as_deref(),
+            Some("renamed")
+        );
+        // `--name` was dropped: clap now rejects it as an unexpected argument.
+        assert_eq!(
+            parse_exit(&["tome", "skill", "convert", "src", "--name", "renamed"]),
+            2
+        );
+    }
+
+    #[test]
+    fn no_fetch_is_catalog_convert_only() {
+        // `catalog convert --no-fetch` sets the flag on the catalog-only struct.
+        assert!(catalog_convert(&["tome", "catalog", "convert", "src", "--no-fetch"]).no_fetch);
+        // `--local-only` is an accepted alias for the same flag.
+        assert!(catalog_convert(&["tome", "catalog", "convert", "src", "--local-only"]).no_fetch);
+        // Bare (no flag) → false.
+        assert!(!catalog_convert(&["tome", "catalog", "convert", "src"]).no_fetch);
+        // `skill`/`plugin convert --no-fetch` are rejected (unexpected argument).
+        assert_eq!(
+            parse_exit(&["tome", "skill", "convert", "src", "--no-fetch"]),
+            2
+        );
+        assert_eq!(
+            parse_exit(&["tome", "plugin", "convert", "src", "--no-fetch"]),
+            2
+        );
+    }
+
+    #[test]
+    fn lint_dry_run_requires_autofix() {
+        // A bare `lint --dry-run` (no `--autofix`) is a clap usage error.
+        assert_eq!(
+            parse_exit(&["tome", "skill", "lint", "src", "--dry-run"]),
+            2
+        );
+        // `lint --autofix --dry-run` still parses.
+        let cli = parse(&["tome", "skill", "lint", "src", "--autofix", "--dry-run"]);
+        let Command::Skill(super::SkillCommand::Lint(a)) = cli.command else {
+            panic!("expected `skill lint`");
+        };
+        assert!(a.autofix && a.dry_run);
     }
 }

@@ -48,8 +48,8 @@ manual edits. It does not apply fixes that require judgment: an over-long
 description is flagged, not truncated.
 
 Add `--dry-run` to see what `--autofix` *would* change without writing
-anything. (Plain `lint` already writes nothing — `--dry-run` only has an
-effect together with `--autofix`.)
+anything. `--dry-run` requires `--autofix` — plain `lint` already writes
+nothing, so a bare `lint --dry-run` is a usage error (exit `2`); pair the two.
 
 ```bash
 tome catalog lint ~/catalogs/midnight-expert-tome --autofix --dry-run

@@ -33,13 +33,25 @@ use crate::error::TomeError;
 
 /// The source harness a `convert` reads from. The label doubles as the IR
 /// provenance string surfaced in the report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Deriving [`clap::ValueEnum`] closes the `--from` surface at parse time: clap
+/// rejects an unknown value (exit 2, listing the possible values) and drives
+/// `--help`/completion. The canonical kebab names are pinned via
+/// `#[value(name = …)]`; the historical `claude`/`agent` shorthands survive as
+/// aliases (back-compat with the removed hand-rolled `parse`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum SourceHarness {
+    #[value(name = "claude-code", alias = "claude")]
     ClaudeCode,
+    #[value(name = "codex")]
     Codex,
+    #[value(name = "cursor")]
     Cursor,
+    #[value(name = "opencode")]
     OpenCode,
+    #[value(name = "cline")]
     Cline,
+    #[value(name = "agent-skills", alias = "agent")]
     AgentSkills,
 }
 
@@ -52,21 +64,6 @@ impl SourceHarness {
             Self::OpenCode => "opencode",
             Self::Cline => "cline",
             Self::AgentSkills => "agent-skills",
-        }
-    }
-
-    /// Parse a `--from <harness>` value. Unknown values are a usage error.
-    pub fn parse(value: &str) -> Result<Self, TomeError> {
-        match value {
-            "claude-code" | "claude" => Ok(Self::ClaudeCode),
-            "codex" => Ok(Self::Codex),
-            "cursor" => Ok(Self::Cursor),
-            "opencode" => Ok(Self::OpenCode),
-            "cline" => Ok(Self::Cline),
-            "agent-skills" | "agent" => Ok(Self::AgentSkills),
-            other => Err(TomeError::Usage(format!(
-                "unknown --from harness `{other}` (expected one of: claude-code, codex, cursor, opencode, cline, agent-skills)"
-            ))),
         }
     }
 }
@@ -152,25 +149,26 @@ fn detect_structural(root: &UntrustedRoot, expected: ArtifactLevel) -> Option<De
 /// and checking the result against the level the command expects.
 ///
 /// * `from` — the optional `--from <harness>` override (overrides the harness
-///   interpretation; the level still comes from structure).
+///   interpretation; the level still comes from structure). Its value is a
+///   parsed [`SourceHarness`]: clap has already closed the surface, so an
+///   invalid `--from` never reaches here.
 /// * `expected` — the level the invoking command (`catalog`/`plugin`/`skill
 ///   convert`) requires.
 ///
 /// # Errors
-/// * [`TomeError::Usage`] (2) — an invalid `--from`, or a detected level that
-///   does not match `expected`.
+/// * [`TomeError::Usage`] (2) — a detected level that does not match
+///   `expected`.
 /// * [`TomeError::SourceFormatUnrecognized`] (83) — no structural signal and no
 ///   `--from` to fall back on.
 pub fn detect(
     root: &UntrustedRoot,
-    from: Option<&str>,
+    from: Option<SourceHarness>,
     expected: ArtifactLevel,
 ) -> Result<Detected, TomeError> {
     let structural = detect_structural(root, expected);
 
     let detected = match from {
-        Some(value) => {
-            let harness = SourceHarness::parse(value)?;
+        Some(harness) => {
             // The override fixes the harness; the level still comes from
             // structure when a signal is present, else we trust the command's
             // expected level (the user asserted the format via `--from`).
@@ -255,7 +253,7 @@ mod tests {
         let (_t, root) = root_with(|base| {
             fs::write(base.join("SKILL.md"), b"body").unwrap();
         });
-        let d = detect(&root, Some("cursor"), ArtifactLevel::Skill).unwrap();
+        let d = detect(&root, Some(SourceHarness::Cursor), ArtifactLevel::Skill).unwrap();
         assert_eq!(d.harness, SourceHarness::Cursor);
         assert_eq!(d.level, ArtifactLevel::Skill);
     }
@@ -281,12 +279,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_from_is_usage_2() {
-        let (_t, root) = root_with(|base| {
-            fs::write(base.join("SKILL.md"), b"body").unwrap();
-        });
-        let err = detect(&root, Some("nope"), ArtifactLevel::Skill).unwrap_err();
-        assert_eq!(err.exit_code(), 2);
+    fn from_value_enum_parses_canonical_names_and_aliases() {
+        // `--from` is closed at parse time by clap's ValueEnum. The canonical
+        // kebab names AND the historical `claude`/`agent` aliases all resolve;
+        // an unknown value is rejected (clap surfaces it as a usage error).
+        use clap::ValueEnum;
+        let ok = |s: &str| SourceHarness::from_str(s, /* ignore_case */ false);
+        assert_eq!(ok("claude-code").unwrap(), SourceHarness::ClaudeCode);
+        assert_eq!(ok("claude").unwrap(), SourceHarness::ClaudeCode);
+        assert_eq!(ok("codex").unwrap(), SourceHarness::Codex);
+        assert_eq!(ok("cursor").unwrap(), SourceHarness::Cursor);
+        assert_eq!(ok("opencode").unwrap(), SourceHarness::OpenCode);
+        assert_eq!(ok("cline").unwrap(), SourceHarness::Cline);
+        assert_eq!(ok("agent-skills").unwrap(), SourceHarness::AgentSkills);
+        assert_eq!(ok("agent").unwrap(), SourceHarness::AgentSkills);
+        assert!(ok("bogus").is_err(), "unknown --from is rejected");
     }
 
     #[test]
@@ -295,7 +302,7 @@ mod tests {
             // No recognized marker, but the user asserts cursor (a skill).
             fs::write(base.join("notes.md"), b"hi").unwrap();
         });
-        let d = detect(&root, Some("cursor"), ArtifactLevel::Skill).unwrap();
+        let d = detect(&root, Some(SourceHarness::Cursor), ArtifactLevel::Skill).unwrap();
         assert_eq!(d.harness, SourceHarness::Cursor);
         assert_eq!(d.level, ArtifactLevel::Skill);
     }
@@ -330,7 +337,12 @@ mod tests {
             fs::write(base.join(".claude-plugin/marketplace.json"), b"{}").unwrap();
             fs::write(base.join(".claude-plugin/plugin.json"), b"{}").unwrap();
         });
-        let d = detect(&root, Some("claude-code"), ArtifactLevel::Plugin).unwrap();
+        let d = detect(
+            &root,
+            Some(SourceHarness::ClaudeCode),
+            ArtifactLevel::Plugin,
+        )
+        .unwrap();
         assert_eq!(d.harness, SourceHarness::ClaudeCode);
         assert_eq!(d.level, ArtifactLevel::Plugin);
     }

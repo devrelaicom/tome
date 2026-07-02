@@ -38,7 +38,7 @@
           "--force",
           "--from",
           "--into",
-          "--name",
+          "--local-only",
           "--no-fetch",
           "--output",
           "--strict",
@@ -94,8 +94,6 @@
           "--force",
           "--from",
           "--into",
-          "--name",
-          "--no-fetch",
           "--output",
           "--strict",
           "--verbose"
@@ -283,8 +281,6 @@
           "--force",
           "--from",
           "--into",
-          "--name",
-          "--no-fetch",
           "--output",
           "--strict",
           "--verbose"
