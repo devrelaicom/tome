@@ -464,6 +464,50 @@ pub(crate) fn aggregate_for_plugin(
 /// short path without crossing module boundaries.
 pub(crate) use crate::catalog::manifest::read_catalog_manifest;
 
+/// The full set of discoverable `<catalog>/<plugin>` ids in the resolved
+/// workspace: every plugin declared by every catalog enrolled via
+/// `workspace_catalogs`. Sorted by `(catalog, plugin)` for deterministic
+/// output.
+///
+/// This mirrors `list::collect_rows`' discovery step but returns just the ids
+/// (no index join, no manifest parse, no git shell-out) so it stays cheap — it
+/// is the candidate SSOT the wildcard/selector layer (`plugin::selector`)
+/// resolves against for `plugin enable`/`disable` (#314), and will be reused by
+/// #316 (`reindex`) and #317 (tier bulk). `list.rs` is deliberately NOT
+/// refactored onto this in the #314 diff (it still needs the per-row manifest +
+/// index state); this helper is added alongside it.
+///
+/// A catalog whose on-disk clone is missing or whose manifest is unreadable
+/// contributes no ids — the same lenient "skip and continue" `list` applies, so
+/// discovery never fails on a partially-synced cache.
+pub(crate) fn discoverable_plugin_ids(
+    conn: &rusqlite::Connection,
+    paths: &Paths,
+    workspace_name: &str,
+) -> Result<Vec<crate::plugin::PluginId>, TomeError> {
+    use crate::index::workspace_catalogs;
+
+    let mut ids: Vec<crate::plugin::PluginId> = Vec::new();
+    for enrolment in workspace_catalogs::list_for_workspace(conn, workspace_name)? {
+        let clone_dir = paths.cache_dir_for(&enrolment.url);
+        let Some(manifest) = read_catalog_manifest(&clone_dir) else {
+            continue;
+        };
+        for plugin in &manifest.plugins {
+            ids.push(crate::plugin::PluginId {
+                catalog: enrolment.catalog_name.clone(),
+                plugin: plugin.name.clone(),
+            });
+        }
+    }
+    ids.sort_by(|a, b| {
+        a.catalog
+            .cmp(&b.catalog)
+            .then_with(|| a.plugin.cmp(&b.plugin))
+    });
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

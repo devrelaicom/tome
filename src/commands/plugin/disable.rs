@@ -1,4 +1,4 @@
-//! `tome plugin disable <catalog>/<plugin>`.
+//! `tome plugin disable <catalog>/<plugin> [<catalog>/<plugin> ...]`.
 //!
 //! Thin CLI wrapper over `plugin::lifecycle::disable`. The lock acquisition,
 //! "already-disabled" detection, and atomic UPDATE all live in the library.
@@ -6,12 +6,18 @@
 //! non-TTY refusal with pointer message) and the human / JSON presentation
 //! contract.
 //!
-//! Spec: `contracts/plugin-commands.md` §"`tome plugin disable`".
+//! Issue #314 widened this from a single `<catalog>/<plugin>` to a variadic
+//! selection of ids, `*` wildcard globs, and a `--catalog` scope. Selection is
+//! resolved once via `plugin::selector::resolve`; a single confirmation prompt
+//! covers the whole batch; the per-plugin loop uses the `harness use`
+//! forward-progress pattern. A single literal id behaves exactly as before.
+//!
+//! Spec: `contracts/plugin-commands.md` §"`tome plugin disable`"; issue #314.
 
 use std::io::Write;
-use std::str::FromStr;
 
 use serde::Serialize;
+use tracing::info;
 
 use crate::cli::PluginDisableArgs;
 use crate::error::TomeError;
@@ -21,26 +27,44 @@ use crate::plugin::PluginId;
 use crate::plugin::lifecycle::{self, DisableOutcome};
 use crate::workspace::ResolvedScope;
 
-use super::{open_index_for_read, registry_seeds, resolve_plugin_dir};
+use super::{discoverable_plugin_ids, open_index_for_read, registry_seeds, resolve_plugin_dir};
 
 pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
-    let id = PluginId::from_str(&args.id)
-        .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
     let paths = Paths::resolve()?;
 
-    // Surface CatalogNotFound / PluginNotFound before any prompt — typo on
-    // the address shouldn't waste the user's "y" keystroke. Resolution reads
-    // the catalog enrolment from the DB (F11b).
+    // ---- selection (issue #314) -------------------------------------------
+    // Resolve variadic ids / globs / --catalog against the discoverable
+    // candidate set. Slash-qualified literals are passed through without an
+    // existence check here — the per-plugin `resolve_plugin_dir` owns that.
     let conn = open_index_for_read(&paths, &scope.scope)?;
-    let _ = resolve_plugin_dir(&id, &conn, scope.scope.name().as_str(), &paths)?;
+    let workspace_name = scope.scope.name();
+    let candidates = discoverable_plugin_ids(&conn, &paths, workspace_name.as_str())?;
     drop(conn);
+    let resolution =
+        crate::plugin::selector::resolve(&args.ids, &candidates, args.catalog.as_deref());
 
+    if resolution.matched.is_empty() {
+        let first = resolution
+            .errors
+            .into_iter()
+            .next()
+            .map(crate::plugin::SelectorError::into_tome_error)
+            .unwrap_or_else(|| TomeError::Usage("no plugins selected".to_owned()));
+        return Err(first);
+    }
+
+    let mut first_error: Option<TomeError> = resolution
+        .errors
+        .into_iter()
+        .next()
+        .map(crate::plugin::SelectorError::into_tome_error);
+
+    // ---- confirmation (ONE prompt for the whole batch) --------------------
+    // `--force`/`prompt::non_interactive()` skip the prompt (as before). A
+    // non-TTY without `--force` refuses with the documented pointer + exit 54
+    // (`NotATerminal`). Interactive: a SINGLE resolved id keeps the exact
+    // "Disable {id}?" string; MULTIPLE ids ask once naming them.
     if !args.force && !crate::presentation::prompt::non_interactive() {
-        // Non-TTY without --force → exit 54 per FR-007 / FR-051. We emit the
-        // documented pointer line to stderr before returning so the user
-        // sees specific guidance, not just the generic NotATerminal Display.
-        // (Same defensive pattern as the interactive flow — P4 retro
-        // §"NotATerminal message duplication".)
         if !(output::stdin_is_tty() && output::stdout_is_tty()) {
             let mut err = std::io::stderr().lock();
             let _ = writeln!(
@@ -50,12 +74,10 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
             return Err(TomeError::NotATerminal);
         }
 
-        // TTY: ask. Default no per contract step 3.
-        if !crate::presentation::prompt::confirm(&format!("Disable {id}?"), false)? {
-            // User declined — clean exit, no state change. Surfacing this as
-            // Ok(()) matches the interactive flow's "decline, no error"
-            // semantics. We emit a stderr note in human mode for parity with
-            // the model-download decline path.
+        let question = disable_prompt(&resolution.matched);
+        if !crate::presentation::prompt::confirm(&question, false)? {
+            // User declined — clean exit, no state change (matches the
+            // interactive flow's "decline, no error" semantics).
             if mode == Mode::Human {
                 let mut err = std::io::stderr().lock();
                 let _ = writeln!(err, "Aborted: disable declined.");
@@ -63,6 +85,106 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
             return Ok(());
         }
     }
+
+    // ---- per-plugin forward-progress loop ---------------------------------
+    // A plugin already disabled surfaces `PluginAlreadyInState` (exit 21). For a
+    // batch/glob spanning mixed states we treat that as a benign skip; a SINGLE
+    // explicit id still surfaces exit 21.
+    let single_explicit = args.ids.len() == 1 && !crate::plugin::selector::is_glob(&args.ids[0]);
+    let mut successes: Vec<DisableOutcome> = Vec::new();
+
+    for id in &resolution.matched {
+        match disable_one(id, &paths, scope, mode) {
+            Ok(outcome) => successes.push(outcome),
+            Err(TomeError::PluginAlreadyInState { plugin, state }) if !single_explicit => {
+                info!(
+                    plugin = %plugin,
+                    state = ?state,
+                    "plugin already disabled; skipping in batch disable",
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    plugin = %id,
+                    error = %e,
+                    "plugin disable: plugin failed; continuing",
+                );
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    if successes.is_empty() {
+        return match first_error {
+            Some(e) => Err(e),
+            None => {
+                if mode == Mode::Human {
+                    let mut out = std::io::stdout().lock();
+                    writeln!(
+                        out,
+                        "Nothing to disable — all selected plugins already disabled."
+                    )?;
+                }
+                Ok(())
+            }
+        };
+    }
+
+    // ---- batch-wide post-processing (ONCE) --------------------------------
+    // FR-381 + FR-385: regenerate cached summaries AFTER the workspace_skills
+    // rows are deleted — once for the whole batch.
+    crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
+
+    // --sync (#280): propagate to bound harnesses inline, ONCE for the batch.
+    let projects_synced = if args.sync {
+        for outcome in &successes {
+            emit_disable_success(&outcome.plugin, outcome, mode, true)?;
+        }
+        let report = crate::commands::sync::sync_bound_projects(scope.scope.name(), &paths)?;
+        Some(report.projects.len())
+    } else {
+        None
+    };
+
+    match mode {
+        Mode::Human => {
+            if let Some(n) = projects_synced {
+                super::emit_synced_confirmation(n)?;
+            } else {
+                for outcome in &successes {
+                    emit_disable_success(&outcome.plugin, outcome, mode, false)?;
+                }
+            }
+        }
+        Mode::Json => {
+            for outcome in &successes {
+                emit_json(&outcome.plugin, outcome, projects_synced)?;
+            }
+        }
+    }
+
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Disable one plugin id: existence check + `lifecycle::disable`. Returns the
+/// [`DisableOutcome`] on success. The confirmation prompt is owned by the
+/// caller (ONE prompt for the whole batch), so this does no prompting.
+fn disable_one(
+    id: &PluginId,
+    paths: &Paths,
+    scope: &ResolvedScope,
+    mode: Mode,
+) -> Result<DisableOutcome, TomeError> {
+    // Surface CatalogNotFound / PluginNotFound before mutating anything — a
+    // typo on the address keeps the pre-#314 exit code.
+    let conn = open_index_for_read(paths, &scope.scope)?;
+    let _ = resolve_plugin_dir(id, &conn, scope.scope.name().as_str(), paths)?;
+    drop(conn);
 
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
 
@@ -73,18 +195,13 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
     }
 
     let outcome = lifecycle::disable(
-        &id,
-        &paths,
+        id,
+        paths,
         &scope.scope,
         embedder_seed,
         reranker_seed,
         summariser_seed,
     )?;
-
-    // FR-381 + FR-385: regenerate cached summaries AFTER the
-    // workspace_skills DELETE commits. See `commands::plugin::enable`
-    // for the forward-progress invariant.
-    crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
 
     crate::telemetry::emit(crate::telemetry::event::PluginActionEvent {
         action: crate::telemetry::event::PluginAction::Disabled,
@@ -94,41 +211,29 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
     // `catalog.<id>.plugin_disabled` ONLY when the plugin's catalog resolves —
     // by SOURCE, at emit time — to an allowlisted catalog. The version read is
     // still valid post-disable: disable removes the `workspace_skills` junction
-    // but RETAINS the `skills` rows (hence `skills_retained`), so the plugin's
-    // `plugin_version` is still in the index. Best-effort throughout.
+    // but RETAINS the `skills` rows, so `plugin_version` is still in the index.
+    // Best-effort throughout.
     if let Some(catalog_id) = crate::telemetry::resolve_attribution(scope, &id.catalog) {
         crate::telemetry::emit(crate::telemetry::event::PluginDisabled {
             catalog: catalog_id,
             plugin_name: id.plugin.clone(),
-            plugin_version: super::attributed_plugin_version(&paths, &scope.scope, &id),
+            plugin_version: super::attributed_plugin_version(paths, &scope.scope, id),
         });
     }
 
-    // --sync (#280): propagate the change to bound harnesses inline, reusing the
-    // SAME path `tome sync --all` uses (`commands::sync::sync_bound_projects` →
-    // `sync_all` → `sync_project`), so this inherits every writer safety and the
-    // forward-progress fan-out. It runs AFTER the disable + summary trigger have
-    // committed: a sync failure here surfaces the underlying `sync_project` exit
-    // code but the disable itself is already durable and IS reported first (the
-    // success line prints before we propagate the error).
-    let projects_synced = if args.sync {
-        // Print the disable success line NOW so the user always sees that the
-        // disable landed, even if the follow-up sync errors out below.
-        emit_disable_success(&id, &outcome, mode, true)?;
-        let report = crate::commands::sync::sync_bound_projects(scope.scope.name(), &paths)?;
-        Some(report.projects.len())
-    } else {
-        None
-    };
+    Ok(outcome)
+}
 
-    match (mode, projects_synced) {
-        // --sync succeeded: the success line already printed above; now confirm
-        // what was applied (human, via the shared SSOT) / carry the count (json).
-        (Mode::Human, Some(n)) => super::emit_synced_confirmation(n),
-        (Mode::Json, Some(n)) => emit_json(&id, &outcome, Some(n)),
-        // No --sync: normal success emit with the "run `tome sync`" reminder.
-        (Mode::Human, None) => emit_disable_success(&id, &outcome, mode, false),
-        (Mode::Json, None) => emit_json(&id, &outcome, None),
+/// Build the confirmation question for a disable batch. A single resolved id
+/// keeps the exact historical `"Disable {id}?"` string (so the single-id UX is
+/// byte-identical); multiple ids ask once, naming them.
+fn disable_prompt(ids: &[PluginId]) -> String {
+    match ids {
+        [only] => format!("Disable {only}?"),
+        many => {
+            let names: Vec<String> = many.iter().map(|id| id.to_string()).collect();
+            format!("Disable {} plugins ({})?", many.len(), names.join(", "))
+        }
     }
 }
 
@@ -207,7 +312,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
 
-    use super::{DisableRecord, write_disable_human};
+    use super::{DisableRecord, disable_prompt, write_disable_human};
     use crate::plugin::PluginId;
     use crate::plugin::lifecycle::DisableOutcome;
 
@@ -221,6 +326,24 @@ mod tests {
             skills_retained: 4,
             duration: Duration::from_millis(500),
         }
+    }
+
+    /// #314: a single resolved id keeps the exact historical prompt string so
+    /// the single-id UX is byte-identical.
+    #[test]
+    fn disable_prompt_single_id_is_historical_string() {
+        let ids = vec![sample_id()];
+        assert_eq!(disable_prompt(&ids), "Disable acme/widgets?");
+    }
+
+    /// #314: multiple ids ask once, naming them.
+    #[test]
+    fn disable_prompt_multiple_ids_names_them() {
+        let ids = vec![
+            PluginId::from_str("acme/a").unwrap(),
+            PluginId::from_str("acme/b").unwrap(),
+        ];
+        assert_eq!(disable_prompt(&ids), "Disable 2 plugins (acme/a, acme/b)?");
     }
 
     /// #280: without `--sync`, the disable human output carries a `next:`

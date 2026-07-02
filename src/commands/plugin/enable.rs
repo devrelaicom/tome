@@ -1,13 +1,22 @@
-//! `tome plugin enable <catalog>/<plugin>`.
+//! `tome plugin enable <catalog>/<plugin> [<catalog>/<plugin> ...]`.
 //!
 //! Composes the `plugin::lifecycle::enable` orchestrator with the
 //! model-presence prompt (T074 UI side) and the table / colour / NDJSON
 //! presentation contract.
 //!
-//! Spec: `contracts/plugin-commands.md` §1.
+//! Issue #314 widened this from a single `<catalog>/<plugin>` to a variadic
+//! selection of ids, `*` wildcard globs, and a `--catalog` scope for bare/glob
+//! names. Selection is resolved once via `plugin::selector::resolve` against the
+//! discoverable candidate set; the one-time setup (paths / config / embedder /
+//! drift guard / model-download prompt) is hoisted OUT of the per-plugin loop,
+//! which then processes each matched id with the `harness use` forward-progress
+//! pattern (a per-id failure is recorded + the loop continues; the FIRST
+//! failure's exit code is the process exit). A single literal id behaves exactly
+//! as before: one JSON record, the same human lines, the same exit codes.
+//!
+//! Spec: `contracts/plugin-commands.md` §1; issue #314.
 
 use std::io::Write;
-use std::str::FromStr;
 
 use serde::Serialize;
 use tracing::info;
@@ -23,12 +32,11 @@ use crate::presentation::{colour, progress, prompt};
 use crate::workspace::ResolvedScope;
 
 use super::{
-    human_mb, missing_models_for_profile, open_index_for_read, registry_seeds, resolve_plugin_dir,
+    discoverable_plugin_ids, human_mb, missing_models_for_profile, open_index_for_read,
+    registry_seeds, resolve_plugin_dir,
 };
 
 pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
-    let id = PluginId::from_str(&args.id)
-        .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
     let paths = Paths::resolve()?;
     // F2a: single global config; F11 reintroduces workspace-aware view.
     // LifecycleDeps.config is vestigial (the field is never read by the
@@ -39,14 +47,42 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     let config = crate::config::Config::default();
     let cfg = crate::config::load(&paths)?;
 
-    // Pre-check catalog + plugin existence so we can surface the right exit
-    // code before doing any model work. Lifecycle re-checks this internally;
-    // duplicating one cheap directory probe avoids wasting a multi-MB
-    // download on an obvious typo. Resolution reads the catalog enrolment from
-    // the DB (F11b), so we open a read-only handle here.
+    // ---- selection (issue #314) -------------------------------------------
+    // Resolve the variadic ids / globs / --catalog against the discoverable
+    // candidate set ONCE, before any model or index work. A slash-qualified
+    // literal id is passed through without an existence check here — the
+    // per-plugin `resolve_plugin_dir` below owns that (preserving the pre-#314
+    // exit codes for a typo'd id).
     let conn = open_index_for_read(&paths, &scope.scope)?;
-    let _ = resolve_plugin_dir(&id, &conn, scope.scope.name().as_str(), &paths)?;
+    let workspace_name = scope.scope.name();
+    let candidates = discoverable_plugin_ids(&conn, &paths, workspace_name.as_str())?;
+    let resolution =
+        crate::plugin::selector::resolve(&args.ids, &candidates, args.catalog.as_deref());
 
+    // Nothing matched → the whole command fails loud with the FIRST mapped
+    // error (a bad glob / ambiguous / not-found), never a silent success.
+    if resolution.matched.is_empty() {
+        let first = resolution
+            .errors
+            .into_iter()
+            .next()
+            .map(crate::plugin::SelectorError::into_tome_error)
+            // Unreachable: clap requires ≥1 id, so an empty-match batch always
+            // has ≥1 error. Fall back to a generic usage error defensively.
+            .unwrap_or_else(|| TomeError::Usage("no plugins selected".to_owned()));
+        drop(conn);
+        return Err(first);
+    }
+
+    // Matched non-empty but some tokens failed → forward-progress: proceed with
+    // the matches and remember the first error to surface at the end.
+    let mut first_error: Option<TomeError> = resolution
+        .errors
+        .into_iter()
+        .next()
+        .map(crate::plugin::SelectorError::into_tome_error);
+
+    // ---- one-time setup (hoisted out of the per-plugin loop) --------------
     // B4: resolve the ACTIVE profile's embedder (not the hard-coded default).
     let embedder_meta = crate::index::meta::active_embedder(&conn)?;
 
@@ -58,10 +94,8 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     let active_embedder_seed = crate::embedding::embedder_seed(&cfg, embedder_meta)?;
 
     // B3: refuse a partial re-embed under embedder drift BEFORE any model work.
-    // If the configured (remote-or-bundled) embedder no longer matches the
-    // embedder stamped in `meta`, enabling a plugin would land a new-dimension
-    // vector in a table of old-dimension vectors. Direct the user at
-    // `tome reindex`.
+    // Global to the batch — the embedder identity is plugin-independent, so it
+    // runs ONCE for the whole selection.
     crate::index::meta::guard_embedder_drift(
         &conn,
         &crate::index::meta::ModelIdent {
@@ -69,7 +103,6 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
             version: active_embedder_seed.version.clone(),
         },
     )?;
-    drop(conn);
 
     // Phase 12: is the embedder remote? On the remote path the local-model
     // download prompt is skipped (there is no embedder model to fetch — the
@@ -77,47 +110,193 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     let remote_embedding =
         crate::provider::resolve(&cfg, crate::provider::Capability::Embedding)?.is_some();
 
-    // Model-presence handling — T074 UI side. The lifecycle's
-    // `allow_model_download` boolean is always set to false because we own
-    // the download path here. Lifecycle re-checks the manifests after we
-    // return. Skipped on the remote path (no local embedder model).
-    if !remote_embedding {
-        ensure_models_or_prompt(&paths, &args, mode)?;
-    }
-
-    // Construct the embedder: remote when `[embedding]` is configured, else the
-    // bundled active-profile model. Reranker isn't loaded on enable (the query
-    // path loads it on demand). The drift guard above has already proven the
-    // configured embedder matches the stored identity, so a remote embedder's
-    // index-time validation asserts the persisted dimension; pass it as the seed.
     let persisted_dim = if remote_embedding {
-        let conn = open_index_for_read(&paths, &scope.scope)?;
         crate::index::read_embedder_dimension(&conn)?
     } else {
         None
     };
+    drop(conn);
+
+    // Model-presence handling — T074 UI side, ONCE for the whole batch (the
+    // missing-model set is plugin-independent). Skipped on the remote path.
+    if !remote_embedding {
+        ensure_models_or_prompt(&paths, &args, mode)?;
+    }
+
+    // Construct the embedder ONCE: remote when `[embedding]` is configured, else
+    // the bundled active-profile model. The drift guard above already proved the
+    // configured embedder matches the stored identity.
     let embedder = crate::embedding::build_embedder(&cfg, &paths, embedder_meta, persisted_dim)?;
 
     let (_e_seed, reranker_seed, summariser_seed) = registry_seeds();
+
+    // ---- per-plugin forward-progress loop ---------------------------------
+    // Each matched id: existence check (resolve_plugin_dir) + lifecycle::enable
+    // + --tier set. On a per-id Err, warn + continue, capturing the FIRST error.
+    // A plugin already enabled surfaces `PluginAlreadyInState` (exit 21) — for
+    // a glob that spans mixed states we treat that specific benign case as a
+    // skip (no record, no error captured) so a wildcard re-run over an
+    // already-enabled plugin isn't a fatal error; an EXPLICIT single-id enable
+    // of an already-enabled plugin still surfaces exit 21 (see below).
+    let single_explicit = args.ids.len() == 1 && !crate::plugin::selector::is_glob(&args.ids[0]);
+    let mut successes: Vec<lifecycle::EnableOutcome> = Vec::new();
+
+    for id in &resolution.matched {
+        match enable_one(
+            id,
+            &paths,
+            scope,
+            &config,
+            embedder.as_ref(),
+            active_embedder_seed.clone(),
+            reranker_seed.clone(),
+            summariser_seed.clone(),
+            args.tier,
+            mode,
+        ) {
+            Ok(outcome) => successes.push(outcome),
+            Err(TomeError::PluginAlreadyInState { plugin, state }) if !single_explicit => {
+                // Benign for a batch/glob: the plugin is already in the desired
+                // state, so skip it without failing the whole run. A single
+                // explicit id falls through to the general arm below (exit 21).
+                info!(
+                    plugin = %plugin,
+                    state = ?state,
+                    "plugin already enabled; skipping in batch enable",
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    plugin = %id,
+                    error = %e,
+                    "plugin enable: plugin failed; continuing",
+                );
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    // If nothing succeeded, surface the first error (loud, non-zero exit) and
+    // emit no records. `first_error` is Some in that case (either a selector
+    // error or the first per-plugin failure).
+    if successes.is_empty() {
+        return match first_error {
+            Some(e) => Err(e),
+            // Every matched id was a benign already-enabled skip (glob path):
+            // nothing to do, clean success. Note it in human mode.
+            None => {
+                if mode == Mode::Human {
+                    let mut out = std::io::stdout().lock();
+                    writeln!(
+                        out,
+                        "Nothing to enable — all selected plugins already enabled."
+                    )?;
+                }
+                Ok(())
+            }
+        };
+    }
+
+    // ---- batch-wide post-processing (ONCE) --------------------------------
+    // FR-380 + FR-385: regenerate cached summaries AFTER the workspace_skills
+    // mutations commit — once for the whole batch, not per-id.
+    crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
+
+    // --sync (#280): propagate the change to bound harnesses inline, ONCE for
+    // the whole batch, reusing the SAME path `tome sync --all` uses. It runs
+    // AFTER the success lines print (so partial progress is visible even if the
+    // sync errors).
+    let projects_synced = if args.sync {
+        // Print each success line NOW so the user always sees the enables landed.
+        for outcome in &successes {
+            emit_enable_success(&outcome.plugin, outcome, mode, true)?;
+        }
+        let report = crate::commands::sync::sync_bound_projects(scope.scope.name(), &paths)?;
+        Some(report.projects.len())
+    } else {
+        None
+    };
+
+    // ---- emit --------------------------------------------------------------
+    match mode {
+        Mode::Human => {
+            if let Some(n) = projects_synced {
+                // Success lines already printed above; confirm what was applied.
+                super::emit_synced_confirmation(n)?;
+            } else {
+                // Per-plugin success lines, then ONE batch `next:` reminder.
+                for outcome in &successes {
+                    emit_enable_success(&outcome.plugin, outcome, mode, false)?;
+                }
+            }
+        }
+        Mode::Json => {
+            // NDJSON: one record per SUCCESSFULLY-processed plugin (exactly like
+            // `plugin list`). A single successful id ⇒ one object ⇒ byte-identical
+            // to the pre-#314 record. When `--sync`, the batch count trails EACH
+            // record (single-id `--sync` pin stays green).
+            for outcome in &successes {
+                emit_json(&outcome.plugin, outcome, projects_synced)?;
+            }
+        }
+    }
+
+    // Forward-progress: records emitted, now surface the first failure's code.
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Enable a single plugin id: existence check + `lifecycle::enable` + optional
+/// `--tier` bulk-set. Returns the [`lifecycle::EnableOutcome`] on success. The
+/// one-time setup (embedder, seeds, drift guard, model prompt) is done by the
+/// caller and passed in, so this is called once per matched id.
+///
+/// `mode` drives only the per-plugin banner (`Enabling {id}…`); the success
+/// lines + JSON records are emitted by the caller after the loop.
+#[allow(clippy::too_many_arguments)]
+fn enable_one(
+    id: &PluginId,
+    paths: &Paths,
+    scope: &ResolvedScope,
+    config: &crate::config::Config,
+    embedder: &dyn crate::embedding::Embedder,
+    embedder_seed: crate::index::MetaSeed,
+    reranker_seed: crate::index::MetaSeed,
+    summariser_seed: crate::index::MetaSeed,
+    tier: Option<u8>,
+    mode: Mode,
+) -> Result<lifecycle::EnableOutcome, TomeError> {
+    // Pre-check catalog + plugin existence so a typo surfaces the right exit
+    // code (CatalogNotFound / PluginNotFound). Lifecycle re-checks this
+    // internally; this cheap probe keeps the exit-code surface identical to the
+    // pre-#314 single-id path.
+    let conn = open_index_for_read(paths, &scope.scope)?;
+    let _ = resolve_plugin_dir(id, &conn, scope.scope.name().as_str(), paths)?;
+    drop(conn);
+
     let deps = LifecycleDeps {
-        paths: &paths,
+        paths,
         scope: &scope.scope,
-        config: &config,
-        embedder: embedder.as_ref(),
-        embedder_seed: active_embedder_seed,
-        reranker_seed,
-        summariser_seed,
+        config,
+        embedder,
+        embedder_seed,
+        reranker_seed: reranker_seed.clone(),
+        summariser_seed: summariser_seed.clone(),
         allow_model_download: false,
     };
 
-    // Banner — human mode only. Skipping it in JSON keeps stdout
-    // byte-stable; the structured record is the contract there.
+    // Banner — human mode only. Skipping it in JSON keeps stdout byte-stable;
+    // the structured record is the contract there.
     if mode == Mode::Human {
         let mut out = std::io::stdout().lock();
         writeln!(out, "Enabling {}…", id)?;
     }
 
-    let outcome = lifecycle::enable(&id, &deps)?;
+    let outcome = lifecycle::enable(id, &deps)?;
 
     // Warnings on stderr — one per line, prefixed.
     if !outcome.warnings.is_empty() {
@@ -130,17 +309,16 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     // --tier bulk-sets every skill/command of this plugin to the requested
     // routing tier. The UPDATE runs under the advisory write lock on a
     // writable connection (FR-040) — same idiom as `commands/tier/set.rs`.
-    // We apply this BEFORE regenerate_for_trigger so RULES.md is recomposed
-    // with the new tiers (regenerate_for_trigger → regen_summary::regen →
-    // write_workspace_rules reads tiers from the DB).
-    if let Some(tier) = args.tier {
-        let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    // We apply this BEFORE regenerate_for_trigger (in the caller) so RULES.md is
+    // recomposed with the new tiers.
+    if let Some(tier) = tier {
+        let (e_seed, r_seed, s_seed) = registry_seeds();
         let tier_conn = crate::index::open(
             &paths.index_db,
             &crate::index::OpenOptions {
-                embedder: embedder_seed,
-                reranker: reranker_seed,
-                summariser: summariser_seed,
+                embedder: e_seed,
+                reranker: r_seed,
+                summariser: s_seed,
                 profile: None,
             },
         )?;
@@ -165,57 +343,24 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
         }
     }
 
-    // FR-380 + FR-385: regenerate cached summaries AFTER the
-    // workspace_skills mutation commits. The lifecycle transaction
-    // above already committed; if the summariser fails, exit 24
-    // surfaces and the prior `[summaries]` cache survives.
-    crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
-
     crate::telemetry::emit(crate::telemetry::event::PluginActionEvent {
         action: crate::telemetry::event::PluginAction::Enabled,
     });
 
     // FR-052: ALONGSIDE the anonymous event above, emit the catalog-attributed
     // `catalog.<id>.plugin_enabled` ONLY when the plugin's catalog resolves — at
-    // emit time, by SOURCE not name — to an allowlisted catalog. `None` ⇒ the
-    // anonymous event already fired and we add nothing (a name collision with a
-    // non-allowlisted source stays anonymous). Best-effort throughout: the
-    // attribution read and the version read are read-only, never lock, never
-    // fail the command.
+    // emit time, by SOURCE not name — to an allowlisted catalog. Best-effort
+    // throughout: the attribution + version reads are read-only, never lock,
+    // never fail the command.
     if let Some(catalog_id) = crate::telemetry::resolve_attribution(scope, &id.catalog) {
         crate::telemetry::emit(crate::telemetry::event::PluginEnabled {
             catalog: catalog_id,
             plugin_name: id.plugin.clone(),
-            plugin_version: super::attributed_plugin_version(&paths, &scope.scope, &id),
+            plugin_version: super::attributed_plugin_version(paths, &scope.scope, id),
         });
     }
 
-    // --sync (#280): propagate the change to bound harnesses inline, reusing the
-    // SAME path `tome sync --all` uses (`commands::sync::sync_bound_projects` →
-    // `sync_all` → `sync_project`), so this inherits every writer safety and the
-    // forward-progress fan-out. It runs AFTER the state change + summary trigger
-    // above have committed: a sync failure here surfaces the underlying
-    // `sync_project` exit code but the enable itself is already durable and IS
-    // reported first (the success line prints before we propagate the error).
-    let projects_synced = if args.sync {
-        // Print the enable success line NOW so the user always sees that the
-        // enable landed, even if the follow-up sync errors out below.
-        emit_enable_success(&id, &outcome, mode, true)?;
-        let report = crate::commands::sync::sync_bound_projects(scope.scope.name(), &paths)?;
-        Some(report.projects.len())
-    } else {
-        None
-    };
-
-    match (mode, projects_synced) {
-        // --sync succeeded: the success line already printed above; now confirm
-        // what was applied (human, via the shared SSOT) / carry the count (json).
-        (Mode::Human, Some(n)) => super::emit_synced_confirmation(n),
-        (Mode::Json, Some(n)) => emit_json(&id, &outcome, Some(n)),
-        // No --sync: normal success emit with the "run `tome sync`" reminder.
-        (Mode::Human, None) => emit_enable_success(&id, &outcome, mode, false),
-        (Mode::Json, None) => emit_json(&id, &outcome, None),
-    }
+    Ok(outcome)
 }
 
 /// Print the human success line + `next:` reminder (or, in JSON mode, nothing —
@@ -243,14 +388,9 @@ fn emit_enable_success(
 /// * `--yes` skips the prompt and proceeds.
 /// * On a TTY the user is asked once for ALL missing models.
 /// * Off a TTY without `--yes` → `ModelMissing` (exit 30).
-/// * User says no → clean exit with a stderr note (`Ok(())` returned but
-///   the rest of the enable flow short-circuits via early return inside
-///   this function — handled by the caller observing `Ok(())` + zero work
-///   done by lifecycle? No: we need to actually NOT call lifecycle. So we
-///   propagate the user's decline by returning `Err(Interrupted)`-style?
-///   The contract isn't explicit; spec says "clean abort" — we return a
-///   `TomeError::Interrupted` so exit code 8 surfaces, which is the right
-///   "user-initiated abort" code. Implementation note in retro.
+/// * User says no → `Interrupted` (exit 8), the "user-initiated abort" code.
+///
+/// Runs ONCE for the whole batch — the missing-model set is plugin-independent.
 fn ensure_models_or_prompt(
     paths: &Paths,
     args: &PluginEnableArgs,
