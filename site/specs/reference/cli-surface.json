@@ -323,6 +323,29 @@
         "--verbose"
       ]
     },
+    "tier": {
+      "subcommands": {
+        "set": [
+          "--catalog",
+          "--kind",
+          "--plugin",
+          "--verbose"
+        ],
+        "list": [
+          "--verbose"
+        ],
+        "clear": [
+          "--all",
+          "--catalog",
+          "--kind",
+          "--plugin",
+          "--verbose"
+        ]
+      },
+      "flags": [
+        "--verbose"
+      ]
+    },
     "config": {
       "subcommands": {
         "show": [

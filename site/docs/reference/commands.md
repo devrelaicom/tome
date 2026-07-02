@@ -266,6 +266,46 @@ agent how to use Tome itself — into your detected harnesses.
 
 See [Meta skills](../using-tome/meta-skills.md).
 
+## `tome tier`
+
+Manage the per-workspace **routing tier** of enabled skills and commands. Tiers
+drive what instructions Tome injects so an agent knows when to fetch a skill
+(Tier 1/2 via `get_skill`) or search for it (Tier 3, the default). Every command
+operates on the resolved workspace (use `--workspace` / `-w` to target another).
+
+| Subcommand | Flags | Purpose |
+| --- | --- | --- |
+| `set <plugin>/<name> <1\|2\|3>` | `--plugin`, `--catalog`, `--kind` | Set the routing tier of one entry, a name-glob, or whole plugins. |
+| `list` | | List every enabled skill/command grouped by routing tier. |
+| `clear <plugin>/<name>` | `--plugin`, `--all`, `--catalog`, `--kind` | Reset the tier of one entry, a name-glob, whole plugins, or the entire workspace back to the default (3). |
+
+```bash
+tome tier set plugin-alpha/skill-a 1        # one entry
+tome tier set "plugin-alpha/*" 2            # every entry of a plugin (name glob)
+tome tier set "plugin-alpha/foo-*" 2        # a name-glob subset
+tome tier set --plugin midnight/compact 1   # whole plugin (catalog/plugin selector)
+tome tier set --plugin compact --catalog midnight 1  # bare selector + --catalog
+tome tier clear plugin-alpha/skill-a        # reset one entry to tier 3
+tome tier clear --plugin midnight/compact   # reset a whole plugin
+tome tier clear --all                       # reset every enabled entry in the workspace
+```
+
+- The positional `<plugin>/<name>` id is **entry-level**; its name segment may be
+  a `*` glob (`<plugin>/*`, `<plugin>/foo-*`). A glob that matches nothing is a
+  usage error (`entry_not_found`), never a silent no-op.
+- `--plugin <catalog>/<plugin>` (repeatable) is **plugin-level** — it retiers
+  every enabled tierable entry of the named plugin(s). A bare `<plugin>` is
+  disambiguated by `--catalog`; a `*` glob in either segment fans out. A
+  `--plugin` naming a plugin with no tierable entries is `entry_not_found`.
+- `--all` (clear only) resets **every** enabled tierable entry in the workspace.
+- Exactly one selection source is required: the positional id **xor** `--plugin`
+  (`set`), plus `--all` (`clear`). Passing none or more than one is a usage error.
+- `--catalog` / `--kind` disambiguate when the same plugin name spans catalogs or
+  the same entry name exists as both a skill and a command. Agents carry no tier.
+
+Tiers persist on `workspace_skills.tier`; `set`/`clear` run one UPDATE batch under
+the advisory index lock and regenerate the workspace `RULES.md` once afterwards.
+
 ## `tome config`
 
 Inspect and validate the unified global config, `~/.tome/config.toml`. Both

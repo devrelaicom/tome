@@ -1202,6 +1202,37 @@ pub fn set_tier_for_plugin(
     })
 }
 
+/// Reset the routing tier of EVERY enabled `skill`/`command` entry in
+/// `workspace_name` to the default (3) — the `tome tier clear --all` path.
+/// Agents carry no tier and are untouched by the `kind IN ('skill','command')`
+/// scope (mirroring [`tiered_entries_for_workspace`]).
+///
+/// Returns the affected entries (post-reset, so their `tier` is already the
+/// default) in the byte-stable `(tier, catalog, plugin, name)` order the
+/// emitter iterates — the caller emits one record per row. A single UPDATE keeps
+/// the whole reset atomic under the advisory write lock; the follow-up SELECT
+/// re-reads the same enrolled set so the emitted rows exactly reflect what was
+/// changed. An empty workspace (no enabled tierable entries) yields an empty
+/// vec; the caller emits nothing and exits 0 (a benign idempotent no-op — there
+/// is no "nothing to reset" message).
+pub fn reset_all_tiers_for_workspace(
+    conn: &Connection,
+    workspace_name: &str,
+) -> Result<Vec<TieredEntry>, TomeError> {
+    conn.execute(
+        "UPDATE workspace_skills
+         SET tier = 3
+         WHERE workspace_id = (SELECT id FROM workspaces WHERE name = ?1)
+           AND skill_id IN (SELECT s.id FROM skills s
+                            WHERE s.kind IN ('skill', 'command'))",
+        params![workspace_name],
+    )
+    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("reset all tiers: {e}")))?;
+    // Return the reset set for emit; the shared projection keeps the ordering
+    // byte-stable across `set`/`clear`/`list`.
+    tiered_entries_for_workspace(conn, workspace_name)
+}
+
 /// The distinct routing tiers held by entries of one `(catalog, plugin)`
 /// enabled in `workspace_name`. "Enabled" means a `workspace_skills` row joins
 /// the entry to the workspace — the same enrolment junction the tier and
