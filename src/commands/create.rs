@@ -43,6 +43,12 @@ pub struct CreateRequest {
     pub bare: bool,
     /// (skill) the wrapping plugin name; `None` → `name`.
     pub plugin_name: Option<String>,
+    /// `--description`; `None` → the scaffold's name-derived default.
+    pub description: Option<String>,
+    /// `--author`; `None` → the placeholder catalog owner / no plugin author.
+    pub author: Option<String>,
+    /// `--dry-run`: compute + report the plan without writing to disk.
+    pub dry_run: bool,
 }
 
 /// Scaffold a new artifact at the request's level.
@@ -101,15 +107,14 @@ fn run_inner(req: CreateRequest, _scope: &ResolvedScope, mode: Mode) -> Result<(
     };
     let into_existing_plugin = req.into.is_some() && register.is_none();
 
-    // `description`/`author_name` are reserved for the `--description`/`--author`
-    // flags (a fast-follow); there are no such flags yet, so they are `None`
-    // here and the scaffold falls back to its name-derived description +
-    // placeholder owner. NOT a wiring bug.
+    // `--description`/`--author` flow into the scaffold; omitted → the scaffold
+    // falls back to its name-derived description + placeholder catalog owner
+    // (byte-identical to the pre-flag behaviour).
     let params = CreateParams {
         name: req.name.clone(),
         plugin_name: req.plugin_name.clone(),
-        description: None,
-        author_name: None,
+        description: req.description.clone(),
+        author_name: req.author.clone(),
         date: today(),
         bare: bare || into_existing_plugin,
     };
@@ -121,17 +126,20 @@ fn run_inner(req: CreateRequest, _scope: &ResolvedScope, mode: Mode) -> Result<(
         &target,
         EmitOptions {
             force: req.force,
-            dry_run: false,
+            dry_run: req.dry_run,
         },
     )?;
 
     // Register the injected plugin in the target catalog's `plugins[]` (atomic,
-    // comment-preserving, idempotent).
-    if let Some(catalog_manifest) = register {
+    // comment-preserving, idempotent). Skipped under `--dry-run`: registration
+    // is a filesystem write, and dry-run must not touch disk.
+    if let Some(catalog_manifest) = register
+        && !req.dry_run
+    {
         register_plugin_in_catalog(&catalog_manifest, &final_name)?;
     }
 
-    emit_report(req.level, &final_name, &outcome, mode)
+    emit_report(req.level, &final_name, &outcome, req.dry_run, mode)
 }
 
 /// The reserved built-in template names (`default`, `bare-skill`). Anything else
@@ -154,21 +162,33 @@ fn today() -> String {
 
 /// Render the create outcome: a human summary or a `--json` created-files
 /// record (a single object, like `lint`; distinct from `convert`'s JSONL).
+/// Under `dry_run` the record reports the files that *would* be written and the
+/// human summary says so.
 fn emit_report(
     level: ArtifactLevel,
     final_name: &str,
     outcome: &EmitOutcome,
+    dry_run: bool,
     mode: Mode,
 ) -> Result<(), TomeError> {
     match mode {
-        Mode::Json => write_json(&create_json(level, final_name, outcome))?,
+        Mode::Json => write_json(&create_json(level, final_name, outcome, dry_run))?,
         Mode::Human => {
-            println!(
-                "Created {} `{}` at {}",
-                level.as_str(),
-                final_name,
-                outcome.root.display()
-            );
+            if dry_run {
+                println!(
+                    "Would create {} `{}` at {}",
+                    level.as_str(),
+                    final_name,
+                    outcome.root.display()
+                );
+            } else {
+                println!(
+                    "Created {} `{}` at {}",
+                    level.as_str(),
+                    final_name,
+                    outcome.root.display()
+                );
+            }
             for p in &outcome.written {
                 println!("  {}", p.display());
             }
@@ -178,8 +198,14 @@ fn emit_report(
 }
 
 /// The `--json` created-files record (a single object; key order/shape pinned
-/// by `json_record_shape` below).
-fn create_json(level: ArtifactLevel, final_name: &str, outcome: &EmitOutcome) -> serde_json::Value {
+/// by `json_record_shape` below). Under `--dry-run` the `written` list carries
+/// the files that *would* be written and `dry_run` is `true`.
+fn create_json(
+    level: ArtifactLevel,
+    final_name: &str,
+    outcome: &EmitOutcome,
+    dry_run: bool,
+) -> serde_json::Value {
     json!({
         "level": level.as_str(),
         "name": final_name,
@@ -189,6 +215,7 @@ fn create_json(level: ArtifactLevel, final_name: &str, outcome: &EmitOutcome) ->
             .iter()
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>(),
+        "dry_run": dry_run,
     })
 }
 
@@ -206,6 +233,9 @@ mod tests {
             force: false,
             bare: false,
             plugin_name: None,
+            description: None,
+            author: None,
+            dry_run: false,
         }
     }
 
@@ -424,12 +454,13 @@ mod tests {
                 std::path::PathBuf::from("skills/toolkit/SKILL.md"),
             ],
         };
-        let v = create_json(ArtifactLevel::Plugin, "toolkit", &outcome);
+        let v = create_json(ArtifactLevel::Plugin, "toolkit", &outcome, false);
         assert_eq!(v["level"], "plugin");
         assert_eq!(v["name"], "toolkit");
         assert_eq!(v["root"], "/tmp/out/toolkit");
         assert_eq!(v["written"][0], "tome-plugin.toml");
         assert_eq!(v["written"][1], "skills/toolkit/SKILL.md");
+        assert_eq!(v["dry_run"], false);
     }
 
     #[test]
@@ -468,6 +499,209 @@ mod tests {
                 clap::error::ErrorKind::ArgumentConflict,
                 "expected a conflict for {argv:?}"
             );
+        }
+    }
+
+    #[test]
+    fn description_and_author_land_in_the_emitted_plugin() {
+        // #325 (a): --description + --author reach the emitted artifact — the
+        // manifest carries the author, the SKILL.md body carries the
+        // description, and neither shows the name-derived / placeholder default.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = req(ArtifactLevel::Plugin, "toolkit");
+        r.output = Some(tmp.path().to_path_buf());
+        r.description = Some("QA helpers".to_owned());
+        r.author = Some("Acme".to_owned());
+        run(r, &scope(), Mode::Human).unwrap();
+
+        let manifest =
+            std::fs::read_to_string(tmp.path().join("toolkit/tome-plugin.toml")).unwrap();
+        assert!(
+            manifest.contains("description = \"QA helpers\""),
+            "manifest must carry --description: {manifest}"
+        );
+        assert!(
+            manifest.contains("name = \"Acme\""),
+            "manifest must carry --author in [author]: {manifest}"
+        );
+        // The name-derived description default must NOT appear.
+        assert!(!manifest.contains("The toolkit scaffold."), "{manifest}");
+
+        let skill =
+            std::fs::read_to_string(tmp.path().join("toolkit/skills/toolkit/SKILL.md")).unwrap();
+        assert!(
+            skill.contains("QA helpers"),
+            "skill body must carry --description: {skill}"
+        );
+    }
+
+    #[test]
+    fn author_sets_the_catalog_owner_replacing_the_placeholder() {
+        // #325: --author replaces the `Your Name` catalog-owner placeholder.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = req(ArtifactLevel::Catalog, "my-catalog");
+        r.output = Some(tmp.path().to_path_buf());
+        r.author = Some("Acme".to_owned());
+        run(r, &scope(), Mode::Human).unwrap();
+
+        let manifest =
+            std::fs::read_to_string(tmp.path().join("my-catalog/tome-catalog.toml")).unwrap();
+        assert!(
+            manifest.contains("name = \"Acme\""),
+            "catalog owner must be the --author value: {manifest}"
+        );
+        assert!(
+            !manifest.contains("Your Name"),
+            "placeholder must be replaced: {manifest}"
+        );
+    }
+
+    #[test]
+    fn dry_run_writes_nothing_and_reports_the_plan() {
+        // #325 (b): --dry-run must not create the target on disk, yet still
+        // reports the planned files (JSON `written` populated, `dry_run: true`).
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = req(ArtifactLevel::Plugin, "toolkit");
+        r.output = Some(tmp.path().to_path_buf());
+        r.dry_run = true;
+        run(r, &scope(), Mode::Human).unwrap();
+        assert!(
+            !tmp.path().join("toolkit").exists(),
+            "--dry-run must not write the artifact to disk"
+        );
+    }
+
+    #[test]
+    fn dry_run_into_catalog_does_not_register_or_write() {
+        // #325 (b): --dry-run with --into must neither land the plugin nor edit
+        // the catalog manifest (both are filesystem writes).
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = tmp.path().join("cat");
+        write_catalog_with_comment(&cat);
+        let manifest_before = std::fs::read_to_string(cat.join("tome-catalog.toml")).unwrap();
+
+        let mut r = req(ArtifactLevel::Plugin, "toolkit");
+        r.into = Some(cat.clone());
+        r.dry_run = true;
+        run(r, &scope(), Mode::Human).unwrap();
+
+        assert!(
+            !cat.join("toolkit").exists(),
+            "--dry-run must not land the plugin"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cat.join("tome-catalog.toml")).unwrap(),
+            manifest_before,
+            "--dry-run must not register the plugin in the catalog manifest"
+        );
+    }
+
+    #[test]
+    fn omitting_the_flags_reproduces_the_placeholder_and_default() {
+        // #325 (c): back-compat — no --description/--author/--dry-run reproduces
+        // the name-derived description default + the `Your Name` catalog
+        // placeholder, and writes to disk as before.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = req(ArtifactLevel::Catalog, "my-catalog");
+        r.output = Some(tmp.path().to_path_buf());
+        run(r, &scope(), Mode::Human).unwrap();
+
+        let manifest =
+            std::fs::read_to_string(tmp.path().join("my-catalog/tome-catalog.toml")).unwrap();
+        assert!(
+            manifest.contains("name = \"Your Name\""),
+            "omitted --author must keep the placeholder owner: {manifest}"
+        );
+        assert!(
+            manifest.contains("The my-catalog scaffold."),
+            "omitted --description must keep the name-derived default: {manifest}"
+        );
+    }
+
+    #[test]
+    fn dry_run_json_records_dry_run_true() {
+        // #325 (b): the --json record flags dry_run.
+        use crate::authoring::emit::EmitOutcome;
+        let outcome = EmitOutcome {
+            root: std::path::PathBuf::from("/tmp/out/toolkit"),
+            written: vec![std::path::PathBuf::from("tome-plugin.toml")],
+        };
+        let v = create_json(ArtifactLevel::Plugin, "toolkit", &outcome, true);
+        assert_eq!(v["dry_run"], true);
+        assert_eq!(v["written"][0], "tome-plugin.toml");
+    }
+
+    #[test]
+    fn clap_parses_the_new_flags_on_all_three_verbs() {
+        // #325: --description / --author / --dry-run parse on catalog, plugin,
+        // and skill create.
+        use crate::cli::{CatalogCommand, Cli, Command, PluginCommand, SkillCommand};
+        use clap::Parser;
+
+        let cli = Cli::try_parse_from([
+            "tome",
+            "catalog",
+            "create",
+            "cat",
+            "--description",
+            "d",
+            "--author",
+            "a",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Catalog(CatalogCommand::Create(args)) => {
+                assert_eq!(args.description.as_deref(), Some("d"));
+                assert_eq!(args.author.as_deref(), Some("a"));
+                assert!(args.dry_run);
+            }
+            other => panic!("expected catalog create, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "tome",
+            "plugin",
+            "create",
+            "qa",
+            "--description",
+            "QA helpers",
+            "--author",
+            "Acme",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Plugin(pa) => match pa.command {
+                Some(PluginCommand::Create(args)) => {
+                    assert_eq!(args.description.as_deref(), Some("QA helpers"));
+                    assert_eq!(args.author.as_deref(), Some("Acme"));
+                    assert!(args.dry_run);
+                }
+                other => panic!("expected plugin create, got {other:?}"),
+            },
+            other => panic!("expected plugin, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "tome",
+            "skill",
+            "create",
+            "review",
+            "--description",
+            "d",
+            "--author",
+            "a",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Skill(SkillCommand::Create(args)) => {
+                assert_eq!(args.description.as_deref(), Some("d"));
+                assert_eq!(args.author.as_deref(), Some("a"));
+                assert!(args.dry_run);
+            }
+            other => panic!("expected skill create, got {other:?}"),
         }
     }
 }

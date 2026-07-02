@@ -1028,6 +1028,17 @@ pub struct CatalogCreateArgs {
     /// Defaults to the current directory.
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Description for the scaffolded artifact. Omitted → a name-derived
+    /// placeholder.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Author name for the scaffolded catalog owner. Omitted → the `Your Name`
+    /// placeholder (edit it after scaffolding).
+    #[arg(long)]
+    pub author: Option<String>,
+    /// Preview the files that would be written without touching the filesystem.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
     /// Overwrite colliding files (only those files; never a directory wipe).
     #[arg(long)]
     pub force: bool,
@@ -1050,6 +1061,17 @@ pub struct PluginCreateArgs {
     /// that catalog's `tome-catalog.toml`. Mutually exclusive with `--output`.
     #[arg(long)]
     pub into: Option<PathBuf>,
+    /// Description for the scaffolded artifact. Omitted → a name-derived
+    /// placeholder.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Author name for the scaffolded plugin's `[author]` table. Omitted → no
+    /// author is recorded.
+    #[arg(long)]
+    pub author: Option<String>,
+    /// Preview the files that would be written without touching the filesystem.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
     /// Overwrite colliding files (only those files; never a directory wipe).
     #[arg(long)]
     pub force: bool,
@@ -1082,6 +1104,18 @@ pub struct SkillCreateArgs {
     /// plugin's `skills/`). Mutually exclusive with `--output`.
     #[arg(long)]
     pub into: Option<PathBuf>,
+    /// Description for the scaffolded skill. Omitted → a name-derived
+    /// placeholder.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Author name for the wrapping plugin's `[author]` table. Omitted → no
+    /// author is recorded. Meaningless with `--bare` (no wrapping plugin) and
+    /// with `--into` (the wrapping plugin already exists).
+    #[arg(long)]
+    pub author: Option<String>,
+    /// Preview the files that would be written without touching the filesystem.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
     /// Overwrite colliding files (only those files; never a directory wipe).
     #[arg(long)]
     pub force: bool,
