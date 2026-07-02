@@ -214,6 +214,38 @@ fn get_skill_input_schema_advertises_raw_boolean() {
 }
 
 #[test]
+fn get_skill_info_kind_schema_description_names_all_valid_kinds() {
+    // #332: the `get_skill_info` input schema's `kind` property description
+    // (what `tools/list` exposes to an agent) must enumerate the valid values
+    // so a caller knows `command` / `agent` are selectable, not only the
+    // defaulted `skill`. Positive pin on the reworded description.
+    let tools = Server::tool_router().list_all();
+    let info = tools
+        .iter()
+        .find(|t| t.name == "get_skill_info")
+        .expect("get_skill_info advertised");
+
+    let properties = info
+        .input_schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("input schema has a `properties` object");
+    let kind = properties
+        .get("kind")
+        .expect("input schema advertises the `kind` property");
+    let description = kind
+        .get("description")
+        .and_then(|d| d.as_str())
+        .expect("the `kind` property carries a description");
+    for value in ["skill", "command", "agent"] {
+        assert!(
+            description.contains(value),
+            "the `kind` description must name the `{value}` value; got: {description:?}",
+        );
+    }
+}
+
+#[test]
 fn descriptions_do_not_enumerate_fixture_identifiers() {
     // FR-108: the tool descriptions must NOT name any specific catalog,
     // plugin, or skill identifier. We assert against the identifiers

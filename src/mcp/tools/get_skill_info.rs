@@ -38,11 +38,16 @@ const PER_DIRECTORY_CAP: usize = 5;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
+    /// The catalog name, as returned by `search_skills` (e.g. `midnight-expert`).
     pub catalog: String,
+    /// The plugin name within the catalog, as returned by `search_skills`
+    /// (e.g. `compact-core`). Plugin name only, NOT `<catalog>/<plugin>`.
     pub plugin: String,
+    /// The entry `name` field as returned by `search_skills`.
     pub name: String,
     /// Disambiguator when a plugin ships entries with the same name across
-    /// kinds. Defaults to `skill` per FR-084.
+    /// kinds. One of `skill` (the default), `command`, or `agent`. Defaults to
+    /// `skill`.
     #[serde(default = "default_kind")]
     pub kind: EntryKind,
 }
