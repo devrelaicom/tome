@@ -155,6 +155,37 @@ fn description_and_author_land_and_still_lint_clean() {
 }
 
 #[test]
+fn blank_author_emits_no_author_table_byte_identical_to_omitting_it() {
+    // #325 review Minor: `plugin create x --author ""` (and whitespace-only)
+    // must emit NO `[author]` table — byte-identical to omitting the flag —
+    // never a lint-tripping `name = ""`.
+    let baseline_tmp = tempfile::tempdir().unwrap();
+    let baseline = scaffold_to_disk(
+        baseline_tmp.path(),
+        ArtifactLevel::Plugin,
+        &params("toolkit"),
+    );
+    let baseline_manifest = fs::read_to_string(baseline.join("tome-plugin.toml")).unwrap();
+    assert!(
+        !baseline_manifest.contains("[author]"),
+        "sanity: omitted author has no [author] table"
+    );
+
+    for blank in ["", "   ", "\t"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = params("toolkit");
+        p.author_name = Some(blank.to_owned());
+        let root = scaffold_to_disk(tmp.path(), ArtifactLevel::Plugin, &p);
+        let manifest = fs::read_to_string(root.join("tome-plugin.toml")).unwrap();
+        assert_eq!(
+            manifest, baseline_manifest,
+            "blank author {blank:?} must be byte-identical to omitting --author"
+        );
+        assert_lints_clean(&root);
+    }
+}
+
+#[test]
 fn catalog_author_sets_the_owner_and_lints_clean() {
     // #325: --author on a catalog replaces the `Your Name` owner placeholder
     // and the result still lints clean.

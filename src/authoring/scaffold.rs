@@ -111,10 +111,19 @@ fn plugin_ir(name: &str, entries: Vec<EntryIr>, params: &CreateParams) -> Plugin
         name: name.to_owned(),
         version: DEFAULT_VERSION.to_owned(),
         description: Some(description_for(params)),
-        author: params.author_name.as_ref().map(|n| TomeAuthor {
-            name: Some(n.clone()),
-            email: None,
-        }),
+        // An empty/whitespace-only `--author` is treated as absent (NO
+        // `[author]` table), byte-identical to omitting the flag — the same
+        // trim+empty-filter the catalog owner path uses, so a blank author can
+        // never emit a lint-tripping `name = ""`.
+        author: params
+            .author_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(|n| TomeAuthor {
+                name: Some(n.to_owned()),
+                email: None,
+            }),
         license: None,
         entries,
         mcp_servers: Vec::new(),
@@ -264,5 +273,35 @@ mod tests {
     fn rejects_a_non_kebab_name() {
         let err = create_artifact(ArtifactLevel::Skill, &params("Not_Kebab")).unwrap_err();
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn empty_or_whitespace_author_is_treated_as_absent() {
+        // #325 review Minor: a blank/whitespace `--author` must NOT emit an
+        // `[author]` table with `name = ""` — it is treated as absent, matching
+        // the catalog owner path's trim+empty-filter (and lint-clean goal). A
+        // real author still populates the table.
+        for blank in ["", "   ", "\t"] {
+            let mut pa = params("toolkit");
+            pa.author_name = Some(blank.to_owned());
+            let (artifact, _) = create_artifact(ArtifactLevel::Plugin, &pa).unwrap();
+            match artifact {
+                Artifact::Plugin(p) => assert!(
+                    p.author.is_none(),
+                    "blank author {blank:?} must yield no [author] table"
+                ),
+                other => panic!("expected a plugin, got {other:?}"),
+            }
+        }
+
+        let mut pa = params("toolkit");
+        pa.author_name = Some("Acme".to_owned());
+        let (artifact, _) = create_artifact(ArtifactLevel::Plugin, &pa).unwrap();
+        match artifact {
+            Artifact::Plugin(p) => {
+                assert_eq!(p.author.and_then(|a| a.name).as_deref(), Some("Acme"))
+            }
+            other => panic!("expected a plugin, got {other:?}"),
+        }
     }
 }
