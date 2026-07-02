@@ -60,14 +60,47 @@ pub fn run(args: ModelsTestArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     crate::provider::credential_preflight(&cfg, capability_of(args.capability))?;
 
     let outcome = match args.capability {
-        TestCapability::Embedding => test_embedding(&cfg, &paths, scope)?,
-        TestCapability::Summariser => test_summariser(&cfg, &paths)?,
-        TestCapability::Reranker => test_reranker(&cfg, &paths, scope)?,
+        TestCapability::Embedding => test_embedding(&cfg, &paths, scope, args.verify)?,
+        TestCapability::Summariser => test_summariser(&cfg, &paths, args.verify)?,
+        TestCapability::Reranker => test_reranker(&cfg, &paths, scope, args.verify)?,
     };
 
     match mode {
         Mode::Human => emit_human(&outcome),
         Mode::Json => output::write_json(&outcome),
+    }
+}
+
+/// Compute the optional on-disk artefact-verification result for a capability,
+/// reusing the SAME SHA-256 SSOT (`commands::status::check_model`) that
+/// `status` / `doctor` / `models list` use under `--verify`.
+///
+/// Returns `Ok(None)` when `verify` is off. Otherwise `Ok(Some(_))`:
+/// - **remote** provider (`bundled_entry == None`) → `Verify::NotApplicable`
+///   (there is no bundled artefact on disk to rehash);
+/// - **bundled** local model → the `ModelState` string the SSOT computes
+///   (`ok` / `checksum_mismatched` / `missing` / `corrupt`).
+///
+/// This is orthogonal to the live round-trip: the round-trip proves the model
+/// *answers*; `--verify` additionally proves the on-disk bytes match the pinned
+/// hash. A checksum failure here is surfaced in the report; it does not turn a
+/// successful round-trip into an error (the round-trip already ran).
+fn verify_result(
+    paths: &Paths,
+    verify: bool,
+    bundled_entry: Option<&crate::embedding::registry::ModelEntry>,
+) -> Result<Option<Verify>, TomeError> {
+    if !verify {
+        return Ok(None);
+    }
+    match bundled_entry {
+        None => Ok(Some(Verify::NotApplicable)),
+        Some(entry) => {
+            let health = crate::commands::status::check_model(paths, entry, true)?;
+            Ok(Some(Verify::Checked {
+                state: health.state,
+            }))
+        }
     }
 }
 
@@ -94,6 +127,7 @@ fn test_embedding(
     cfg: &crate::config::Config,
     paths: &Paths,
     scope: &ResolvedScope,
+    verify: bool,
 ) -> Result<TestOutcome, TomeError> {
     // The active embedder registry entry the profile selects (bundled path),
     // and the persisted `meta.embedder_dimension` (remote path) — both read
@@ -102,6 +136,12 @@ fn test_embedding(
 
     let embedder = crate::embedding::build_embedder(cfg, paths, active_embedder, persisted_dim)?;
     let model_kind = ModelKindLabel::for_embedding(cfg);
+
+    // `--verify` rehashes the bundled artefact when the capability is bundled;
+    // a remote provider has no on-disk artefact → `NotApplicable`. Compute it
+    // BEFORE the round-trip so it is reported even if the round-trip is slow;
+    // it does not gate the round-trip.
+    let verify = verify_result(paths, verify, model_kind.bundled_entry(active_embedder))?;
 
     let start = Instant::now();
     // `embed` runs the shared `validate_embedding` for the remote path; the
@@ -125,6 +165,7 @@ fn test_embedding(
         model: embedder.model_name().to_owned(),
         success: true,
         latency_ms,
+        verify,
         detail: TestDetail::Embedding {
             dimension: vector.len(),
         },
@@ -134,11 +175,23 @@ fn test_embedding(
 /// Summarise a tiny fixed input. The summariser errors on an empty short/long
 /// (`SummariserFailureKind::OutputEmpty`, exit 24), so a successful return is
 /// the success assertion; we additionally assert non-empty defensively.
-fn test_summariser(cfg: &crate::config::Config, paths: &Paths) -> Result<TestOutcome, TomeError> {
+fn test_summariser(
+    cfg: &crate::config::Config,
+    paths: &Paths,
+    verify: bool,
+) -> Result<TestOutcome, TomeError> {
     // `tighter_timeout = false`: this is a foreground diagnostic, use the full
     // provider timeout (not the post-commit trigger's tighter bound).
     let summariser = crate::summarise::build_summariser(cfg, paths, false)?;
     let model_kind = ModelKindLabel::for_summariser(cfg);
+
+    // The bundled summariser artefact is profile-independent (one registry
+    // entry); a remote summariser has none. `--verify` rehashes the former.
+    let verify = verify_result(
+        paths,
+        verify,
+        model_kind.bundled_entry(crate::summarise::registry::summariser_entry()),
+    )?;
 
     let input = probe_summary_input();
     // Use the effective long cap so the round-trip matches production framing.
@@ -174,6 +227,7 @@ fn test_summariser(cfg: &crate::config::Config, paths: &Paths) -> Result<TestOut
         model: summary_model_label(cfg),
         success: true,
         latency_ms,
+        verify,
         detail: TestDetail::Summariser {
             short_chars: out.short.chars().count(),
             long_chars: out.long.chars().count(),
@@ -188,11 +242,16 @@ fn test_reranker(
     cfg: &crate::config::Config,
     paths: &Paths,
     scope: &ResolvedScope,
+    verify: bool,
 ) -> Result<TestOutcome, TomeError> {
     // The active reranker registry entry the profile selects (bundled path).
     let active_reranker = active_reranker_entry(paths, scope)?;
     let reranker = crate::embedding::build_reranker(cfg, paths, active_reranker)?;
     let model_kind = ModelKindLabel::for_reranker(cfg);
+
+    // `--verify` rehashes the bundled reranker artefact; a remote reranker has
+    // no on-disk artefact → `NotApplicable`.
+    let verify = verify_result(paths, verify, model_kind.bundled_entry(active_reranker))?;
 
     let candidates = probe_candidates();
     let n = candidates.len();
@@ -213,6 +272,7 @@ fn test_reranker(
         model: reranker.model_name().to_owned(),
         success: true,
         latency_ms,
+        verify,
         detail: TestDetail::Reranker {
             candidates: n,
             scored: scored.len(),
@@ -363,6 +423,19 @@ impl ModelKindLabel {
             ModelKindLabel::Remote(kind) => format!("remote:{}", kind.as_str()),
         }
     }
+
+    /// The on-disk registry entry to verify under `--verify`: `Some(bundled)`
+    /// for the bundled-local path (the artefact IS on disk), `None` for a
+    /// remote provider (no on-disk artefact to rehash).
+    fn bundled_entry<'a>(
+        &self,
+        bundled: &'a crate::embedding::registry::ModelEntry,
+    ) -> Option<&'a crate::embedding::registry::ModelEntry> {
+        match self {
+            ModelKindLabel::Bundled => Some(bundled),
+            ModelKindLabel::Remote(_) => None,
+        }
+    }
 }
 
 /// The summariser's model identity for the report. The bundled `Summariser`
@@ -395,9 +468,34 @@ struct TestOutcome {
     success: bool,
     /// Round-trip wall-clock latency in whole milliseconds.
     latency_ms: u64,
+    /// The on-disk pinned-SHA-256 verification result. Present only when
+    /// `--verify` is passed; omitted otherwise so the default JSON shape is
+    /// byte-identical to the pre-`--verify` record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verify: Option<Verify>,
     /// The per-capability detail.
     #[serde(flatten)]
     detail: TestDetail,
+}
+
+/// The `--verify` on-disk artefact result.
+#[derive(Debug, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+enum Verify {
+    /// The active model is a bundled-local artefact that was rehashed. `state`
+    /// is the shared [`crate::commands::models::ModelState`] string:
+    /// `ok` / `checksum_mismatched` / `missing` / `corrupt`.
+    Checked { state: String },
+    /// The active model is a remote provider — there is no on-disk artefact to
+    /// verify, so `--verify` is a no-op for this capability.
+    NotApplicable,
+}
+
+impl Verify {
+    /// True when a bundled artefact was rehashed and its SHA-256 matched.
+    fn is_ok(&self) -> bool {
+        matches!(self, Verify::Checked { state } if state == crate::commands::models::ModelState::Ok.as_str())
+    }
 }
 
 /// Per-capability detail fields, flattened into the outcome record.
@@ -452,6 +550,33 @@ fn emit_human(outcome: &TestOutcome) -> Result<(), TomeError> {
             }
         }
     }
+    // The optional on-disk SHA-256 verification line (only under `--verify`).
+    if let Some(verify) = &outcome.verify {
+        use crate::presentation::colour;
+        match verify {
+            Verify::Checked { state } if verify.is_ok() => {
+                writeln!(
+                    out,
+                    "  verify: {} (on-disk SHA-256 matches pinned)",
+                    colour::success(state),
+                )?;
+            }
+            Verify::Checked { state } => {
+                writeln!(
+                    out,
+                    "  verify: {} (on-disk SHA-256 does NOT match pinned)",
+                    colour::error(state),
+                )?;
+            }
+            Verify::NotApplicable => {
+                writeln!(
+                    out,
+                    "  verify: {} (remote provider — no on-disk artefact)",
+                    colour::dim("n/a"),
+                )?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -497,7 +622,7 @@ mod tests {
         let cfg = config_remote_embedding(ProviderKind::Openai);
         let scope = crate::workspace::ResolvedScope::global_fallback();
 
-        let outcome = test_embedding(&cfg, &paths, &scope).expect("embedding round-trip ok");
+        let outcome = test_embedding(&cfg, &paths, &scope, false).expect("embedding round-trip ok");
         assert_eq!(outcome.capability, "embedding");
         assert_eq!(outcome.model_kind, "remote:openai");
         assert_eq!(outcome.model, "p/embed-model");
@@ -517,7 +642,8 @@ mod tests {
         let cfg = config_remote_embedding(ProviderKind::Openai);
         let scope = crate::workspace::ResolvedScope::global_fallback();
 
-        let err = test_embedding(&cfg, &paths, &scope).expect_err("empty embedding must fail");
+        let err =
+            test_embedding(&cfg, &paths, &scope, false).expect_err("empty embedding must fail");
         assert_eq!(err.exit_code(), 95);
     }
 
@@ -532,7 +658,7 @@ mod tests {
         let cfg = config_remote_embedding(ProviderKind::Openai);
         let scope = crate::workspace::ResolvedScope::global_fallback();
 
-        let _ = test_embedding(&cfg, &paths, &scope).unwrap();
+        let _ = test_embedding(&cfg, &paths, &scope, false).unwrap();
         assert!(
             !paths.index_db.is_file(),
             "models test must not create or write the index DB"
@@ -570,7 +696,7 @@ mod tests {
         cfg.reranker.model = Some("rerank-2".to_string());
         let scope = crate::workspace::ResolvedScope::global_fallback();
 
-        let outcome = test_reranker(&cfg, &paths, &scope).expect("reranker round-trip ok");
+        let outcome = test_reranker(&cfg, &paths, &scope, false).expect("reranker round-trip ok");
         assert_eq!(outcome.capability, "reranker");
         assert_eq!(outcome.model_kind, "remote:voyage");
         assert_eq!(outcome.model, "vp/rerank-2");
@@ -620,7 +746,7 @@ mod tests {
         cfg.summariser.provider = Some("p".to_string());
         cfg.summariser.model = Some("gpt-4o-mini".to_string());
 
-        let outcome = test_summariser(&cfg, &paths).expect("summariser round-trip ok");
+        let outcome = test_summariser(&cfg, &paths, false).expect("summariser round-trip ok");
         assert_eq!(outcome.capability, "summariser");
         assert_eq!(outcome.model_kind, "remote:openai");
         assert_eq!(outcome.model, "p/gpt-4o-mini");
@@ -741,6 +867,157 @@ mod tests {
         assert_eq!(
             capability_of(TestCapability::Reranker),
             Capability::Reranker
+        );
+    }
+
+    // --- Issue #328: `models test --verify` (on-disk SHA-256 SSOT reuse) ------
+
+    /// Fabricate a registered model's on-disk layout with the recorded SIZE but
+    /// all-zero content — so `cheap_state` reports `Ok` (size matches) but the
+    /// computed SHA-256 does NOT match the pinned hash. Mirrors the integration
+    /// harness's `fabricate_installed_models`.
+    fn fabricate_size_only_model(paths: &Paths, entry: &crate::embedding::registry::ModelEntry) {
+        let dir = paths.models_dir.join(entry.name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = crate::embedding::registry::ModelManifest {
+            name: entry.name.to_owned(),
+            version: entry.version.to_owned(),
+            kind: entry.kind,
+            source_url: entry.source_url.to_owned(),
+            sha256: entry.sha256.to_owned(),
+            size_bytes: entry.size_bytes,
+            licence: entry.licence.to_owned(),
+            files: entry.files.iter().map(|s| (*s).to_owned()).collect(),
+            installed_at: time::OffsetDateTime::now_utc(),
+        };
+        let manifest_path = dir.join("manifest.toml");
+        let body = manifest.to_toml(&manifest_path).unwrap();
+        std::fs::write(&manifest_path, body).unwrap();
+        for (i, file) in entry.files.iter().enumerate() {
+            let f = std::fs::File::create(dir.join(file)).unwrap();
+            let len = if i == 0 { entry.size_bytes } else { 1 };
+            f.set_len(len).unwrap();
+        }
+    }
+
+    #[test]
+    fn verify_off_yields_none() {
+        // `--verify` absent → no verification is performed, `None` is reported,
+        // so the JSON shape is byte-identical to the pre-`--verify` record.
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        let entry = crate::embedding::profile::embedder_for(crate::embedding::Profile::DEFAULT);
+        assert!(verify_result(&paths, false, Some(entry)).unwrap().is_none());
+    }
+
+    #[test]
+    fn verify_remote_capability_is_not_applicable() {
+        // A remote provider has no on-disk artefact → `NotApplicable`, and no
+        // file access is attempted (a fresh root with no models still works).
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        match verify_result(&paths, true, None).unwrap() {
+            Some(Verify::NotApplicable) => {}
+            other => panic!("remote capability must be NotApplicable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_bundled_missing_reports_missing() {
+        // Bundled capability, no model on disk → the SSOT reports `missing`.
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        let entry = crate::embedding::profile::embedder_for(crate::embedding::Profile::DEFAULT);
+        match verify_result(&paths, true, Some(entry)).unwrap() {
+            Some(Verify::Checked { state }) => assert_eq!(state, "missing"),
+            other => panic!("expected Checked(missing), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_bundled_wrong_content_reports_checksum_mismatched() {
+        // Bundled capability, model present at the right SIZE but wrong CONTENT
+        // (all-zero) → the pinned SHA-256 does NOT match → `checksum_mismatched`.
+        // This proves `--verify` reuses the real SHA SSOT, not a size-only check.
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        let entry = crate::embedding::profile::embedder_for(crate::embedding::Profile::DEFAULT);
+        fabricate_size_only_model(&paths, entry);
+        match verify_result(&paths, true, Some(entry)).unwrap() {
+            Some(v @ Verify::Checked { .. }) => {
+                assert!(!v.is_ok(), "all-zero content must not pass the pinned SHA");
+                if let Verify::Checked { state } = &v {
+                    assert_eq!(state, "checksum_mismatched");
+                }
+            }
+            other => panic!("expected Checked(checksum_mismatched), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_json_shapes_and_is_ok() {
+        // `Checked{ok}` is the only `is_ok()==true` case; the tagged JSON shapes
+        // are stable (a bundled `--verify` consumer keys off `result`/`state`).
+        let ok = Verify::Checked {
+            state: "ok".to_string(),
+        };
+        assert!(ok.is_ok());
+        assert_eq!(
+            serde_json::to_string(&ok).unwrap(),
+            r#"{"result":"checked","state":"ok"}"#,
+        );
+
+        let bad = Verify::Checked {
+            state: "checksum_mismatched".to_string(),
+        };
+        assert!(!bad.is_ok());
+        assert_eq!(
+            serde_json::to_string(&bad).unwrap(),
+            r#"{"result":"checked","state":"checksum_mismatched"}"#,
+        );
+
+        let na = Verify::NotApplicable;
+        assert!(!na.is_ok());
+        assert_eq!(
+            serde_json::to_string(&na).unwrap(),
+            r#"{"result":"not_applicable"}"#,
+        );
+    }
+
+    #[test]
+    fn remote_embedding_verify_reports_not_applicable_field() {
+        // End-to-end through `test_embedding` with `verify=true`: the remote
+        // path resolves `bundled_entry == None` → the outcome carries
+        // `Some(NotApplicable)` (and the round-trip still succeeds).
+        let _g = set_transport_override(|_spec| Ok(ok_embedding(&[0.1, 0.2, 0.3, 0.4])));
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        let cfg = config_remote_embedding(ProviderKind::Openai);
+        let scope = crate::workspace::ResolvedScope::global_fallback();
+
+        let outcome = test_embedding(&cfg, &paths, &scope, true).expect("round-trip ok");
+        match outcome.verify {
+            Some(Verify::NotApplicable) => {}
+            other => panic!("remote --verify must be NotApplicable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_embedding_without_verify_omits_field() {
+        // Without `--verify`, the outcome's `verify` field is `None` → omitted
+        // from JSON (byte-identical to the historical shape).
+        let _g = set_transport_override(|_spec| Ok(ok_embedding(&[0.1, 0.2, 0.3, 0.4])));
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        let cfg = config_remote_embedding(ProviderKind::Openai);
+        let scope = crate::workspace::ResolvedScope::global_fallback();
+
+        let outcome = test_embedding(&cfg, &paths, &scope, false).expect("round-trip ok");
+        assert!(outcome.verify.is_none());
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert!(
+            !json.contains("verify"),
+            "no `--verify` → no `verify` key in JSON: {json}",
         );
     }
 }

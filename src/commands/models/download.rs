@@ -17,6 +17,7 @@ use tracing::info;
 
 use crate::cli::ModelsDownloadArgs;
 use crate::embedding::download::download_model;
+use crate::embedding::profile::{Profile, embedder_for, reranker_for};
 use crate::embedding::registry::{MODEL_REGISTRY, ModelEntry};
 use crate::error::TomeError;
 use crate::output::{self, Mode};
@@ -29,7 +30,7 @@ pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
     std::fs::create_dir_all(&paths.models_dir).map_err(TomeError::Io)?;
 
-    let targets = resolve_targets(&paths, args.all)?;
+    let targets = resolve_targets(&paths, args.all, args.profile)?;
 
     let mut records: Vec<DownloadRecord> = Vec::new();
 
@@ -148,21 +149,34 @@ pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
 }
 
 /// The set of registry entries `download` should fetch. With `all`, every
-/// `MODEL_REGISTRY` entry; otherwise the active profile's `{embedder,
-/// reranker, summariser}` (resolved from the index `meta`, falling back to
-/// the default profile when no DB exists — exactly what the bootstrap will
-/// stamp).
-fn resolve_targets(paths: &Paths, all: bool) -> Result<Vec<&'static ModelEntry>, TomeError> {
+/// `MODEL_REGISTRY` entry. With an explicit `profile`, that tier's
+/// `{embedder, reranker, summariser}` — WITHOUT reading or writing the stored
+/// active profile. Otherwise the ACTIVE profile's set (resolved from the index
+/// `meta`, falling back to the default profile when no DB exists — exactly what
+/// the bootstrap will stamp).
+///
+/// `--profile` never touches `meta.model_profile`: it is a read-only override
+/// of the download TARGET, so pre-fetching another tier's weights leaves the
+/// active profile (and therefore the embedder identity + index) unchanged.
+fn resolve_targets(
+    paths: &Paths,
+    all: bool,
+    explicit_profile: Option<Profile>,
+) -> Result<Vec<&'static ModelEntry>, TomeError> {
     if all {
         return Ok(MODEL_REGISTRY.iter().collect());
     }
 
-    use crate::embedding::profile::{Profile, embedder_for, reranker_for};
-    let profile = if paths.index_db.is_file() {
-        let conn = crate::index::open_read_only(&paths.index_db)?;
-        crate::index::meta::active_profile(&conn)?
-    } else {
-        Profile::DEFAULT
+    let profile = match explicit_profile {
+        // `--profile <tier>` — download that tier's set, reading NOTHING from
+        // and writing NOTHING to the stored active profile.
+        Some(p) => p,
+        // No `--profile` — the active profile, exactly as before.
+        None if paths.index_db.is_file() => {
+            let conn = crate::index::open_read_only(&paths.index_db)?;
+            crate::index::meta::active_profile(&conn)?
+        }
+        None => Profile::DEFAULT,
     };
 
     Ok(vec![
@@ -195,4 +209,89 @@ struct DownloadRecord {
     size_bytes: u64,
     sha256_verified: bool,
     duration_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Names of the entries `resolve_targets` selects.
+    fn names(targets: &[&'static ModelEntry]) -> Vec<&'static str> {
+        targets.iter().map(|e| e.name).collect()
+    }
+
+    #[test]
+    fn explicit_profile_targets_that_tier_without_reading_any_db() {
+        // `--profile large` selects the LARGE tier's {embedder, reranker,
+        // summariser} — resolved purely from the tier argument, reading NO
+        // index DB (the path passed here has none). This is what makes
+        // `--profile` a pure download-target override that never touches the
+        // stored active profile.
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        assert!(!paths.index_db.is_file(), "precondition: no DB");
+
+        let targets = resolve_targets(&paths, false, Some(Profile::Large)).unwrap();
+        let got = names(&targets);
+        assert!(got.contains(&"bge-large-en-v1.5"), "{got:?}");
+        assert!(got.contains(&"bge-reranker-v2-m3"), "{got:?}");
+        assert!(got.contains(&"qwen2.5-0.5b-instruct"), "{got:?}");
+        assert_eq!(targets.len(), 3);
+        // Crucially, no DB was created by resolving the explicit tier.
+        assert!(
+            !paths.index_db.is_file(),
+            "resolving --profile must not create the index DB"
+        );
+    }
+
+    #[test]
+    fn explicit_profile_ignores_the_active_profile_when_set() {
+        // A different explicit tier than the (defaulted) active profile still
+        // selects the explicit tier — `--profile` overrides, and it does so
+        // without persisting the change.
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+
+        let small = resolve_targets(&paths, false, Some(Profile::Small)).unwrap();
+        assert_eq!(
+            names(&small),
+            vec![
+                "bge-small-en-v1.5",
+                "bge-reranker-base",
+                "qwen2.5-0.5b-instruct"
+            ],
+        );
+    }
+
+    #[test]
+    fn no_profile_no_db_falls_back_to_default_tier() {
+        // Without `--profile` and without a DB, the default profile (Medium)
+        // set is targeted — byte-identical to the pre-`--profile` behaviour.
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+
+        let targets = resolve_targets(&paths, false, None).unwrap();
+        let got = names(&targets);
+        assert!(
+            got.contains(&"bge-base-en-v1.5"),
+            "medium embedder: {got:?}"
+        );
+        assert!(
+            got.contains(&"bge-reranker-large"),
+            "medium reranker: {got:?}"
+        );
+        assert!(
+            got.contains(&"qwen2.5-0.5b-instruct"),
+            "summariser: {got:?}"
+        );
+    }
+
+    #[test]
+    fn all_flag_spans_every_registry_entry() {
+        // `--all` still targets the full registry regardless of the profile arg.
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        let targets = resolve_targets(&paths, true, None).unwrap();
+        assert_eq!(targets.len(), MODEL_REGISTRY.len());
+    }
 }

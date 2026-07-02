@@ -88,3 +88,42 @@ fn models_test_json_flag_is_accepted() {
         String::from_utf8_lossy(&out.stderr),
     );
 }
+
+/// `--verify` is accepted on `models test` (parses, not a usage error). With
+/// no bundled model on disk the round-trip still fails cleanly with the
+/// actionable `ModelMissing` (exit 30) — `--verify` does not change the
+/// failure classification. (The verify SEMANTICS — remote NotApplicable,
+/// bundled checksum_mismatched/missing — are covered by the in-process
+/// `commands::models::test` lib tests, where the SHA SSOT can be exercised
+/// without a real model.)
+#[test]
+fn models_test_verify_flag_is_accepted() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let out = env
+        .cmd()
+        .args(["models", "test", "embedding", "--verify"])
+        .output()
+        .unwrap();
+
+    assert_ne!(
+        out.status.code(),
+        Some(2),
+        "`models test embedding --verify` must parse, not usage-error; stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // Same clean actionable failure as without --verify (no model on disk).
+    assert_eq!(
+        out.status.code(),
+        Some(30),
+        "missing bundled embedder must still surface ModelMissing (30) under --verify; stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "must be a clean error, not a panic: {stderr}"
+    );
+}

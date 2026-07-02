@@ -111,6 +111,8 @@
       "subcommands": {
         "download": [
           "--force",
+          "--all",
+          "--profile <tier>",
           "--verbose"
         ],
         "list": [
@@ -120,6 +122,13 @@
         "remove": [
           "--all",
           "--force",
+          "--verbose"
+        ],
+        "profile [<tier>]": [
+          "--verbose"
+        ],
+        "test <capability>": [
+          "--verify",
           "--verbose"
         ]
       },
@@ -381,7 +390,7 @@
     {
       "code": 10,
       "category": "health_degraded",
-      "meaning": "tome status / tome doctor health verdict: degraded (a non-fatal issue — queries still serve)."
+      "meaning": "tome status / tome doctor health verdict: degraded (a non-fatal issue \u2014 queries still serve)."
     },
     {
       "code": 12,

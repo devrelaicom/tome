@@ -20,6 +20,8 @@ pub fn run(args: ModelsUpdateArgs, mode: Mode) -> Result<(), TomeError> {
         ModelsDownloadArgs {
             force: false,
             all: false,
+            // `update` always targets the ACTIVE profile — no explicit tier.
+            profile: None,
         },
         mode,
     )?;
