@@ -149,7 +149,8 @@ fn config_default_scope_global_drives_harness_remove() {
 
     // Remove with no --scope; should derive Global from config and edit config.toml.
     let args = HarnessRemoveArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: None, // no explicit flag — must come from config
     };
     let scope = global_scope();

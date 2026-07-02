@@ -519,6 +519,36 @@ fn use_all_with_explicit_name_is_a_clap_conflict() {
     );
 }
 
+/// Issue #315: `tome harness remove --all foo` is a clap conflict.
+#[test]
+fn remove_all_with_explicit_name_is_a_clap_conflict() {
+    use clap::Parser;
+    use tome::cli::Cli;
+
+    let res = Cli::try_parse_from(["tome", "harness", "remove", "--all", "cursor"]);
+    assert!(
+        res.is_err(),
+        "`remove --all <name>` must be rejected as a conflict",
+    );
+}
+
+/// Issue #315: `tome harness remove a b` parses into the variadic `names` vec.
+#[test]
+fn remove_parses_variadic_names() {
+    use clap::Parser;
+    use tome::cli::{Cli, Command, HarnessCommand};
+
+    let cli = Cli::try_parse_from(["tome", "harness", "remove", "codex", "cursor"]).expect("parse");
+    let Command::Harness(h) = cli.command else {
+        panic!("expected the harness subcommand");
+    };
+    let Some(HarnessCommand::Remove(args)) = h.command else {
+        panic!("expected the remove subcommand");
+    };
+    assert_eq!(args.names, vec!["codex", "cursor"]);
+    assert!(!args.all);
+}
+
 /// `tome harness use a b c` parses into the variadic `names` vec; `--all`
 /// defaults false.
 #[test]

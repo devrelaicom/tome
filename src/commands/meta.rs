@@ -216,13 +216,38 @@ struct ActionReport {
     first_error: Option<TomeError>,
 }
 
-fn add_run(args: MetaAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
-    // Unknown skill id fails closed before any target resolution (87).
-    if meta_skill::find(&args.skill_id).is_none() {
-        // OUTCOME-bearing: emit `Failed` even on a pre-report hard fail.
-        emit_meta_telemetry(crate::telemetry::event::MetaAction::Add, None);
-        return Err(meta_skill::not_found(&args.skill_id));
+/// The full add/remove report over the selected skill set. Serialised as a
+/// `{"skills":[...]}` envelope for a MULTI / `--all` run (matching the
+/// `meta list --json` vocabulary); a single-skill run serialises as the bare
+/// [`ActionReport`] so the pre-#315 single-skill `--json` shape is BYTE-IDENTICAL.
+struct BatchReport {
+    skills: Vec<ActionReport>,
+}
+
+impl BatchReport {
+    fn new(skills: Vec<ActionReport>) -> Self {
+        Self { skills }
     }
+
+    /// The first forward-progress failure across ALL skills, in skill then
+    /// target order (sets the process exit code). Skills are checked in
+    /// selection order, so the earliest failure's code wins.
+    fn first_error(&mut self) -> Option<TomeError> {
+        self.skills.iter_mut().find_map(|r| r.first_error.take())
+    }
+}
+
+fn add_run(args: MetaAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+    // Resolve the skill selection FIRST (variadic / `--all`). An unknown id
+    // fails closed before any target resolution (87); an empty selection without
+    // `--all` is a usage error (2).
+    let skill_ids = match resolve_skill_ids(&args.skill_ids, args.all) {
+        Ok(ids) => ids,
+        Err(e) => {
+            emit_meta_telemetry(crate::telemetry::event::MetaAction::Add, None);
+            return Err(e);
+        }
+    };
     let targets = match resolve_targets(&args.harnesses, args.global, scope) {
         Ok(t) => t,
         Err(e) => {
@@ -230,13 +255,52 @@ fn add_run(args: MetaAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
             return Err(e);
         }
     };
-    let report = install_to_targets(&args.skill_id, &targets, args.force);
-    emit_meta_telemetry(crate::telemetry::event::MetaAction::Add, Some(&report));
-    emit_action(&report, mode)?;
-    match report.first_error {
+
+    // Install each skill, forward-progress across BOTH the skill loop and the
+    // per-skill target loop.
+    let mut reports = Vec::with_capacity(skill_ids.len());
+    for skill_id in &skill_ids {
+        reports.push(install_to_targets(skill_id, &targets, args.force));
+    }
+    let mut batch = BatchReport::new(reports);
+
+    // One telemetry event per skill (parity with the former single-skill path).
+    for report in &batch.skills {
+        emit_meta_telemetry(crate::telemetry::event::MetaAction::Add, Some(report));
+    }
+    emit_batch(&batch, mode)?;
+    match batch.first_error() {
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+/// Resolve the variadic / `--all` skill selection into an ordered, deduped list
+/// of skill ids.
+///
+/// - `--all` → every bundled meta skill (in `meta::all()` order).
+/// - explicit ids → each validated via `find` (unknown → 87) then order-
+///   preserving deduped.
+/// - neither → usage error (2).
+fn resolve_skill_ids(ids: &[String], all: bool) -> Result<Vec<String>, TomeError> {
+    if all {
+        return Ok(meta_skill::all().iter().map(|s| s.id.to_string()).collect());
+    }
+    if ids.is_empty() {
+        return Err(TomeError::Usage(
+            "name at least one skill id, or pass --all to select every bundled meta skill".into(),
+        ));
+    }
+    let mut seen: Vec<String> = Vec::with_capacity(ids.len());
+    for id in ids {
+        if meta_skill::find(id).is_none() {
+            return Err(meta_skill::not_found(id));
+        }
+        if !seen.contains(id) {
+            seen.push(id.clone());
+        }
+    }
+    Ok(seen)
 }
 
 /// Emit one `tome.meta_action` event with the forward-progress outcome:
@@ -328,10 +392,18 @@ fn install_to_targets(skill_id: &str, targets: &[Target], force: bool) -> Action
 // ---------------------------------------------------------------------------
 
 fn remove_run(args: MetaRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
-    if meta_skill::find(&args.skill_id).is_none() {
-        emit_meta_telemetry(crate::telemetry::event::MetaAction::Remove, None);
-        return Err(meta_skill::not_found(&args.skill_id));
-    }
+    // `meta remove --all` removes every INSTALLED meta skill. Because "installed"
+    // is per-target and `remove_skill` is a no-op on an absent skill (not an
+    // error), `--all` = every BUNDLED skill run against every target; a
+    // not-present location simply reports `not-present`. This keeps the removal
+    // safe and idempotent without a separate on-disk scan.
+    let skill_ids = match resolve_skill_ids(&args.skill_ids, args.all) {
+        Ok(ids) => ids,
+        Err(e) => {
+            emit_meta_telemetry(crate::telemetry::event::MetaAction::Remove, None);
+            return Err(e);
+        }
+    };
     let targets = match resolve_targets(&args.harnesses, args.global, scope) {
         Ok(t) => t,
         Err(e) => {
@@ -339,10 +411,18 @@ fn remove_run(args: MetaRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
             return Err(e);
         }
     };
-    let report = remove_from_targets(&args.skill_id, &targets);
-    emit_meta_telemetry(crate::telemetry::event::MetaAction::Remove, Some(&report));
-    emit_action(&report, mode)?;
-    match report.first_error {
+
+    let mut reports = Vec::with_capacity(skill_ids.len());
+    for skill_id in &skill_ids {
+        reports.push(remove_from_targets(skill_id, &targets));
+    }
+    let mut batch = BatchReport::new(reports);
+
+    for report in &batch.skills {
+        emit_meta_telemetry(crate::telemetry::event::MetaAction::Remove, Some(report));
+    }
+    emit_batch(&batch, mode)?;
+    match batch.first_error() {
         Some(err) => Err(err),
         None => Ok(()),
     }
@@ -388,29 +468,54 @@ fn location(
     }
 }
 
-fn emit_action(report: &ActionReport, mode: Mode) -> Result<(), TomeError> {
+/// Emit the batch report.
+///
+/// `--json`: a SINGLE-skill batch serialises as the bare [`ActionReport`]
+/// (`{"skill_id":..,"locations":[..]}`) so the pre-#315 shape is BYTE-IDENTICAL;
+/// a multi / `--all` batch serialises as `{"skills":[ActionReport,..]}` (the
+/// `meta list --json` vocabulary). Human: one section per skill.
+fn emit_batch(batch: &BatchReport, mode: Mode) -> Result<(), TomeError> {
     match mode {
-        Mode::Json => write_json(report),
+        Mode::Json => {
+            if let [single] = batch.skills.as_slice() {
+                write_json(single)
+            } else {
+                #[derive(Serialize)]
+                struct SkillsEnvelope<'a> {
+                    skills: &'a [ActionReport],
+                }
+                write_json(&SkillsEnvelope {
+                    skills: &batch.skills,
+                })
+            }
+        }
         Mode::Human => {
             let mut out = std::io::stdout().lock();
-            if report.locations.is_empty() {
-                writeln!(out, "{}: no target locations", report.skill_id)?;
-            }
-            for l in &report.locations {
-                let tail = match (l.revision.as_deref(), l.error.as_deref()) {
-                    (Some(rev), _) => format!(" ({rev})"),
-                    (None, Some(err)) => format!(" — {err}"),
-                    _ => String::new(),
-                };
-                writeln!(
-                    out,
-                    "  {} {}/{} {}{}",
-                    symbol(l.result),
-                    l.harness,
-                    l.scope,
-                    l.dir,
-                    tail
-                )?;
+            let multi = batch.skills.len() > 1;
+            for report in &batch.skills {
+                if multi {
+                    // Head each skill's section so a multi-skill run is legible.
+                    writeln!(out, "{}:", report.skill_id)?;
+                }
+                if report.locations.is_empty() {
+                    writeln!(out, "  {}: no target locations", report.skill_id)?;
+                }
+                for l in &report.locations {
+                    let tail = match (l.revision.as_deref(), l.error.as_deref()) {
+                        (Some(rev), _) => format!(" ({rev})"),
+                        (None, Some(err)) => format!(" — {err}"),
+                        _ => String::new(),
+                    };
+                    writeln!(
+                        out,
+                        "  {} {}/{} {}{}",
+                        symbol(l.result),
+                        l.harness,
+                        l.scope,
+                        l.dir,
+                        tail
+                    )?;
+                }
             }
             Ok(())
         }

@@ -167,6 +167,35 @@ fn array_contains(array: &Array, needle: &str) -> bool {
         .any(|v| v.as_str().map(|s| s == needle).unwrap_or(false))
 }
 
+/// The string entries of the top-level `harnesses = [...]` array (workspace /
+/// project settings), or an empty vec when the key is absent or not an array.
+/// Read-side companion to [`remove_harness`] — the SSOT for enumerating a
+/// scope's declared harnesses (used by `harness remove --all`).
+pub fn configured_harnesses(doc: &DocumentMut) -> Vec<String> {
+    doc.get("harnesses")
+        .and_then(|item| item.as_array())
+        .map(array_str_values)
+        .unwrap_or_default()
+}
+
+/// The string entries of `[harness].enabled` in a unified config doc
+/// (`config.toml`), or an empty vec when absent / not an array. Read-side
+/// companion to [`remove_harness_from_config`].
+pub fn configured_harnesses_from_config(doc: &DocumentMut) -> Vec<String> {
+    doc.get("harness")
+        .and_then(|h| h.get("enabled"))
+        .and_then(|item| item.as_array())
+        .map(array_str_values)
+        .unwrap_or_default()
+}
+
+fn array_str_values(array: &Array) -> Vec<String> {
+    array
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect()
+}
+
 /// Serialise `doc` and atomic-write to `path`. Routes through
 /// [`crate::catalog::store::write_atomic`] for mode preservation +
 /// symlink refusal.

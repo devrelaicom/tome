@@ -12,7 +12,9 @@ use std::path::PathBuf;
 
 use tome::commands::harness::bare::HarnessBareEntry;
 use tome::commands::harness::info::{HarnessInfoOutcome, HarnessReference};
-use tome::commands::harness::remove::HarnessRemoveOutcome;
+use tome::commands::harness::remove::{
+    HarnessRemoveOutcome, HarnessRemoveReport, HarnessRemoveResult,
+};
 use tome::commands::harness::use_::HarnessUseOutcome;
 
 #[test]
@@ -149,5 +151,35 @@ fn harness_remove_outcome_serialises_byte_stable() {
         json,
         r#"{"scope":"workspace","name":"gemini","settings_path":"/home/u/.tome/workspaces/demo/settings.toml","list_changed":false,"sync_ran":false}"#,
         "HarnessRemoveOutcome wire shape drift",
+    );
+}
+
+/// Issue #315: the multi-harness `tome harness remove --json` report envelope
+/// (`{"selection":..,"results":[{"status":"ok"|"failed",..}]}`), mirroring the
+/// `HarnessUseReport` shape. A partial-failure run is fully machine-readable.
+#[test]
+fn harness_remove_report_serialises_byte_stable() {
+    let report = HarnessRemoveReport {
+        selection: "all",
+        results: vec![
+            HarnessRemoveResult::Ok(HarnessRemoveOutcome {
+                scope: "global".to_string(),
+                name: "cursor".to_string(),
+                settings_path: PathBuf::from("/home/u/.tome/config.toml"),
+                list_changed: true,
+                sync_ran: false,
+            }),
+            HarnessRemoveResult::Failed {
+                name: "codex".to_string(),
+                error: "boom".to_string(),
+                exit_code: 7,
+            },
+        ],
+    };
+    let json = serde_json::to_string(&report).expect("serialise");
+    assert_eq!(
+        json,
+        r#"{"selection":"all","results":[{"status":"ok","scope":"global","name":"cursor","settings_path":"/home/u/.tome/config.toml","list_changed":true,"sync_ran":false},{"status":"failed","name":"codex","error":"boom","exit_code":7}]}"#,
+        "HarnessRemoveReport wire shape drift",
     );
 }

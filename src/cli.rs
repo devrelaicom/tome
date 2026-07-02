@@ -315,8 +315,13 @@ pub struct MetaListArgs {}
 
 #[derive(Debug, clap::Args)]
 pub struct MetaAddArgs {
-    /// The bundled skill id (e.g. `convert-marketplace`).
-    pub skill_id: String,
+    /// The bundled skill ids (variadic, e.g. `convert-marketplace`).
+    /// Mutually exclusive with `--all`.
+    #[arg(conflicts_with = "all")]
+    pub skill_ids: Vec<String>,
+    /// Install EVERY bundled meta skill. Mutually exclusive with explicit ids.
+    #[arg(long)]
+    pub all: bool,
     /// Target a specific harness (repeatable). Default: every detected
     /// harness that consumes native skills.
     #[arg(long = "harness")]
@@ -331,8 +336,12 @@ pub struct MetaAddArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct MetaRemoveArgs {
-    /// The bundled skill id.
-    pub skill_id: String,
+    /// The bundled skill ids (variadic). Mutually exclusive with `--all`.
+    #[arg(conflicts_with = "all")]
+    pub skill_ids: Vec<String>,
+    /// Remove EVERY installed meta skill. Mutually exclusive with explicit ids.
+    #[arg(long)]
+    pub all: bool,
     /// Target a specific harness (repeatable). Default: every detected
     /// harness that consumes native skills.
     #[arg(long = "harness")]
@@ -450,8 +459,15 @@ pub struct HarnessUseArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct HarnessRemoveArgs {
-    /// Harness name.
-    pub name: String,
+    /// Harness names (variadic). Remove each from the chosen scope's settings.
+    /// Names need NOT be supported harnesses (a stale/typo'd entry is dropped
+    /// too). Mutually exclusive with `--all`.
+    #[arg(conflicts_with = "all")]
+    pub names: Vec<String>,
+    /// Remove EVERY harness configured in the resolved scope (clear the scope's
+    /// list). Mutually exclusive with explicit names.
+    #[arg(long)]
+    pub all: bool,
     /// Settings scope to edit. When omitted, falls back to
     /// `[harness] default_scope` in `~/.tome/config.toml`, then to `project`.
     #[arg(long, value_enum)]
@@ -803,8 +819,13 @@ pub struct ModelsListArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct ModelsRemoveArgs {
-    /// The registered model name (e.g. `bge-small-en-v1.5`).
-    pub name: String,
+    /// The registered model names (variadic, e.g. `bge-small-en-v1.5`).
+    /// Mutually exclusive with `--all`.
+    #[arg(conflicts_with = "all")]
+    pub names: Vec<String>,
+    /// Evict EVERY installed model. Mutually exclusive with explicit names.
+    #[arg(long)]
+    pub all: bool,
     /// Skip the confirmation prompt. Required when stdin is not a TTY.
     /// `--yes` is accepted as a hidden alias (FR-021).
     #[arg(long, alias = "yes")]
