@@ -29,10 +29,14 @@ pub struct Input {
     pub plugin: String,
     /// The skill `name` field as returned by `search_skills`.
     pub name: String,
-    /// #331: when true, return the body WITHOUT running the substitution
-    /// pipeline — literal `${TOME_*}` tokens are preserved. Use this when
-    /// authoring/converting a skill (you want the source tokens, not the
-    /// resolved values). Default false (substitutions are applied).
+    /// Return the body WITHOUT running the substitution pipeline — literal
+    /// `${TOME_*}` tokens are preserved. Use this when authoring/converting a
+    /// skill (you want the source tokens, not the resolved values). Default
+    /// false (substitutions are applied). (#331)
+    ///
+    /// The first line is a clean, complete summary because schemars lifts it
+    /// into the generated JSON-schema `title` that `tools/list` shows to an
+    /// agent — the `#331` reference is deliberately kept off the opening line.
     ///
     /// `#[serde(default)]` keeps existing callers (who omit `raw`) parsing
     /// to `false` under `deny_unknown_fields`, preserving current behavior.

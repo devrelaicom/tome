@@ -190,12 +190,27 @@ fn get_skill_input_schema_advertises_raw_boolean() {
     );
 
     // The three original fields stay required; `raw` (defaulted) must NOT be.
-    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+    // Assert the `required` array UNCONDITIONALLY: a future schemars change
+    // that dropped it (silently promoting/omitting fields) must fail here,
+    // not skip the check. `catalog`/`plugin`/`name` must be present and `raw`
+    // absent.
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .expect("get_skill input schema has a `required` array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for field in ["catalog", "plugin", "name"] {
         assert!(
-            !required.iter().any(|v| v.as_str() == Some("raw")),
-            "`raw` is defaulted (optional) and must not appear in `required`; got: {required:?}",
+            required.contains(&field),
+            "`{field}` must remain a required field; got: {required:?}",
         );
     }
+    assert!(
+        !required.contains(&"raw"),
+        "`raw` is defaulted (optional) and must not appear in `required`; got: {required:?}",
+    );
 }
 
 #[test]
