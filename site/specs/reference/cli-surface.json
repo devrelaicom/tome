@@ -69,9 +69,12 @@
         "list": [
           "--catalog",
           "--enabled-only",
+          "--filter",
+          "--tier",
           "--verbose"
         ],
         "show": [
+          "--details",
           "--verbose"
         ],
         "create": [

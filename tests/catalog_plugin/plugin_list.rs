@@ -142,6 +142,246 @@ fn list_enabled_only_hides_disabled_plugins() {
 }
 
 #[test]
+fn list_filter_matches_name_case_insensitively() {
+    // #330: `--filter` is a case-insensitive substring match against the
+    // plugin name. Both fixture plugins are `plugin-alpha` / `plugin-beta`;
+    // `ALPHA` (upper-cased) must match only alpha in BOTH human and json.
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_enabled(&env, &fixture_tmp, "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["plugin", "list", "--filter", "ALPHA", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let records = parse_ndjson(&out.stdout);
+    assert_eq!(records.len(), 1, "only plugin-alpha matches `ALPHA`");
+    assert_eq!(records[0]["id"]["plugin"], "plugin-alpha");
+
+    // Human mode must be narrowed identically: beta is absent, alpha present.
+    let human = env
+        .cmd()
+        .args(["plugin", "list", "--filter", "ALPHA"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("plugin-alpha"),
+        "alpha must be listed: {text}"
+    );
+    assert!(
+        !text.contains("plugin-beta"),
+        "beta must be filtered out of the human table: {text}",
+    );
+}
+
+#[test]
+fn list_filter_matches_description_case_insensitively() {
+    // #330: `--filter` also searches the DESCRIPTION. Only plugin-beta's
+    // description contains the word "show" ("... plugin list / show tests."),
+    // so `SHOW` must select beta alone even though neither plugin NAME
+    // contains it.
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_enabled(&env, &fixture_tmp, "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["plugin", "list", "--filter", "SHOW", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let records = parse_ndjson(&out.stdout);
+    assert_eq!(
+        records.len(),
+        1,
+        "only plugin-beta's description mentions `show`, got: {}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert_eq!(records[0]["id"]["plugin"], "plugin-beta");
+    assert!(
+        records[0]["description"]
+            .as_str()
+            .map(|d| d.to_lowercase().contains("show"))
+            .unwrap_or(false),
+        "matched row's description must contain the needle: {}",
+        records[0]["description"],
+    );
+}
+
+#[test]
+fn list_filter_non_match_yields_no_rows() {
+    // A needle present in neither name nor description filters everything out.
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_enabled(&env, &fixture_tmp, "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["plugin", "list", "--filter", "zzz-nonexistent", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "no plugin matches the needle, so the json stream must be empty: {:?}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+}
+
+#[test]
+fn list_tier_filter_includes_only_plugins_with_an_entry_at_that_tier() {
+    // #330: `--tier N` keeps a plugin only if it has an enabled entry at tier
+    // N. plugin-alpha is enabled (all entries default to tier 3); promote one
+    // of its skills to tier 1. Then `--tier 1` must include alpha, `--tier 2`
+    // must exclude it (no entry at tier 2).
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_enabled(&env, &fixture_tmp, "sample-plugin-catalog");
+
+    let set = env
+        .cmd()
+        .args(["tier", "set", "plugin-alpha/skill-a", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        set.status.success(),
+        "tier set failed: {}",
+        String::from_utf8_lossy(&set.stderr),
+    );
+
+    // --tier 1 → alpha included (skill-a is tier 1).
+    let out = env
+        .cmd()
+        .args(["plugin", "list", "--tier", "1", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let records = parse_ndjson(&out.stdout);
+    assert_eq!(records.len(), 1, "only plugin-alpha has a tier-1 entry");
+    assert_eq!(records[0]["id"]["plugin"], "plugin-alpha");
+
+    // --tier 2 → nothing (no entry at tier 2; beta is disabled entirely).
+    let out2 = env
+        .cmd()
+        .args(["plugin", "list", "--tier", "2", "--json"])
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    assert!(
+        out2.stdout.is_empty(),
+        "no plugin has a tier-2 entry: {:?}",
+        String::from_utf8_lossy(&out2.stdout),
+    );
+}
+
+#[test]
+fn list_tier_filter_excludes_disabled_plugin() {
+    // A disabled plugin (plugin-beta) has no `workspace_skills` rows, so it can
+    // never satisfy any `--tier` filter — even tier 3, the default.
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_enabled(&env, &fixture_tmp, "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["plugin", "list", "--tier", "3", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let records = parse_ndjson(&out.stdout);
+    // Only alpha is enabled; its entries default to tier 3.
+    assert_eq!(records.len(), 1, "only the enabled plugin can match a tier");
+    assert_eq!(records[0]["id"]["plugin"], "plugin-alpha");
+}
+
+#[test]
+fn list_filter_and_tier_compose_with_and() {
+    // #330: filters compose with logical AND. `--filter beta --tier 1` must
+    // yield nothing: plugin-beta matches the name filter but is disabled (no
+    // tier-1 entry), and plugin-alpha has a tier-1 entry but its name/desc do
+    // not contain "beta"... except beta appears in NEITHER alpha's name nor its
+    // description, so the AND is empty.
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_enabled(&env, &fixture_tmp, "sample-plugin-catalog");
+
+    // Promote skill-a to tier 1 so alpha has a tier-1 entry.
+    let set = env
+        .cmd()
+        .args(["tier", "set", "plugin-alpha/skill-a", "1"])
+        .output()
+        .unwrap();
+    assert!(set.status.success());
+
+    // `--filter alpha --tier 1` → alpha matches both → one row.
+    let out = env
+        .cmd()
+        .args([
+            "plugin", "list", "--filter", "alpha", "--tier", "1", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let records = parse_ndjson(&out.stdout);
+    assert_eq!(records.len(), 1, "alpha matches both name and tier");
+    assert_eq!(records[0]["id"]["plugin"], "plugin-alpha");
+
+    // `--filter beta --tier 1` → beta matches the name but has no tier-1 entry
+    // (it's disabled); AND is empty.
+    let out2 = env
+        .cmd()
+        .args([
+            "plugin", "list", "--filter", "beta", "--tier", "1", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(out2.status.success());
+    assert!(
+        out2.stdout.is_empty(),
+        "beta matches the name filter but has no tier-1 entry: {:?}",
+        String::from_utf8_lossy(&out2.stdout),
+    );
+}
+
+#[test]
+fn list_tier_out_of_range_is_usage_error() {
+    // Clap's `value_parser!(u8).range(1..=3)` rejects 0 / 4 with a usage error
+    // (exit 2), never reaching the command body.
+    let fixture_tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let _paths = setup_with_alpha_enabled(&env, &fixture_tmp, "sample-plugin-catalog");
+
+    for bad in ["0", "4", "9"] {
+        let out = env
+            .cmd()
+            .args(["plugin", "list", "--tier", bad])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "`--tier {bad}` must be a clap usage error (exit 2)",
+        );
+    }
+}
+
+#[test]
 fn list_catalog_filter_narrows_results() {
     let fixture_tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();

@@ -1202,6 +1202,96 @@ pub fn set_tier_for_plugin(
     })
 }
 
+/// The distinct routing tiers held by entries of one `(catalog, plugin)`
+/// enabled in `workspace_name`. "Enabled" means a `workspace_skills` row joins
+/// the entry to the workspace — the same enrolment junction the tier and
+/// aggregate queries consult. Every enabled entry carries a `workspace_skills.tier`
+/// (default 3), so an enabled skill / command / agent contributes its tier here.
+///
+/// Used by `tome plugin list --tier <n>` to keep only plugins that have at
+/// least one enabled entry at the requested tier (membership test on the
+/// returned set). Returns an empty set when the plugin has no enabled entries.
+pub fn enabled_tiers_for_plugin(
+    conn: &Connection,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+) -> Result<std::collections::BTreeSet<u8>, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT ws.tier
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE s.catalog = ?1 AND s.plugin = ?2 AND w.name = ?3",
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("prepare enabled tiers: {e}"))
+        })?;
+    let rows = stmt
+        .query_map(params![catalog, plugin, workspace_name], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query enabled tiers: {e}")))?;
+    let mut out = std::collections::BTreeSet::new();
+    for r in rows {
+        let tier = r.map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("collect enabled tiers: {e}"))
+        })?;
+        // Tiers are constrained to 1..=3 at the write boundary
+        // (`--tier`/`tier set` validation); clamp defensively so a corrupt
+        // DB value can't panic the read-only list path.
+        out.insert(u8::try_from(tier).unwrap_or(0));
+    }
+    Ok(out)
+}
+
+/// The routing `tier` of each entry of one `(catalog, plugin)` enabled in
+/// `workspace_name`, keyed by `(kind, name)`. Only entries enrolled via
+/// `workspace_skills` appear — a stored-but-disabled entry has no tier and is
+/// absent. Used by `tome plugin show --details` to annotate each per-entry line
+/// with its tier; the `(kind, name)` key matches how `plugin show` splits the
+/// `SkillRecord` list into skills / commands / agents.
+pub fn entry_tiers_for_plugin(
+    conn: &Connection,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+) -> Result<std::collections::HashMap<(EntryKind, String), u8>, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.kind, s.name, ws.tier
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE s.catalog = ?1 AND s.plugin = ?2 AND w.name = ?3",
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare entry tiers: {e}")))?;
+    let rows = stmt
+        .query_map(params![catalog, plugin, workspace_name], |row| {
+            let kind_text: String = row.get(0)?;
+            let kind = kind_text.parse::<EntryKind>().map_err(|msg| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(msg)),
+                )
+            })?;
+            let name: String = row.get(1)?;
+            let tier: i64 = row.get(2)?;
+            Ok(((kind, name), u8::try_from(tier).unwrap_or(0)))
+        })
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query entry tiers: {e}")))?;
+    let mut out = std::collections::HashMap::new();
+    for r in rows {
+        let (key, tier) = r.map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("collect entry tiers: {e}"))
+        })?;
+        out.insert(key, tier);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1427,6 +1517,78 @@ mod tests {
             matches!(err, TomeError::EntryNotFound { .. }),
             "expected EntryNotFound, got: {err:?}",
         );
+    }
+
+    #[test]
+    fn enabled_tiers_for_plugin_reports_distinct_tiers() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+
+        // One plugin with a skill at tier 1 and a command left at the default
+        // tier (3). An agent in the same plugin also contributes its tier.
+        insert_enabled_entry(&conn, "cat", "plug", EntryKind::Skill, "alpha");
+        insert_enabled_entry(&conn, "cat", "plug", EntryKind::Command, "beta");
+        insert_enabled_agent(&conn, "cat", "plug", "bot");
+        set_tier_for_entry(
+            &conn,
+            "global",
+            "cat",
+            "plug",
+            &EntryKind::Skill,
+            "alpha",
+            1,
+        )
+        .expect("set skill tier");
+
+        let tiers = enabled_tiers_for_plugin(&conn, "global", "cat", "plug").expect("tiers");
+        assert!(
+            tiers.contains(&1),
+            "skill at tier 1 must be present: {tiers:?}"
+        );
+        assert!(
+            tiers.contains(&3),
+            "command + agent default to tier 3: {tiers:?}",
+        );
+        assert!(!tiers.contains(&2), "no entry is at tier 2: {tiers:?}");
+
+        // A plugin with no enabled entries yields an empty set.
+        let none = enabled_tiers_for_plugin(&conn, "global", "cat", "ghost").expect("empty");
+        assert!(none.is_empty(), "unenrolled plugin has no tiers: {none:?}");
+    }
+
+    #[test]
+    fn entry_tiers_for_plugin_keys_by_kind_and_name() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+
+        insert_enabled_entry(&conn, "cat", "plug", EntryKind::Skill, "alpha");
+        insert_enabled_entry(&conn, "cat", "plug", EntryKind::Command, "beta");
+        insert_enabled_agent(&conn, "cat", "plug", "bot");
+        set_tier_for_entry(
+            &conn,
+            "global",
+            "cat",
+            "plug",
+            &EntryKind::Skill,
+            "alpha",
+            2,
+        )
+        .expect("set skill tier");
+
+        let tiers = entry_tiers_for_plugin(&conn, "global", "cat", "plug").expect("entry tiers");
+        assert_eq!(
+            tiers.get(&(EntryKind::Skill, "alpha".to_owned())),
+            Some(&2),
+            "skill tier must reflect the explicit set: {tiers:?}",
+        );
+        // Command + agent default to tier 3.
+        assert_eq!(
+            tiers.get(&(EntryKind::Command, "beta".to_owned())),
+            Some(&3),
+        );
+        assert_eq!(tiers.get(&(EntryKind::Agent, "bot".to_owned())), Some(&3));
+        // A non-enrolled entry is absent (not tier 0).
+        assert!(!tiers.contains_key(&(EntryKind::Skill, "ghost".to_owned())));
     }
 
     #[test]
