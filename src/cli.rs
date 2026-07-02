@@ -877,14 +877,16 @@ pub enum CatalogCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct CatalogAddArgs {
-    /// The catalog source: an owner/repo shorthand, a Git URL, or a local
+    /// The catalog source: an owner/repo shorthand (optionally prefixed
+    /// `gh:`/`gl:`/`bb:` for GitHub/GitLab/Bitbucket), a Git URL, or a local
     /// path (interpreted as `file://`).
     pub source: String,
     /// Override the display name (defaults to the manifest's `name`).
-    #[arg(long)]
+    #[arg(short = 'n', long)]
     pub name: Option<String>,
-    /// Branch, tag, or SHA to track. Defaults to `main`.
-    #[arg(long = "ref")]
+    /// Branch, tag, or SHA to track (aliases: `--branch`, `--tag`). Defaults
+    /// to `main`.
+    #[arg(long = "ref", visible_alias = "branch", visible_alias = "tag")]
     pub ref_: Option<String>,
 }
 
@@ -907,9 +909,6 @@ pub struct CatalogListArgs {
 pub struct CatalogUpdateArgs {
     /// The catalog to refresh. Omit to refresh every registered catalog.
     pub name: Option<String>,
-    /// Reserved for future symmetry with the other commands. Currently no-op.
-    #[arg(long)]
-    pub force: bool,
 }
 
 #[derive(Debug, clap::Args)]

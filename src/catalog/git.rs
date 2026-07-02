@@ -230,6 +230,18 @@ impl Git {
         Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
 
+    /// Best-effort HEAD SHA read: `git -C <repo> rev-parse HEAD`, degrading to
+    /// `None` on ANY failure (git error, empty output). Used by `catalog add`
+    /// to echo the resolved commit — a purely informational display field, so
+    /// a failure here must never fail the add (the catalog is already
+    /// registered by the time this runs). Output is a plain hex string with no
+    /// credential surface; the underlying `run` still routes any `git` stderr
+    /// through `scrub_credentials`, but that error is dropped here.
+    pub fn rev_parse_head_opt(&self, repo: &Path) -> Option<String> {
+        let sha = self.rev_parse_head(repo).ok()?;
+        if sha.is_empty() { None } else { Some(sha) }
+    }
+
     /// `git -C <repo> log -1 --format=%cI -- <rel_path>` — the committer date
     /// (strict-ISO-8601 / RFC-3339-compatible) of the most recent commit that
     /// touched `rel_path`, relative to the repo root. Returns `None` when the

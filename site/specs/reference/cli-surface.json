@@ -4,8 +4,10 @@
     "catalog": {
       "subcommands": {
         "add": [
+          "--branch",
           "--name",
           "--ref",
+          "--tag",
           "--verbose"
         ],
         "remove": [
@@ -16,7 +18,6 @@
           "--verbose"
         ],
         "update": [
-          "--force",
           "--verbose"
         ],
         "show": [
