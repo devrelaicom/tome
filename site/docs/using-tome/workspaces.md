@@ -96,12 +96,18 @@ changes what your harnesses see.
 ```bash
 tome workspace regen-summary <name>  # regenerate a named workspace's summary
 tome workspace regen-summary         # regenerate the active workspace (confirms first)
-tome workspace sync                  # reconcile the workspace with current state
+tome sync                            # reconcile the current project with the workspace
 ```
 
 `tome workspace regen-summary` with no name defaults to the active workspace but
 asks for confirmation first, so you never accidentally regenerate the resolved
 (often `global`) scope. On a non-terminal the name is required.
+
+`tome sync` propagates the active workspace's composition to the current bound
+project, writing its `RULES.md` and reconciling its harness files. Run outside a
+project, it fans out to every bound project instead. See
+[Harnesses](./harnesses.md#syncing-bound-projects) for `tome sync --all` and the
+full behaviour.
 
 If a workspace looks out of sync, `tome doctor` reports it and `tome doctor --fix`
 re-runs the relevant reconciliation. See
