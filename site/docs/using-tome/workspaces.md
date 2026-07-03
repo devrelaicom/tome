@@ -21,13 +21,12 @@ a different set entirely.
 
 ```bash
 # the contracts project uses the verification plugin
-tome workspace init contracts
-tome workspace use contracts
+# `use --create` creates the workspace and binds this directory in one step
+tome workspace use --create contracts
 tome plugin enable midnight-expert/midnight-verify
 
 # the dapp project uses a different plugin
-tome workspace init dapp
-tome workspace use dapp
+tome workspace use --create dapp
 tome plugin enable midnight-expert/midnight-dapp-dev
 ```
 
@@ -42,13 +41,21 @@ tome workspace info   # the active workspace and its composition
 ## Lifecycle
 
 ```bash
-tome workspace init <name>     # create a workspace
-tome workspace use <name>      # switch the active workspace
-tome workspace list            # list workspaces
-tome workspace info            # show the active workspace and its composition
-tome workspace rename <a> <b>  # rename a workspace
-tome workspace remove <name>   # remove a workspace
+tome workspace init <name>          # create a workspace
+tome workspace init --bind <name>   # create a workspace and bind this directory
+tome workspace use <name>           # bind this directory to an existing workspace
+tome workspace use --create <name>  # create-if-absent, then bind — one step
+tome workspace use                  # pick a workspace to bind from a list
+tome workspace list                 # list workspaces
+tome workspace info                 # show the active workspace and its composition
+tome workspace rename <a> <b>       # rename a workspace
+tome workspace remove <name>        # remove a workspace
 ```
+
+`tome workspace use --create <name>` and `tome workspace init --bind <name>` are
+mirrors of each other: both create the workspace (create-if-absent for `use
+--create`) and bind the current directory in a single step. Run `tome workspace
+use` with no name on a terminal to choose from a picker.
 
 ## Project binding
 
@@ -67,9 +74,14 @@ changes what your harnesses see.
 ## Summaries and sync
 
 ```bash
-tome workspace regen-summary   # regenerate the workspace summary
-tome workspace sync            # reconcile the workspace with current state
+tome workspace regen-summary <name>  # regenerate a named workspace's summary
+tome workspace regen-summary         # regenerate the active workspace (confirms first)
+tome workspace sync                  # reconcile the workspace with current state
 ```
+
+`tome workspace regen-summary` with no name defaults to the active workspace but
+asks for confirmation first, so you never accidentally regenerate the resolved
+(often `global`) scope. On a non-terminal the name is required.
 
 If a workspace looks out of sync, `tome doctor` reports it and `tome doctor --fix`
 re-runs the relevant reconciliation. See

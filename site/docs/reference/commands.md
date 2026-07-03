@@ -187,13 +187,13 @@ Per-project scopes and composition.
 
 | Subcommand | Flags | Purpose |
 | --- | --- | --- |
-| `use <name>` | `--force` | Bind the current project directory to a workspace (writes `<cwd>/.tome/config.toml`). `--force` bypasses the refusal when CWD is your home directory or the filesystem root. |
-| `init <name>` | `--inherit-global` | Create a workspace. `--inherit-global` seeds its catalogs from the global workspace's enrolments at creation time. |
+| `use [<name>]` | `--create`, `--force` | Bind the current project directory to a workspace (writes `<cwd>/.tome/config.toml`). `--create` creates the workspace first (create-if-absent), so `init` + `use` happen in one step; it requires an explicit `<name>`. Omit `<name>` on a terminal to pick from a list of existing workspaces; on a non-terminal an omitted name is a usage error (exit `54`). `--force` bypasses the refusal when CWD is your home directory or the filesystem root. |
+| `init <name>` | `--bind`, `--inherit-global` | Create a workspace. `--bind` also binds the current directory to the new workspace (the mirror of `use --create`), running harness sync in the same step. `--inherit-global` seeds its catalogs from the global workspace's enrolments at creation time. |
 | `list` | `--absolute` | List workspaces with catalog, plugin, skill, and bound-project counts. The workspace resolved for the current directory is marked with `*` in the `Cur` column. `Last used` renders as a relative time (e.g. `2 days ago`) by default; `--absolute` forces the RFC 3339 timestamp. `--json` adds a per-row `current` boolean and always emits the absolute `last_used_at` (the relative rendering is human-only). |
 | `current` | | Print the workspace bound to the current directory on one line, with no decoration — for shell prompts / scripting (`$(tome workspace current 2>/dev/null)`). Read-only. Exits `12` (`workspace_not_bound`) with a clear stderr message and no stdout when nothing is bound. |
 | `info [<name>]` | | Report a workspace's details. Read-only; never acquires the advisory lock. Defaults to the resolved workspace. |
 | `rename <old> <new>` | | Rename a workspace, updating every bound project's marker atomically. Refuses either side of `global`. |
-| `regen-summary <name>` | | Force regeneration of a workspace's cached summaries and rules file. |
+| `regen-summary [<name>]` | | Force regeneration of a workspace's cached summaries and rules file. `<name>` defaults to the resolved workspace, but only after an interactive confirmation; on a non-terminal the name is required (exit `54`), so the resolved (often `global`) scope is never regenerated silently. |
 | `remove <name>` | `--force` | Remove a workspace and its DB rows. Refuses the reserved `global` (exit `15`) and refuses without `--force` while projects are bound (exit `16`). |
 | `sync [<name>]` | | Copy the workspace's central rules file to every bound project. Idempotent; never regenerates summaries. |
 
