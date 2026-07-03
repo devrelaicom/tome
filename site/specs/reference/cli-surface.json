@@ -60,6 +60,7 @@
         "enable": [
           "--catalog",
           "--sync",
+          "--tier",
           "--verbose",
           "--yes"
         ],
@@ -114,10 +115,11 @@
     "models": {
       "subcommands": {
         "download": [
-          "--force",
           "--all",
+          "--force",
           "--profile",
-          "--verbose"
+          "--verbose",
+          "--yes"
         ],
         "list": [
           "--verbose",
@@ -129,10 +131,18 @@
           "--verbose"
         ],
         "profile": [
-          "--verbose"
+          "--force",
+          "--verbose",
+          "--yes"
         ],
         "test": [
+          "--force",
+          "--verbose",
           "--verify",
+          "--yes"
+        ],
+        "update": [
+          "--include-registry",
           "--verbose"
         ]
       },
@@ -183,6 +193,7 @@
           "--verbose"
         ],
         "info": [
+          "--details",
           "--verbose"
         ],
         "init": [
@@ -200,9 +211,6 @@
         "regen-summary": [
           "--verbose"
         ],
-        "sync": [
-          "--verbose"
-        ],
         "remove": [
           "--force",
           "--verbose"
@@ -210,7 +218,8 @@
         "use": [
           "--create",
           "--force",
-          "--verbose"
+          "--verbose",
+          "--yes"
         ]
       },
       "flags": [
@@ -236,7 +245,8 @@
           "--force",
           "--include-opt-in",
           "--scope",
-          "--verbose"
+          "--verbose",
+          "--yes"
         ],
         "remove": [
           "--all",
@@ -250,21 +260,19 @@
           "--plugin",
           "--verbose"
         ],
-        "sync": [
+        "session-start": [
+          "--harness",
+          "--verbose"
+        ],
+        "run-hook": [
+          "--event",
+          "--explain",
+          "--harness",
           "--verbose"
         ]
       },
       "flags": [
         "--verbose"
-      ]
-    },
-    "sync": {
-      "subcommands": {},
-      "flags": [
-        "--all",
-        "--harness",
-        "--harness-only",
-        "--rules-only"
       ]
     },
     "skill": {
@@ -325,13 +333,45 @@
         "--verbose"
       ]
     },
+    "telemetry": {
+      "subcommands": {
+        "status": [
+          "--verbose"
+        ],
+        "inspect": [
+          "--verbose"
+        ],
+        "on": [
+          "--verbose"
+        ],
+        "off": [
+          "--verbose"
+        ],
+        "reset": [
+          "--verbose",
+          "--yes"
+        ],
+        "purge": [
+          "--verbose"
+        ],
+        "flush": [
+          "--quiet",
+          "--verbose"
+        ]
+      },
+      "flags": [
+        "--verbose"
+      ]
+    },
     "tier": {
       "subcommands": {
         "set": [
           "--catalog",
+          "--force",
           "--kind",
           "--plugin",
-          "--verbose"
+          "--verbose",
+          "--yes"
         ],
         "list": [
           "--verbose"
@@ -345,6 +385,16 @@
         ]
       },
       "flags": [
+        "--verbose"
+      ]
+    },
+    "sync": {
+      "subcommands": {},
+      "flags": [
+        "--all",
+        "--harness",
+        "--harness-only",
+        "--rules-only",
         "--verbose"
       ]
     },
@@ -370,6 +420,7 @@
   },
   "globalFlags": [
     "--json",
+    "--no-color",
     "--non-interactive",
     "--workspace"
   ],

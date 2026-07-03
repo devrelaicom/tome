@@ -14,7 +14,18 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const contractPath = path.join(root, 'specs/reference/cli-surface.json');
 const bin = process.argv[2] ?? path.join(root, '../target/release/tome');
 
-const IGNORED_FLAGS = new Set(['--help', '--version', '--json', '--workspace']);
+// clap `global = true` flags propagate onto every subcommand's `--help`, so
+// they must NOT be listed per-command — they belong in `globalFlags`. (The one
+// deliberate exception is `--verbose`/`-v`, which is also `global = true` in
+// cli.rs but IS kept per-command, because it affects each command's output.)
+const IGNORED_FLAGS = new Set([
+  '--help',
+  '--version',
+  '--json',
+  '--no-color',
+  '--non-interactive',
+  '--workspace',
+]);
 const IGNORED_SUBCOMMANDS = new Set(['help']);
 
 function help(args) {
@@ -40,8 +51,30 @@ function parseSection(text, section) {
 function flagsOf(text) {
   const found = new Set();
   for (const {line} of parseSection(text, 'Options')) {
-    for (const m of line.matchAll(/--[a-z][a-z0-9-]*/g)) {
+    // A flag counts if it appears in EITHER of two structured positions, but
+    // never in free description prose:
+    //   1. The option-name head — the part before the 2+-space gap clap uses to
+    //      separate a flag from its description. A real `--flag` always sits
+    //      here; scanning the whole line would harvest `--xxx` tokens out of
+    //      description prose (e.g. the global `--non-interactive` help text
+    //      names `--force`/`--yes`, which would then be wrongly attributed to
+    //      every subcommand).
+    //   2. A structured `[aliases: ...]` bracket that clap appends for VISIBLE
+    //      aliases (e.g. `--ref ... [aliases: --branch, --tag]`,
+    //      `--no-fetch ... [aliases: --local-only]`). These are real
+    //      user-facing flags and must be kept. This is deliberately NOT the
+    //      `[possible values: ...]` bracket (different keyword; carries no
+    //      `--flag` tokens anyway) and NOT the free-prose "aliases" some help
+    //      text mentions in parentheses.
+    const head = line.replace(/^\s+/, '').split(/\s{2,}/)[0];
+    for (const m of head.matchAll(/--[a-z][a-z0-9-]*/g)) {
       if (!IGNORED_FLAGS.has(m[0])) found.add(m[0]);
+    }
+    const aliasBracket = line.match(/\[aliases:\s*([^\]]+)\]/);
+    if (aliasBracket) {
+      for (const m of aliasBracket[1].matchAll(/--[a-z][a-z0-9-]*/g)) {
+        if (!IGNORED_FLAGS.has(m[0])) found.add(m[0]);
+      }
     }
   }
   return [...found].sort();
