@@ -4,33 +4,22 @@
     "catalog": {
       "subcommands": {
         "add": [
-          "--branch",
-          "--force",
           "--name",
           "--ref",
-          "--tag",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "remove": [
           "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "list": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "update": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "show": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "create": [
           "--author",
@@ -39,8 +28,7 @@
           "--force",
           "--output",
           "--template",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "convert": [
           "--allow",
@@ -48,33 +36,26 @@
           "--force",
           "--from",
           "--into",
-          "--local-only",
           "--no-fetch",
           "--output",
           "--strict",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "lint": [
           "--autofix",
           "--dry-run",
-          "--force",
           "--strict",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "plugin": {
       "subcommands": {
         "enable": [
           "--catalog",
-          "--force",
           "--sync",
           "--tier",
           "--verbose",
@@ -84,23 +65,18 @@
           "--catalog",
           "--force",
           "--sync",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "list": [
           "--catalog",
           "--enabled-only",
           "--filter",
-          "--force",
           "--tier",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "show": [
           "--details",
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "create": [
           "--author",
@@ -110,8 +86,7 @@
           "--into",
           "--output",
           "--template",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "convert": [
           "--allow",
@@ -121,22 +96,17 @@
           "--into",
           "--output",
           "--strict",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "lint": [
           "--autofix",
           "--dry-run",
-          "--force",
           "--strict",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "models": {
@@ -149,16 +119,13 @@
           "--yes"
         ],
         "list": [
-          "--force",
           "--verbose",
-          "--verify",
-          "--yes"
+          "--verify"
         ],
         "remove": [
           "--all",
           "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "profile": [
           "--force",
@@ -172,23 +139,18 @@
           "--yes"
         ],
         "update": [
-          "--force",
           "--include-registry",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "query": {
       "subcommands": {},
       "flags": [
         "--catalog",
-        "--force",
         "--kind",
         "--min-score",
         "--no-rerank",
@@ -196,8 +158,7 @@
         "--query",
         "--strict",
         "--top-k",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "reindex": {
@@ -206,69 +167,50 @@
         "--catalog",
         "--force",
         "--plugin",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "status": {
       "subcommands": {},
       "flags": [
-        "--force",
         "--verbose",
-        "--verify",
-        "--yes"
+        "--verify"
       ]
     },
     "mcp": {
       "subcommands": {},
       "flags": [
-        "--force",
         "--harness",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "workspace": {
       "subcommands": {
         "current": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "info": [
           "--details",
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "init": [
           "--bind",
-          "--create",
-          "--force",
           "--inherit-global",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "list": [
           "--absolute",
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "rename": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "regen-summary": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "remove": [
           "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "use": [
           "--create",
@@ -278,9 +220,7 @@
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "doctor": {
@@ -289,16 +229,13 @@
         "--fix",
         "--force",
         "--verbose",
-        "--verify",
-        "--yes"
+        "--verify"
       ]
     },
     "harness": {
       "subcommands": {
         "list": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "use": [
           "--all",
@@ -310,41 +247,29 @@
         ],
         "remove": [
           "--all",
-          "--force",
           "--scope",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "info": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "preview": [
-          "--force",
           "--plugin",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "session-start": [
-          "--force",
           "--harness",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "run-hook": [
           "--event",
           "--explain",
-          "--force",
           "--harness",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "skill": {
@@ -359,8 +284,7 @@
           "--output",
           "--plugin-name",
           "--template",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "convert": [
           "--allow",
@@ -370,97 +294,70 @@
           "--into",
           "--output",
           "--strict",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "lint": [
           "--autofix",
           "--dry-run",
-          "--force",
           "--strict",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "meta": {
       "subcommands": {
         "list": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "add": [
           "--all",
           "--force",
           "--global",
           "--harness",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "remove": [
           "--all",
-          "--force",
           "--global",
           "--harness",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "telemetry": {
       "subcommands": {
         "status": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "inspect": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "on": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "off": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "reset": [
-          "--force",
           "--verbose",
           "--yes"
         ],
         "purge": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "flush": [
-          "--force",
           "--quiet",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "tier": {
@@ -474,63 +371,47 @@
           "--yes"
         ],
         "list": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "clear": [
           "--all",
           "--catalog",
-          "--force",
           "--kind",
           "--plugin",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "sync": {
       "subcommands": {},
       "flags": [
         "--all",
-        "--force",
         "--harness",
         "--harness-only",
         "--rules-only",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "config": {
       "subcommands": {
         "show": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "validate": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     },
     "completions": {
       "subcommands": {},
       "flags": [
-        "--force",
-        "--verbose",
-        "--yes"
+        "--verbose"
       ]
     }
   },

@@ -15,7 +15,9 @@ const contractPath = path.join(root, 'specs/reference/cli-surface.json');
 const bin = process.argv[2] ?? path.join(root, '../target/release/tome');
 
 // clap `global = true` flags propagate onto every subcommand's `--help`, so
-// they must NOT be listed per-command — they belong in `globalFlags`.
+// they must NOT be listed per-command — they belong in `globalFlags`. (The one
+// deliberate exception is `--verbose`/`-v`, which is also `global = true` in
+// cli.rs but IS kept per-command, because it affects each command's output.)
 const IGNORED_FLAGS = new Set([
   '--help',
   '--version',
@@ -49,7 +51,14 @@ function parseSection(text, section) {
 function flagsOf(text) {
   const found = new Set();
   for (const {line} of parseSection(text, 'Options')) {
-    for (const m of line.matchAll(/--[a-z][a-z0-9-]*/g)) {
+    // Scan ONLY the option-name head — the part before the 2+-space gap clap
+    // uses to separate a flag from its description. A real `--flag` always sits
+    // in the head; scanning the whole line would harvest `--xxx` tokens out of
+    // description prose (e.g. the global `--non-interactive` help text names
+    // `--force`/`--yes`, which would then be wrongly attributed to every
+    // subcommand).
+    const head = line.replace(/^\s+/, '').split(/\s{2,}/)[0];
+    for (const m of head.matchAll(/--[a-z][a-z0-9-]*/g)) {
       if (!IGNORED_FLAGS.has(m[0])) found.add(m[0]);
     }
   }
