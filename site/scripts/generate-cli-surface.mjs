@@ -51,15 +51,30 @@ function parseSection(text, section) {
 function flagsOf(text) {
   const found = new Set();
   for (const {line} of parseSection(text, 'Options')) {
-    // Scan ONLY the option-name head — the part before the 2+-space gap clap
-    // uses to separate a flag from its description. A real `--flag` always sits
-    // in the head; scanning the whole line would harvest `--xxx` tokens out of
-    // description prose (e.g. the global `--non-interactive` help text names
-    // `--force`/`--yes`, which would then be wrongly attributed to every
-    // subcommand).
+    // A flag counts if it appears in EITHER of two structured positions, but
+    // never in free description prose:
+    //   1. The option-name head — the part before the 2+-space gap clap uses to
+    //      separate a flag from its description. A real `--flag` always sits
+    //      here; scanning the whole line would harvest `--xxx` tokens out of
+    //      description prose (e.g. the global `--non-interactive` help text
+    //      names `--force`/`--yes`, which would then be wrongly attributed to
+    //      every subcommand).
+    //   2. A structured `[aliases: ...]` bracket that clap appends for VISIBLE
+    //      aliases (e.g. `--ref ... [aliases: --branch, --tag]`,
+    //      `--no-fetch ... [aliases: --local-only]`). These are real
+    //      user-facing flags and must be kept. This is deliberately NOT the
+    //      `[possible values: ...]` bracket (different keyword; carries no
+    //      `--flag` tokens anyway) and NOT the free-prose "aliases" some help
+    //      text mentions in parentheses.
     const head = line.replace(/^\s+/, '').split(/\s{2,}/)[0];
     for (const m of head.matchAll(/--[a-z][a-z0-9-]*/g)) {
       if (!IGNORED_FLAGS.has(m[0])) found.add(m[0]);
+    }
+    const aliasBracket = line.match(/\[aliases:\s*([^\]]+)\]/);
+    if (aliasBracket) {
+      for (const m of aliasBracket[1].matchAll(/--[a-z][a-z0-9-]*/g)) {
+        if (!IGNORED_FLAGS.has(m[0])) found.add(m[0]);
+      }
     }
   }
   return [...found].sort();
