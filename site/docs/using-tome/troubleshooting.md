@@ -122,6 +122,8 @@ Common cases:
 | Embedder name or version drift between index and models | `41` / `42` | Run a **bare** `tome reindex` (add `--force` to rebuild every skill). Recovering from drift, or switching embedders, needs the whole-index form — a scoped reindex is refused under drift (exit `47`). |
 | `create`/`convert` refuses to overwrite existing output | `81` | Choose a fresh `--output`, or pass `--force`. |
 | `lint` found errors, or warnings under `--strict` | `85` / `86` | These are verdicts, not crashes — fix the findings. See [Linting](../authoring/lint.md). |
+| A configured external provider has no resolvable credential | `93` | Set `TOME_<NAME>_API_KEY` — `tome models test <capability>` and `tome doctor` name the exact variable. A remote request that fails outright is `94`; a remote embedding that fails content validation is `95`. See [Model providers](../reference/config.md#model-providers-byokbyom). |
+| `config.toml` is malformed | `5` | Run `tome config validate` — it names the offending key, section, and line. `tome doctor` and `tome status` keep running and report the same problem as a finding rather than bricking. See [Configuration](../reference/config.md#global-configtoml). |
 
 The complete table, codes 0–95, is in
 [Exit codes](../reference/exit-codes.md).

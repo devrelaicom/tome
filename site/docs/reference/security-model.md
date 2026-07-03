@@ -64,11 +64,34 @@ Each of these defences is implemented in the CLI today:
   or corrupt the surrounding file.
 - **Credential scrubbing in errors.** Tokens embedded in git remotes and
   download URLs are scrubbed before any error message or log line is emitted.
-- **Everything local.** The index, the embeddings, and the reranker all run on
-  your machine. Tome sends no data to remote servers; there is no telemetry.
+  The same scrubber runs over config parse diagnostics, so a syntax error on an
+  inline `api_key` line never echoes the key.
+- **Index and models are local.** The index, the embeddings, and the reranker
+  all run on your machine, and a search never leaves the box.
 
 The result: a hostile catalog cannot escape Tome's target directories,
 corrupt the files Tome manages, or leak your credentials through error output.
+
+## What Tome sends off your machine
+
+Two paths send data to a remote server. Both are legible and controllable.
+
+**Anonymous telemetry, opt-out.** By default Tome sends anonymous usage
+telemetry to a pinned collector endpoint. Every event field is a bucketed
+integer, a closed enum, a boolean, or a per-install UUID — no free-form strings,
+no paths, no catalog content, no query text. Telemetry auto-disables under CI
+and never blocks the foreground: a command only appends to a local queue, and a
+detached background flusher drains it best-effort. Disable it with
+`tome telemetry off`, force it either way with `TOME_TELEMETRY=0` / `1`, and
+inspect exactly what is queued with `tome telemetry inspect` (it prints the
+pending events and sends nothing). See [`tome telemetry`](./commands.md#tome-telemetry).
+
+**BYOK/BYOM model providers, off by default.** Tome runs bundled local models
+unless you configure an external provider. When a `[providers.<name>]` entry is
+wired to a capability, that capability's requests — the text to summarise,
+embed, or rerank — go to the provider endpoint you named, authenticated with the
+credential you supplied. Nothing external is called until you configure it. See
+[Model providers](./config.md#model-providers-byokbyom).
 
 :::note
 These refusals report exactly what happened. A refused harness write exits

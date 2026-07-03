@@ -109,8 +109,12 @@ where the harness supports them.
 Tome maintains a single local SQLite index (with a vector extension for semantic
 search) under `~/.tome/`. Adding a catalog or enabling a plugin updates this
 index. It powers both `tome query` and the MCP server's search. The index, the
-embedding model, and the reranker all stay on your machine — there is no
-telemetry.
+embedding model, and the reranker all stay on your machine; a search never
+leaves the box.
+
+Separately from the index, Tome sends anonymous, opt-out usage telemetry
+(auto-disabled under CI). Disable it with `tome telemetry off`. See
+[`tome telemetry`](../reference/commands.md#tome-telemetry).
 
 ## MCP server
 
