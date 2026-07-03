@@ -16,6 +16,11 @@ describe what you need and get the right entry back.
 tome query "verify a Compact contract"
 ```
 
+The query text is variadic and space-joined, so quoting is optional:
+`tome query reset a counter` works unquoted. Pass `-q`/`--query "…"` instead
+when the query itself contains flag-like or shell-significant tokens; the
+quoted form is mutually exclusive with the positional words.
+
 ```text
 top_k=10  rerank=true  min_score=none  (10 results)
 |   Score | Catalog         | Plugin          | Name                                      | Type    | Version | Path                                                      |
@@ -58,10 +63,19 @@ Both models run on your machine; nothing is sent anywhere.
 | `--top-k <n>` | Return at most *n* results. |
 | `--min-score <s>` | Drop results scoring below *s*. |
 | `--no-rerank` | Skip the reranking stage; results come back in raw KNN order. |
-| `--catalog <name>` | Restrict the search to a single catalog. |
-| `--plugin <name>` | Restrict the search to a single plugin. |
+| `--catalog <name>` | Restrict the search to a catalog. Repeatable: pass `--catalog` several times to include entries from any of the named catalogs. |
+| `--plugin <name>` | Restrict the search to a plugin (across all catalogs unless `--catalog` is also set). Repeatable: include entries from any of the named plugins. |
+| `--kind <kind>` | Restrict the search to an entry kind (`skill`, `command`, or `agent`). Repeatable. `query` only searches indexed, searchable entries, so `--kind agent` typically returns nothing. |
+| `-q`, `--query <text>` | The query as a single quoted string, instead of the positional words. Mutually exclusive with the positional form. |
 | `--strict` | Fail (non-zero exit) instead of returning weak results when no result scores high enough. |
 | `--json` | Emit machine-readable output. |
+
+The repeatable scoping flags compose, so you can narrow by kind and several
+plugins at once:
+
+```bash
+tome query reset a counter --kind skill --plugin a --plugin b
+```
 
 ### Limit results with `--top-k`
 
