@@ -82,6 +82,22 @@ manual review — over-long descriptions and harness-isms Tome does not
 emulate. [Linting](./lint.md) covers how to work through them (and what
 `--autofix` can do for you).
 
+You don't have to remember that lint step. When a convert writes files and
+surfaces at least one warning, it prints a `Next:` line with the exact,
+copy-pasteable commands to run:
+
+```console
+Next: run `tome catalog lint ~/catalogs/midnight-expert-tome --autofix`, then `tome harness use <harness>`
+```
+
+The convert level (`catalog`/`plugin`/`skill`) and the on-disk path convert
+just wrote are filled in for you; `<harness>` is the placeholder you replace.
+The bridge is gated: a clean convert (no warnings) needs no lint nudge, and a
+`--dry-run` writes nothing, so the lint target wouldn't exist — in both cases
+no `Next:` line is printed. It is human output only. The `--json` stream is
+unchanged: no `Next:` line, and it still ends with the `type: "result"`
+summary, so scripts parsing `--json` are unaffected.
+
 ## Output location
 
 Convert never modifies the source — it writes a converted copy:
