@@ -94,10 +94,12 @@ credential you supplied. Nothing external is called until you configure it. See
 [Model providers](./config.md#model-providers-byokbyom).
 
 :::note
-These refusals report exactly what happened. A refused harness write exits
-with the code for its target — `44` (hooks), `45` (agents), `46`
-(rules/guardrails) — rather than a generic I/O error, so scripts can tell
-"blocked a suspicious write" apart from "disk problem". See
+These refusals report exactly what happened. A refused write to a dedicated
+sink exits with the code for its target—`44` (hooks), `45` (agents), `46`
+(guardrails)—rather than a generic I/O error, so scripts can tell "blocked a
+suspicious write" apart from "disk problem". The rules-file sink (`CLAUDE.md` /
+`AGENTS.md`) and the MCP-config sink refuse the same way but surface it as exit
+`7` (I/O), the code those sinks already used. See
 [Exit codes](./exit-codes.md).
 :::
 
