@@ -9,7 +9,9 @@ Tome ships as a single self-contained executable. The semantic index, vector
 search, and reranker runtime are compiled in. The two search models — a 32 MB
 embedder and a 266 MB reranker — are downloaded the first time they're needed
 (or explicitly with `tome models download`) and kept under `~/.tome/`. No
-daemon, no account, no telemetry.
+daemon, no account. Tome sends anonymous, opt-out usage telemetry (auto-disabled
+under CI); turn it off with `tome telemetry off`. See
+[`tome telemetry`](../reference/commands.md#tome-telemetry).
 
 ## Prerequisites
 
