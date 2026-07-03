@@ -32,6 +32,7 @@ fn first_bind_outcome_serialises_to_byte_stable_json() {
         project_root: PathBuf::from("/tmp/proj"),
         created_marker: true,
         rebind_from: None,
+        created: false,
         sync: None,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
@@ -53,6 +54,7 @@ fn rebind_same_workspace_outcome_serialises_to_byte_stable_json() {
         project_root: PathBuf::from("/tmp/proj"),
         created_marker: false,
         rebind_from: None,
+        created: false,
         sync: None,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
@@ -74,6 +76,7 @@ fn rebind_from_other_workspace_outcome_serialises_to_byte_stable_json() {
         project_root: PathBuf::from("/tmp/proj"),
         created_marker: false,
         rebind_from: Some(ws("ws-a")),
+        created: false,
         sync: None,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
@@ -97,6 +100,7 @@ fn outcome_with_sync_serialises_field_present() {
         project_root: PathBuf::from("/tmp/proj"),
         created_marker: true,
         rebind_from: None,
+        created: false,
         sync: Some(SyncOutcome::default()),
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
@@ -109,5 +113,46 @@ fn outcome_with_sync_serialises_field_present() {
     assert!(
         json.contains(r#""workspace":"demo""#),
         "workspace must still serialise alongside sync; got: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. #321 `--create`: the `created` field is present ONLY when true. When
+//    false (every pre-#321 form) it is `skip_serializing_if`-elided, keeping
+//    the wire shape byte-identical to the pins above.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn created_field_is_absent_when_false() {
+    let outcome = BindOutcome {
+        workspace: ws("demo"),
+        project_root: PathBuf::from("/tmp/proj"),
+        created_marker: true,
+        rebind_from: None,
+        created: false,
+        sync: None,
+    };
+    let json = serde_json::to_string(&outcome).expect("serialise");
+    assert!(
+        !json.contains("\"created\""),
+        "created must be elided when false; got: {json}",
+    );
+}
+
+#[test]
+fn created_field_is_present_when_true() {
+    let outcome = BindOutcome {
+        workspace: ws("demo"),
+        project_root: PathBuf::from("/tmp/proj"),
+        created_marker: true,
+        rebind_from: None,
+        created: true,
+        sync: None,
+    };
+    let json = serde_json::to_string(&outcome).expect("serialise");
+    assert_eq!(
+        json,
+        r#"{"workspace":"demo","project_root":"/tmp/proj","created_marker":true,"rebind_from":null,"created":true}"#,
+        "BindOutcome with created=true wire shape drift"
     );
 }

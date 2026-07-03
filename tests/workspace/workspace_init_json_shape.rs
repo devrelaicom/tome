@@ -18,11 +18,45 @@ fn init_outcome_json_wire_shape_is_byte_stable_unix() {
         path: PathBuf::from("/tmp/tome/workspaces/my-ws"),
         catalogs_inherited: 3,
         id: 7,
+        bound: false,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
     assert_eq!(
         json,
         r#"{"name":"my-ws","path":"/tmp/tome/workspaces/my-ws","catalogs_inherited":3,"id":7}"#,
+    );
+}
+
+/// #321 `--bind`: the `bound` field is present ONLY when true. When false
+/// (every pre-#321 form) it is `skip_serializing_if`-elided, keeping the
+/// init wire shape byte-identical.
+#[cfg(unix)]
+#[test]
+fn init_outcome_bound_field_present_only_when_true() {
+    let unbound = InitOutcome {
+        name: WorkspaceName::parse("my-ws").unwrap(),
+        path: PathBuf::from("/tmp/tome/workspaces/my-ws"),
+        catalogs_inherited: 0,
+        id: 7,
+        bound: false,
+    };
+    let json = serde_json::to_string(&unbound).expect("serialise");
+    assert!(
+        !json.contains("\"bound\""),
+        "bound must be elided when false; got: {json}",
+    );
+
+    let bound = InitOutcome {
+        name: WorkspaceName::parse("my-ws").unwrap(),
+        path: PathBuf::from("/tmp/tome/workspaces/my-ws"),
+        catalogs_inherited: 0,
+        id: 7,
+        bound: true,
+    };
+    let json = serde_json::to_string(&bound).expect("serialise");
+    assert_eq!(
+        json,
+        r#"{"name":"my-ws","path":"/tmp/tome/workspaces/my-ws","catalogs_inherited":0,"id":7,"bound":true}"#,
     );
 }
 
@@ -36,6 +70,7 @@ fn init_outcome_json_field_order_is_pinned() {
         path: PathBuf::from("x"),
         catalogs_inherited: 0,
         id: 1,
+        bound: false,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
     let name_idx = json.find("\"name\"").expect("name field present");

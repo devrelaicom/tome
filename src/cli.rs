@@ -686,12 +686,16 @@ pub enum WorkspaceCommand {
     /// to remove the reserved `global` workspace (exit 15). Refuses
     /// without `--force` when ≥ 1 project is bound (exit 16).
     Remove(WorkspaceRemoveArgs),
-    /// Bind the current project directory to the named workspace.
-    /// Creates / overwrites `<cwd>/.tome/config.toml` so subsequent
-    /// Tome invocations from this tree resolve to `<name>` via the
-    /// project-marker walk. The atomic-directory landing means a
-    /// SIGINT mid-bind never leaves a partial `.tome/`. Phase 4 / US1.a
-    /// stubs the harness-sync seam; US1.b wires the real sync.
+    /// Bind the current project directory to a workspace. Creates /
+    /// overwrites `<cwd>/.tome/config.toml` so subsequent Tome invocations
+    /// from this tree resolve to `<name>` via the project-marker walk. The
+    /// atomic-directory landing means a SIGINT mid-bind never leaves a
+    /// partial `.tome/`.
+    ///
+    /// `--create` creates the workspace (create-if-absent) before binding —
+    /// `init` + `use` in one step. Omit `<name>` on a terminal to pick from
+    /// a list of existing workspaces; on a non-terminal an omitted name is a
+    /// usage error (exit 54).
     ///
     /// Note: the `<name>` argument always takes precedence; the global
     /// `--workspace` flag is ignored for this subcommand.
@@ -713,9 +717,14 @@ pub struct WorkspaceRemoveArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct WorkspaceUseArgs {
-    /// Workspace name (must already exist in the central registry; create
-    /// via `tome workspace init <name>`).
-    pub name: String,
+    /// Workspace name. Must already exist in the central registry unless
+    /// `--create` is passed (then it is created-if-absent first). Omit the
+    /// name on a terminal to pick from a list of existing workspaces.
+    pub name: Option<String>,
+    /// Create the workspace (create-if-absent) before binding, so `init` +
+    /// `use` happen in one step. Requires an explicit `<name>`.
+    #[arg(long)]
+    pub create: bool,
     /// Bypass the refusal when CWD is the user's home directory or the
     /// filesystem root. Required only for genuinely unusual project roots
     /// (e.g. binding `/` for a system-management workflow).
@@ -746,6 +755,11 @@ pub struct WorkspaceInitArgs {
     /// catalogs, the flag is a documented no-op.
     #[arg(long = "inherit-global")]
     pub inherit_global: bool,
+    /// Bind the current directory to the freshly-created workspace (the
+    /// mirror of `tome workspace use --create`), running harness sync in
+    /// the same step.
+    #[arg(long)]
+    pub bind: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -771,11 +785,12 @@ pub struct WorkspaceRenameArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct WorkspaceRegenSummaryArgs {
-    /// Workspace to regenerate summaries for. Required — `regen-summary`
-    /// is the explicit summarisation command; we don't want the user to
-    /// accidentally regenerate the resolved scope (often `global`) by
-    /// forgetting an argument.
-    pub name: String,
+    /// Workspace to regenerate summaries for. Defaults to the resolved
+    /// scope when omitted, but only after an interactive confirmation — so
+    /// the user can't accidentally regenerate the resolved scope (often
+    /// `global`) by forgetting an argument. On a non-terminal, the name is
+    /// required (exit 54): we never silently regenerate the resolved scope.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

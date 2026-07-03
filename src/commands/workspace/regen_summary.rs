@@ -6,6 +6,13 @@
 //! the bundled Qwen), and emits the outcome. A foreground provider failure
 //! PROPAGATES (fail-loud, exit 94 — FR-027).
 //!
+//! Issue #321 makes the `<name>` positional optional. With a name it is
+//! byte-identical to the pre-#321 behaviour (no confirmation — the explicit
+//! name IS the confirmation). Omitted, it resolves the workspace from the
+//! scope (mirroring `info [<name>]`) and CONFIRMS before regenerating; on a
+//! non-terminal it refuses ([`TomeError::NotATerminal`], exit 54) so it never
+//! silently regenerates the resolved (often `global`) scope.
+//!
 //! `run_with_summariser` is the dependency-injection seam used by
 //! tests — it bypasses the production summariser selection and accepts a
 //! `&dyn Summariser` directly.
@@ -16,17 +23,48 @@ use crate::cli::WorkspaceRegenSummaryArgs;
 use crate::error::TomeError;
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
+use crate::presentation::prompt;
 use crate::summarise::prompts::validate_long_max_chars;
 use crate::summarise::{LONG_MAX_CHARS, Summariser, build_summariser};
 use crate::workspace::{self, RegenSummaryOutcome, ResolvedScope, WorkspaceName};
 
 pub fn run(
     args: WorkspaceRegenSummaryArgs,
-    _scope: &ResolvedScope,
+    scope: &ResolvedScope,
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
-    let name = WorkspaceName::parse(&args.name)?;
+    // Resolve the target name, and decide whether a confirmation gate
+    // applies. An explicit `<name>` is its own confirmation (no gate); an
+    // omitted name resolves the scope + gates behind an interactive confirm.
+    let name = match args.name.as_deref() {
+        Some(raw) => WorkspaceName::parse(raw)?,
+        None => {
+            let resolved = scope.scope.name().clone();
+            // On a non-terminal, refuse rather than silently regenerating the
+            // resolved scope (often `global`). The name is required there.
+            if prompt::non_interactive() {
+                return Err(TomeError::Usage(format!(
+                    "workspace regen-summary requires an explicit <name> on a non-terminal; \
+                     run `tome workspace regen-summary {}`",
+                    resolved.as_str(),
+                )));
+            }
+            // `prompt::confirm` refuses up front on a non-terminal (exit 54).
+            let ok = prompt::confirm(
+                &format!(
+                    "Regenerate summaries for workspace `{}`?",
+                    resolved.as_str()
+                ),
+                false,
+            )?;
+            if !ok {
+                // Declined — a clean no-op (exit 0).
+                return Ok(());
+            }
+            resolved
+        }
+    };
     // Load config strictly (exit 5 on malformed) — the explicit regen-summary
     // command surfaces config errors loudly. `build_summariser` selects a remote
     // provider summariser when `[summariser] provider` is set, else the bundled

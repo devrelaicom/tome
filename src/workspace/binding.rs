@@ -63,6 +63,15 @@ pub struct BindOutcome {
     /// names that prior workspace. `None` on first bind or when re-binding
     /// to the same workspace.
     pub rebind_from: Option<WorkspaceName>,
+    /// True when this bind was preceded by a workspace *creation*
+    /// (`tome workspace use --create` / `tome workspace init --bind`
+    /// created the workspace before binding). `bind_project` itself never
+    /// creates a workspace, so it always returns `false`; the CLI wrapper
+    /// flips it when it ran the create path. `#[serde(skip_serializing_if)]`
+    /// keeps the pre-#321 `use`/`init` JSON byte-identical: the field is
+    /// absent unless a creation actually happened.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub created: bool,
     /// Filled by the CLI wrapper after the (stubbed in US1.a) harness
     /// sync runs. Always `None` when returned from this module directly.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,6 +268,9 @@ pub fn bind_project(
         project_root: canonical_target,
         created_marker,
         rebind_from,
+        // `bind_project` never creates a workspace; the CLI wrapper flips
+        // this when it ran the create path before us.
+        created: false,
         sync: None,
     })
 }
