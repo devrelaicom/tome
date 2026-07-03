@@ -139,8 +139,8 @@ nothing until you enable them.
   the next sync. Pass `--sync` to apply the change to your harnesses inline: it
   runs the same propagation as `tome sync` over every bound project.
 - `tome plugin list` can be narrowed. `--filter <substr>` keeps only plugins
-  whose name or description contains the (case-insensitive) substring; `--tier
-  <1|2|3>` keeps only plugins with at least one enabled entry at that
+  whose name or description contains the (case-insensitive) substring;
+  `--tier <1|2|3>` keeps only plugins with at least one enabled entry at that
   [routing tier](../getting-started/concepts.md#routing-tier). Both compose with
   each other and with `--catalog`. `tome plugin show <name> --details` annotates
   each entry line with its routing tier.
