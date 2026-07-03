@@ -46,7 +46,8 @@ tome workspace init --bind <name>   # create a workspace and bind this directory
 tome workspace use <name>           # bind this directory to an existing workspace
 tome workspace use --create <name>  # create-if-absent, then bind — one step
 tome workspace use                  # pick a workspace to bind from a list
-tome workspace list                 # list workspaces
+tome workspace current              # print the bound workspace name (one line, for prompts/scripts)
+tome workspace list                 # list workspaces, marking the active one and last-used times
 tome workspace info                 # show the active workspace and its composition
 tome workspace rename <a> <b>       # rename a workspace
 tome workspace remove <name>        # remove a workspace
@@ -57,12 +58,31 @@ mirrors of each other: both create the workspace (create-if-absent for `use
 --create`) and bind the current directory in a single step. Run `tome workspace
 use` with no name on a terminal to choose from a picker.
 
+`tome workspace current` prints just the bound workspace name on one line, so it
+drops into a shell prompt or a script: `$(tome workspace current 2>/dev/null)`
+yields the name when a workspace is bound to this directory and the empty string
+when nothing is. When nothing is bound it writes nothing to stdout and exits
+non-zero, so the `2>/dev/null` catches the message and the substitution collapses
+to empty rather than to an error.
+
+`tome workspace list` marks the workspace resolved for the current directory with
+a `*` in the `Cur` column, and renders `Last used` as a relative time by default
+(`2 days ago`). Pass `--absolute` to force an exact RFC 3339 timestamp instead.
+
 ## Project binding
 
 A workspace can be **bound** to one or more project directories, so the right
 composition activates automatically when you work in that project. Catalog and
 plugin enablement is recorded per workspace as the source of truth, rather than
 globally.
+
+A global `[workspace] default` overrides a project marker. When one is set, the
+default wins and the per-project binding goes inactive: harness sync,
+`${TOME_PROJECT_DIR}`, and the status `harness_mcp` report stop tracking the
+project. Tome prints a one-line `note:` on stderr when this happens, so the
+shadowing is never silent. To restore the per-project binding, unset `[workspace]
+default` or run `tome workspace use` in the project. The config-reference version
+of this note lives under [Project markers](../reference/config.md#project-markers).
 
 ## Composition
 
