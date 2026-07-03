@@ -540,8 +540,23 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // resource directory, so `resources` is empty and `resource_bodies` stays
     // `None`), inline the byte-capped subset of `resources`. The reads are
     // synchronous file I/O bounded per-file + in total, so run them on the
-    // blocking pool per the sync-boundary discipline. The paths were already
-    // symlink-refused at enumeration (`walk_dir`) — no new unguarded read.
+    // blocking pool per the sync-boundary discipline.
+    //
+    // Symlink caveat (accepted-risk TOCTOU): `walk_dir` lstat-refuses symlinks
+    // at ENUMERATION time, so no symlink lands in `resources` in the common
+    // case. But `inline_resource_bodies` then RE-OPENS each already-enumerated
+    // path (`bounded_read_to_string` → `File::open`, which FOLLOWS symlinks) in
+    // a later `spawn_blocking`. A hostile concurrent `rename(2)` swapping an
+    // enumerated regular file for a symlink between the two blocking tasks would
+    // let the reader follow it — and because #333 now returns file *content*,
+    // that escalates the residual window from path-disclosure (enumeration-only)
+    // to content-disclosure. This is the SAME accepted-risk trust model that
+    // governs `get_skill_info::walk_resources` (the US4.d C-1 note there,
+    // lstat-then-`read_dir` TOCTOU): the walked directory is inside a catalog
+    // clone the user EXPLICITLY enabled — trusted-on-enrol, not trusted-on-read.
+    // Closing it would need per-FD `O_NOFOLLOW`/`cap-std`, a new dependency the
+    // project avoids; deferred until a real threat materialises. NOT a new
+    // unguarded read path — it reuses the shared bounded-read guard.
     let resource_bodies = if input.include_resource_bodies
         && matches!(resolved_kind, crate::plugin::identity::EntryKind::Skill)
     {

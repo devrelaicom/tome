@@ -1211,6 +1211,79 @@ fn get_skill_command_omits_resource_bodies() {
     );
 }
 
+/// #333 symlink-omission parity (mirrors
+/// `get_skill_info::walk_resources_skips_symlinks`): a symlinked resource is
+/// NEVER enumerated by `walk_dir` (lstat-refused), so it CANNOT be inlined by
+/// the new `include_resource_bodies` read path — it appears in neither
+/// `resources` nor `resource_bodies`, while the real sibling file is inlined.
+/// Locks the by-construction symlink omission at the inline read site.
+#[cfg(unix)]
+#[test]
+fn get_skill_inline_omits_symlinked_resource() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+
+    let skill_body = "---\nname: link-res\ndescription: has a symlink resource.\n---\nbody\n";
+    let catalog_root = stage_workspace(&tmp, &paths, &[("link-res", skill_body)], &[]);
+
+    // A real resource file (inlined) + a symlink to an out-of-dir secret. The
+    // symlink target lives OUTSIDE the skill dir so, if the skip regressed, the
+    // symlink (not a coincidental real sibling) would be the thing enumerated.
+    write_skill_resource(&catalog_root, "link-res", "real.txt", b"real content\n");
+    let secret_tmp = TempDir::new().unwrap();
+    let secret = secret_tmp.path().join("secret.txt");
+    fs::write(&secret, "SECRET").unwrap();
+    let skill_dir = catalog_root.join("plug").join("skills").join("link-res");
+    std::os::unix::fs::symlink(&secret, skill_dir.join("link.txt")).unwrap();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let out = rt
+        .block_on(get_skill::handle(
+            build_state(&paths, PromptRegistry::default()),
+            get_skill::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "link-res".into(),
+                raw: false,
+                include_resource_bodies: true,
+            },
+        ))
+        .expect("get_skill ok");
+
+    // The symlink is enumerated by neither the path list nor the inline view.
+    assert!(
+        !out.resources.iter().any(|p| p.ends_with("link.txt")),
+        "symlinked resource must not be enumerated in `resources`; got: {:?}",
+        out.resources,
+    );
+    assert!(
+        out.resources.iter().any(|p| p.ends_with("real.txt")),
+        "the real sibling resource must be enumerated",
+    );
+
+    let bodies = out.resource_bodies.expect("resource_bodies present");
+    assert!(
+        !bodies.iter().any(|b| b.path.ends_with("link.txt")),
+        "symlinked resource must NOT be inlined; got: {bodies:?}",
+    );
+    // Defence in depth: the secret content must never leak into any inlined body.
+    assert!(
+        !bodies.iter().any(|b| b.content.contains("SECRET")),
+        "out-of-dir secret content must never appear in resource_bodies",
+    );
+    // The real file IS inlined with byte-exact content.
+    assert_eq!(
+        bodies.len(),
+        1,
+        "only the real resource inlines; got: {bodies:?}"
+    );
+    assert!(bodies[0].path.ends_with("real.txt"));
+    assert_eq!(bodies[0].content, "real content\n");
+}
+
 /// #333 back-compat: an `Input` JSON omitting `include_resource_bodies`
 /// deserializes to `false` under `deny_unknown_fields` (the `#[serde(default)]`).
 #[test]

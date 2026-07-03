@@ -419,6 +419,15 @@ struct LookupHit {
 /// `unknown_skill` error `data` (and the ambiguous-glob candidate list), so an
 /// agent that mistyped a name — or globbed too broadly — sees what IS available
 /// for `(catalog, plugin)` without round-tripping back to `search_skills`.
+///
+/// Intentional kind-scope asymmetry (do NOT unify the two uses): the
+/// `unknown_skill` `available` list is deliberately kind-AGNOSTIC — it lists
+/// EVERY enabled entry the caller could ask for in that `(catalog, plugin)`,
+/// across all kinds, because a miss means the caller doesn't yet know which
+/// entry (or kind) exists. The `AmbiguousGlob` `candidates` list is deliberately
+/// kind-SCOPED — it lists only the enabled entries of the REQUESTED `kind` that
+/// the glob matched, because the caller already committed to a kind and just
+/// needs to disambiguate a concrete name within it.
 struct AvailableEntry {
     name: String,
     kind: EntryKind,
