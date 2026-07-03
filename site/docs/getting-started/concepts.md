@@ -65,6 +65,28 @@ A plugin contributes four kinds of **entry**:
 - **Hook** — an event-driven action wired into the harness (for example, real
   Claude Code hooks).
 
+## Routing tier
+
+Every enabled skill and command has a **routing tier** in each workspace: a
+number from `1` to `3` that decides how the agent is told to reach it. **Tier 3**
+is the default — the agent finds the entry through semantic search (`search_skills`)
+when a task calls for it, and nothing is loaded up front. **Tier 1** and **Tier 2**
+raise an entry's priority: Tome injects an instruction into the harness's rules
+file so the agent knows to fetch it directly with `get_skill`. Tier 1 entries are
+loaded at session start; Tier 2 entries are loaded when the task matches the
+entry's description.
+
+Tiers are per-workspace, so the same skill can be search-only in one project and
+loaded up front in another. Agents carry no tier; only skills and commands do.
+
+```bash
+tome tier set <plugin>/<name> 1
+```
+
+See [`tome tier`](../reference/commands.md#tome-tier) for the full command surface,
+and `tome plugin list --tier` / `tome plugin show --details` to see the tiers your
+enabled entries currently hold.
+
 ## Workspace
 
 A **workspace** is a per-project scope. Different workspaces can enable different

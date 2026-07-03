@@ -84,7 +84,7 @@ Common cases:
 | The index is busy (another process holds the lock) | `50` | Wait for it to finish; `tome status` is always safe meanwhile. |
 | `catalog remove` refuses — plugins still enabled | `53` | Disable them first, or `--force` to cascade. |
 | A required model is missing | `30` | `tome models download`. |
-| Embedder name or version drift between index and models | `41` / `42` | `tome reindex --force`. |
+| Embedder name or version drift between index and models | `41` / `42` | Run a **bare** `tome reindex` (add `--force` to rebuild every skill). Recovering from drift, or switching embedders, needs the whole-index form — a scoped reindex is refused under drift (exit `47`). |
 | `create`/`convert` refuses to overwrite existing output | `81` | Choose a fresh `--output`, or pass `--force`. |
 | `lint` found errors, or warnings under `--strict` | `85` / `86` | These are verdicts, not crashes — fix the findings. See [Linting](../authoring/lint.md). |
 
@@ -96,9 +96,15 @@ The complete table, codes 0–89, is in
 - **A harness's config drifted** — run `tome harness sync`, or
   `tome doctor --fix` to reconcile rules, MCP wiring, agents, and hooks from
   current state.
-- **Search returns nothing or stale results** — reindex the affected scope:
-  `tome reindex` (everything), `tome reindex <catalog>`, or
-  `tome reindex <catalog>/<plugin>`. Add `--force` to rebuild from scratch.
+- **Search returns nothing or stale results** — reindex the affected scope.
+  `tome reindex` alone rebuilds everything; positional scopes are variadic and
+  accept `*` globs (`tome reindex "<catalog>/*"`, `tome reindex "compact-*"`),
+  and `--catalog` / `--plugin` (both repeatable) select by named flag. Add
+  `--force` to re-embed every in-scope skill regardless of its content hash. See
+  the [reindex reference](../reference/commands.md#tome-reindex) for the full
+  form list. One caveat: only a bare `tome reindex` restamps the embedder
+  identity, so a scoped reindex is refused under embedder drift (exit `47`) —
+  recover with the bare form.
 - **An installed meta skill is missing, stale, or modified** — `tome doctor`
   reports it; `tome doctor --fix` re-installs from the bundled copy. See
   [Meta skills](./meta-skills.md).

@@ -19,7 +19,27 @@ tome catalog add devrelaicom/midnight-expert-tome
 
 Tome clones the repository, parses every plugin manifest it finds, and
 registers the catalog under a short name — here `midnight-expert`, thirteen
-plugins in a single add. Inspect what was added:
+plugins in a single add. The output reports the resolved HEAD commit: the short
+SHA in human output, the full 40-char SHA in `--json` under `added.commit`.
+
+The source can be an `owner/repo` shorthand (GitHub), a git URL, or a local
+path. The shorthand also takes a forge prefix, so GitLab and Bitbucket get the
+same ergonomics as GitHub instead of being read as a local path:
+
+```bash
+tome catalog add gh:owner/repo          # GitHub (same as the bare owner/repo)
+tome catalog add gl:owner/repo          # GitLab
+tome catalog add bb:owner/repo          # Bitbucket
+```
+
+Pin a ref with `--ref`, or its aliases `--branch` and `--tag` (a branch, tag, or
+SHA; default `main`), and override the display name with `--name`, short `-n`:
+
+```bash
+tome catalog add gh:owner/repo --tag v1.2.0 -n my-catalog
+```
+
+Inspect what was added:
 
 ```bash
 tome catalog show midnight-expert
@@ -114,6 +134,16 @@ nothing until you enable them.
   silent no-op, and a batch that hits a bad id still processes the good ones and
   reports the failure at the end. The same applies to `tome plugin disable`,
   which asks for a single confirmation naming every plugin in the batch.
+- `enable` and `disable` update the index only. Without `--sync` they print a
+  reminder to run `tome sync`, so your harnesses drop or pick up the entries on
+  the next sync. Pass `--sync` to apply the change to your harnesses inline: it
+  runs the same propagation as `tome sync` over every bound project.
+- `tome plugin list` can be narrowed. `--filter <substr>` keeps only plugins
+  whose name or description contains the (case-insensitive) substring;
+  `--tier <1|2|3>` keeps only plugins with at least one enabled entry at that
+  [routing tier](../getting-started/concepts.md#routing-tier). Both compose with
+  each other and with `--catalog`. `tome plugin show <name> --details` annotates
+  each entry line with its routing tier.
 - Bare `tome plugin` opens an interactive picker — catalog → plugin → action —
   useful when you want to pick from a list instead of typing names.
 
