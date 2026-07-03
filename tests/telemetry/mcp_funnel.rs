@@ -269,6 +269,8 @@ fn search_then_get_skill_emits_funnel_with_rank() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
@@ -347,6 +349,8 @@ fn get_skill_info_emits_entry_info_with_rank() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
@@ -440,6 +444,8 @@ fn unknown_host_harness_omits_calling_harness() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
@@ -479,6 +485,8 @@ fn tool_call_returns_promptly_with_loopback_endpoint() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
@@ -524,6 +532,8 @@ fn search_on_allowlisted_catalog_emits_attributed_search_result() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))

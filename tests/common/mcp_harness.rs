@@ -357,6 +357,8 @@ pub fn search_input(query: &str) -> search_skills::Input {
         top_k: Some(10),
         catalog: None,
         plugin: None,
+        kind: None,
+        min_score: None,
         description_max_chars: Some(150),
     }
 }

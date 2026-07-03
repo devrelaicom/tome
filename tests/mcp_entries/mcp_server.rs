@@ -246,6 +246,94 @@ fn get_skill_info_kind_schema_description_names_all_valid_kinds() {
 }
 
 #[test]
+fn search_skills_input_schema_advertises_kind_and_min_score() {
+    // #320: the `search_skills` input schema (what `tools/list` exposes to an
+    // agent) must advertise the two new OPTIONAL filters so a client can
+    // discover them: `kind` (a closed enum skill/command/agent) and `min_score`
+    // (a number). Both carry `#[serde(default)]` ⇒ NEITHER is in `required`.
+    // A rename, type change, dropped enum variant, or accidental promotion to
+    // required flips this test red.
+    let tools = Server::tool_router().list_all();
+    let search = tools
+        .iter()
+        .find(|t| t.name == "search_skills")
+        .expect("search_skills advertised");
+    let schema = &search.input_schema;
+
+    let properties = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("input schema has a `properties` object");
+
+    // -- `kind`: an optional closed enum (skill/command/agent) -----------------
+    // schemars renders `Option<EntryKind>` as `anyOf: [ {$ref EntryKind}, null ]`,
+    // with the enum values under `$defs/EntryKind`. Resolve the ref and assert
+    // the three valid kinds are all present.
+    let kind = properties
+        .get("kind")
+        .expect("input schema advertises the `kind` property (#320)");
+    let kind_ref = kind
+        .get("anyOf")
+        .and_then(|a| a.as_array())
+        .and_then(|arms| arms.iter().find_map(|arm| arm.get("$ref")))
+        .and_then(|r| r.as_str())
+        .expect("`kind` is `anyOf [ $ref, null ]` (an optional EntryKind)");
+    assert_eq!(
+        kind_ref, "#/$defs/EntryKind",
+        "`kind` must reference the shared EntryKind enum; got: {kind_ref}",
+    );
+    let entry_kind_enum = schema
+        .get("$defs")
+        .and_then(|d| d.get("EntryKind"))
+        .and_then(|e| e.get("enum"))
+        .and_then(|e| e.as_array())
+        .expect("$defs.EntryKind carries an `enum` array");
+    let variants: Vec<&str> = entry_kind_enum.iter().filter_map(|v| v.as_str()).collect();
+    for value in ["skill", "command", "agent"] {
+        assert!(
+            variants.contains(&value),
+            "the `kind` enum must offer `{value}`; got: {variants:?}",
+        );
+    }
+
+    // -- `min_score`: an optional number ---------------------------------------
+    // schemars renders `Option<f32>` as `type: ["number", "null"]`.
+    let min_score = properties
+        .get("min_score")
+        .expect("input schema advertises the `min_score` property (#320)");
+    let types: Vec<&str> = min_score
+        .get("type")
+        .and_then(|t| t.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .expect("`min_score` carries a `type` array");
+    assert!(
+        types.contains(&"number"),
+        "`min_score` must be a number in the input schema; got type: {types:?}",
+    );
+
+    // -- `required`: only `query`; the two defaulted filters must NOT appear ---
+    // Assert UNCONDITIONALLY (a future schemars change that dropped it must fail
+    // here, not skip the check).
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .expect("search_skills input schema has a `required` array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        required.contains(&"query"),
+        "`query` must remain required; got: {required:?}",
+    );
+    for defaulted in ["kind", "min_score"] {
+        assert!(
+            !required.contains(&defaulted),
+            "`{defaulted}` is defaulted (optional) and must not be in `required`; got: {required:?}",
+        );
+    }
+}
+
+#[test]
 fn descriptions_do_not_enumerate_fixture_identifiers() {
     // FR-108: the tool descriptions must NOT name any specific catalog,
     // plugin, or skill identifier. We assert against the identifiers
@@ -299,6 +387,8 @@ fn search_skills_rejects_top_k_out_of_range() {
                 top_k: Some(0),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
@@ -318,6 +408,8 @@ fn search_skills_rejects_top_k_out_of_range() {
                 top_k: Some(101),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
@@ -347,6 +439,8 @@ fn search_skills_rejects_plugin_without_catalog() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: Some("writers".into()),
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
@@ -386,6 +480,8 @@ fn search_skills_returns_unknown_catalog_for_missing_name() {
                 top_k: Some(10),
                 catalog: Some("nonexistent".into()),
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))

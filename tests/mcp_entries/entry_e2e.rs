@@ -617,6 +617,8 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
@@ -884,6 +886,8 @@ fn matrix_plugin_filters_searches_and_prompts_per_flag_combination() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))

@@ -93,6 +93,8 @@ fn search_skills_catalog_filter_resolves_from_db_without_config() {
             top_k: Some(10),
             catalog: Some(staged.catalog_name.clone()),
             plugin: None,
+            kind: None,
+            min_score: None,
             description_max_chars: Some(150),
         })
         .expect("search_skills --catalog must resolve from the DB (no config.toml)");
@@ -117,6 +119,8 @@ fn search_skills_unknown_catalog_filter_still_errors_without_config() {
             top_k: Some(10),
             catalog: Some("ghost-catalog".into()),
             plugin: None,
+            kind: None,
+            min_score: None,
             description_max_chars: Some(150),
         })
         .expect_err("an absent catalog filter must still reject");
