@@ -41,8 +41,14 @@ pub fn run(
     // Resolve SOURCE to a local root: a local path is used in place; a remote
     // (`owner/repo`, git URL) is shallow-cloned into a temp dir whose `Drop`
     // guarantees cleanup on every exit path. `_clone` is held for the whole
-    // conversion (NFR-003).
-    let (source_root, _clone) = resolve_source(&args.source)?;
+    // conversion (NFR-003). `source` is a `PathBuf`; `resolve_source` operates
+    // on the string form (a local-path vs `owner/repo`/URL decision), so a
+    // non-UTF-8 source is rejected cleanly here rather than silently lossy.
+    let source = args
+        .source
+        .to_str()
+        .ok_or_else(|| TomeError::Usage("convert source path is not valid UTF-8".to_owned()))?;
+    let (source_root, _clone) = resolve_source(source)?;
 
     // The new name is the positional `<NAME>` (or `None` → `<source-name>-tome`).
     let new_name = args.name.clone();
