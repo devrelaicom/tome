@@ -44,6 +44,20 @@ pub struct Input {
     /// Format: plugin name only, NOT `<catalog>/<plugin>`.
     #[serde(default)]
     pub plugin: Option<String>,
+    /// Restrict results to one entry kind (`skill`, `command`, or `agent`).
+    /// Symmetric with the `catalog`/`plugin` filters. When absent, all kinds
+    /// are searched. (Only indexed, searchable entries are ever returned, so
+    /// `agent` typically yields nothing — agents are not searchable.)
+    #[serde(default)]
+    pub kind: Option<crate::plugin::identity::EntryKind>,
+    /// Relevance floor: drop matches scoring below this value. OPT-IN — omit
+    /// for the default behavior of returning the top_k scored results. The
+    /// scale is scoring-mode-dependent (see the output `scoring` field: a
+    /// reranked cross-encoder logit vs `1.0 − cosine distance`), so pick a
+    /// threshold appropriate to the active mode. Rejected when non-finite
+    /// (NaN / ±inf) as `invalid_min_score`.
+    #[serde(default)]
+    pub min_score: Option<f32>,
     /// Truncate each result's description at this many characters
     /// (Unicode scalar values), per FR-092. When absent, falls back to
     /// `[mcp] description_max_chars` in `~/.tome/config.toml`, then to
@@ -257,6 +271,22 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             )),
         ));
     }
+    // #320: reject a non-finite `min_score` (NaN / ±inf) before dispatching. No
+    // range clamp — the meaningful range is scoring-mode-dependent and unbounded
+    // (reranker logits can be negative or exceed 1), so only finiteness is a
+    // universal error. Mirrors the `invalid_description_max_chars` envelope.
+    if let Some(min_score) = input.min_score
+        && !min_score.is_finite()
+    {
+        return Err(McpError::invalid_params(
+            "min_score must be a finite number",
+            Some(error_data_with_code(
+                "invalid_min_score",
+                ErrorCategory::Usage,
+                &[],
+            )),
+        ));
+    }
 
     // FF3: catalog existence resolves from the `workspace_catalogs` DB, not
     // `config.toml [catalogs]` (never written in production → any `--catalog`
@@ -329,27 +359,38 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     //   config `rerank = false` → `no_rerank: true` → reranker skipped.
     //   This matters when the reranker model is not installed for the profile.
     //
-    // `strict` / `min_score` (strict_min_score) are intentionally CLI-only.
-    // MCP returns the top_k scored results and lets the agent decide; applying
-    // a strict floor would silently drop results with no visible signal to the
-    // caller.  Leave `strict: false` / `min_score: None`.
+    // #320: `min_score` is now an OPT-IN MCP input. The pipeline applies a floor
+    // ONLY under `args.strict` (non-strict mode never filters), so when the caller
+    // supplied `min_score` we set BOTH `min_score: Some(v)` AND `strict: true` to
+    // arm the floor. When it is absent we keep `strict: false` / `min_score: None`
+    // — byte-identical to the pre-#320 behavior (top_k scored results, agent
+    // decides). Dropping every result under a floor is NOT a silent drop: the #285
+    // empty-result path attaches `no_results_reason` + `hint` so the caller sees
+    // the signal.
     let no_rerank = !cfg.query.rerank.unwrap_or(true);
     // #319 widened `QueryArgs` input fields to multi-value. The MCP tool keeps
-    // its single-value surface (`Input.query`/`catalog`/`plugin` are one each),
-    // so map them onto the vec/`query` forms: the query goes through the
+    // its single-value surface (`Input.query`/`catalog`/`plugin`/`kind` are one
+    // each), so map them onto the vec/`query` forms: the query goes through the
     // single-string `query` slot (leaving `text` empty), and the optional
-    // catalog/plugin become at-most-one-element vecs (an absent filter → empty
-    // vec → no filter). `--kind` has no MCP arg, so `kind` stays empty.
+    // catalog/plugin/kind become at-most-one-element vecs (an absent filter →
+    // empty vec → no filter). #320: the single `EntryKind` maps through the
+    // symmetric `tier::set::tierkind_of` into the one-element `kind` vec — the
+    // pipeline then maps it back to `EntryKind` via `kind_of` for the filter.
+    let strict = input.min_score.is_some();
     let args = QueryArgs {
         text: Vec::new(),
         query: Some(input.query.clone()),
         top_k: Some(effective_top_k),
         catalog: input.catalog.clone().into_iter().collect(),
         plugin: input.plugin.clone().into_iter().collect(),
-        kind: Vec::new(),
+        kind: input
+            .kind
+            .map(crate::commands::tier::set::tierkind_of)
+            .into_iter()
+            .collect(),
         no_rerank,
-        strict: false,
-        min_score: None,
+        strict,
+        min_score: input.min_score,
     };
 
     // Phase 12 / US2: the embedder seed is the ACTIVE identity computed at
@@ -388,7 +429,9 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let config = crate::config::Config::default();
 
     // Capture the strict flag for the telemetry emit before `args` is moved
-    // into the blocking closure.
+    // into the blocking closure. #320: this is now `true` when the caller
+    // supplied `min_score` (the floor was armed) — the emit correctly reflects
+    // that a strict floor ran, mirroring the CLI `query::run_with_deps` emit.
     let strict = args.strict;
 
     // The pipeline calls into `rusqlite` + `fastembed`, both sync.
@@ -413,7 +456,31 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         let compute_started = Instant::now();
         let result = query::pipeline(&args, &deps);
         let compute_elapsed = compute_started.elapsed();
-        result.map(|o| (o, compute_elapsed))
+        // #320: when the OPT-IN `min_score` floor (armed via `strict: true`) drops
+        // every candidate, the pipeline returns `QueryNoResultsStrict` — the CLI's
+        // exit-40 "successful run, non-zero verdict" contract. On the MCP surface
+        // that must NOT be an error: per the issue this is a NORMAL empty result
+        // that rides the #285 empty-signal (`matches: []` + `no_results_reason` +
+        // `hint`), so the caller sees the drop rather than an opaque internal
+        // error. Translate it HERE (still in the blocking closure, where the index
+        // is cheaply re-openable) into an empty `QueryOutcome` carrying the real
+        // scope-searchable count + the active scoring mode, so all the downstream
+        // Output-building code below is unchanged and picks the right reason.
+        match result {
+            Ok(o) => Ok((o, compute_elapsed)),
+            Err(TomeError::QueryNoResultsStrict { .. }) => {
+                // Mirror the pipeline's `scoring` derivation EXACTLY
+                // (`src/commands/query.rs`: `if deps.reranker.is_some()`), not
+                // `args.no_rerank` — the MCP handler always supplies a reranker,
+                // so a non-empty result always reports `reranked`; the empty path
+                // must agree. Reading `deps.reranker.is_some()` keeps them
+                // structurally in lockstep even if the handler ever conditionally
+                // omits the reranker.
+                let empty = empty_strict_outcome(&paths, &scope, deps.reranker.is_some());
+                Ok((empty, compute_elapsed))
+            }
+            Err(e) => Err(e),
+        }
     })
     .await
     .map_err(|e| {
@@ -673,6 +740,62 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         no_results_reason,
         hint,
     })
+}
+
+/// #320: build the empty [`QueryOutcome`] that stands in for a
+/// `QueryNoResultsStrict` on the MCP surface — the OPT-IN `min_score` floor
+/// dropped every candidate. Runs ONLY on that rare path (never the hot path),
+/// so a fresh read-only open for the scope-searchable count is acceptable.
+///
+/// The `scope_searchable_count` is the load-bearing field: the downstream
+/// empty-signal branch reads it to pick `IndexEmpty` (count `0` — the scope has
+/// nothing searchable, so reindex, NOT lower the floor) vs `NoMatch` (count
+/// `> 0` — content existed but nothing cleared the floor, so rephrase / lower
+/// it). Best-effort: a count failure falls back to `0`, steering toward reindex
+/// (the safe direction).
+///
+/// `scoring` MUST match what the pipeline would report for the SAME call, so the
+/// wire field is consistent between a non-empty and a strict-empty result. The
+/// pipeline derives it from `deps.reranker.is_some()` (NOT `--no-rerank`), so the
+/// caller passes `reranker_present` = `deps.reranker.is_some()`; on the MCP path
+/// that is always `true` (the handler always supplies a reranker) → `Reranked`.
+/// Reranker drift is not re-derived here (a soft label the handler never
+/// surfaces on the empty path).
+fn empty_strict_outcome(
+    paths: &crate::paths::Paths,
+    scope: &crate::workspace::Scope,
+    reranker_present: bool,
+) -> query::QueryOutcome {
+    let scope_searchable_count = crate::index::open_read_only(&paths.index_db)
+        .ok()
+        .and_then(|conn| {
+            crate::index::query::scope_searchable_count(&conn, scope.name().as_str()).ok()
+        })
+        .unwrap_or(0);
+    // Mirror `src/commands/query.rs`: `if deps.reranker.is_some()` → Reranked.
+    let scoring = if reranker_present {
+        query::ScoringMode::Reranked
+    } else {
+        query::ScoringMode::Similarity
+    };
+    query::QueryOutcome {
+        results: Vec::new(),
+        scoring,
+        // No row remains, so the (vacuously-true) threshold passed.
+        threshold_passed: true,
+        reranker_drift: None,
+        // Whole-index bucket telemetry field — unused on this empty path (the
+        // anonymous `tome.search` reads it, but a strict-empty result reports
+        // `candidates_returned: 0` and the corpus bucket is best-effort). `0` is
+        // the safe best-effort value.
+        corpus_size: 0,
+        scope_searchable_count,
+        // A floor WAS in effect (this is the strict path); the exact threshold is
+        // not needed by any MCP output field, so `None` keeps it simple. (The CLI
+        // knobs header — the only reader of `applied_min_score` — is not on the
+        // MCP surface.)
+        applied_min_score: None,
+    }
 }
 
 /// Truncate `s` to `max` Unicode scalar values, appending the ellipsis

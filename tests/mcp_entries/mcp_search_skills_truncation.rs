@@ -246,6 +246,8 @@ fn make_input(query: &str, description_max_chars: u32) -> Input {
         top_k: Some(10),
         catalog: None,
         plugin: None,
+        kind: None,
+        min_score: None,
         description_max_chars: Some(description_max_chars),
     }
 }
@@ -694,21 +696,21 @@ fn empty_scope_with_content_elsewhere_reports_index_empty_not_no_match() {
     );
 }
 
-/// #285 review note: the `no_match` reason (populated scope, zero matches) is
-/// NOT reachable through this handler today. The MCP path forces
-/// `strict: false` / `min_score: None`, so the KNN's nearest-neighbour rows
-/// are never filtered below a threshold — a non-empty scope therefore ALWAYS
-/// yields ≥1 match. `matches.is_empty()` on the MCP path thus implies the
-/// scope had zero searchable rows (`index_empty`). The `no_match` branch is
-/// retained for correctness (it represents a legitimate Output state a future
-/// score-floored path could produce) and its WIRE SHAPE is pinned in
-/// `mcp_search_skills_json_shape::empty_matches_wire_shape_no_match`. This
-/// test documents the invariant that closes the gap the review flagged:
-/// through the real handler, an empty result is always `index_empty`.
+/// #285 review note (updated for #320): WITHOUT the opt-in `min_score` floor,
+/// the `no_match` reason (populated scope, zero matches) is NOT reachable
+/// through this handler. With `min_score` absent the MCP path keeps
+/// `strict: false` / `min_score: None`, so the KNN's nearest-neighbour rows are
+/// never filtered below a threshold — a non-empty scope therefore ALWAYS yields
+/// ≥1 match. `matches.is_empty()` on that path thus implies the scope had zero
+/// searchable rows (`index_empty`). #320 makes `no_match` reachable ONLY when a
+/// caller supplies `min_score` (see `min_score_above_every_score_reports_no_match`
+/// below); this test pins the DEFAULT (no-floor) invariant. The `no_match` wire
+/// shape is pinned in
+/// `mcp_search_skills_json_shape::empty_matches_wire_shape_no_match`.
 #[test]
 fn non_strict_handler_never_reports_no_match_for_populated_scope() {
-    // A populated scope, queried in-scope: must return matches (never empty),
-    // so the `no_match` branch is not taken.
+    // A populated scope, queried in-scope with NO `min_score`: must return
+    // matches (never empty), so the `no_match` branch is not taken.
     let body = "---\nname: present\ndescription: Present in this scope.\n---\nbody\n";
     let (_tmp, paths) = stage_workspace(&[("present", body)], &[]);
     let state = build_state(&paths);
@@ -727,5 +729,304 @@ fn non_strict_handler_never_reports_no_match_for_populated_scope() {
         "scope-effective corpus_size ({}) must be >= the returned match count ({})",
         out.corpus_size,
         out.matches.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #320: OPT-IN `kind` and `min_score` input filters. INPUT-ONLY — the Output
+// wire shape is unchanged (a normal non-empty result is byte-identical; the
+// empty-under-floor case rides the existing #285 empty-signal).
+// ---------------------------------------------------------------------------
+
+/// A `search_skills::Input` with the #320 filters set. `min_score` is opt-in;
+/// `kind` restricts to one entry kind. Both default to `None` via `make_input`.
+fn input_with_filters(query: &str, kind: Option<EntryKind>, min_score: Option<f32>) -> Input {
+    Input {
+        query: query.into(),
+        top_k: Some(10),
+        catalog: None,
+        plugin: None,
+        kind,
+        min_score,
+        description_max_chars: Some(150),
+    }
+}
+
+#[test]
+fn kind_filter_narrows_results_to_commands_only() {
+    // #320: a workspace holding BOTH a skill and a command. `kind: command`
+    // must return ONLY the command — the skill is filtered out even though it
+    // would otherwise rank. Symmetric with the catalog/plugin filters.
+    let skill_body = "---\nname: deploy-skill\ndescription: A deploy skill.\n---\nbody\n";
+    let cmd_body = "---\nname: deploy-cmd\ndescription: A deploy command.\n---\nGo.\n";
+    let (_tmp, paths) =
+        stage_workspace(&[("deploy-skill", skill_body)], &[("deploy-cmd", cmd_body)]);
+    let state = build_state(&paths);
+
+    // No filter: both kinds must be present (baseline).
+    let unfiltered = invoke(
+        build_state(&paths),
+        input_with_filters("deploy", None, None),
+    )
+    .expect("unfiltered search ok");
+    assert!(
+        unfiltered
+            .matches
+            .iter()
+            .any(|m| matches!(m.kind, EntryKind::Skill)),
+        "baseline must include the skill; got: {:?}",
+        unfiltered
+            .matches
+            .iter()
+            .map(|m| m.kind)
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        unfiltered
+            .matches
+            .iter()
+            .any(|m| matches!(m.kind, EntryKind::Command)),
+        "baseline must include the command; got: {:?}",
+        unfiltered
+            .matches
+            .iter()
+            .map(|m| m.kind)
+            .collect::<Vec<_>>(),
+    );
+
+    // `kind: command` must drop the skill.
+    let out = invoke(
+        state,
+        input_with_filters("deploy", Some(EntryKind::Command), None),
+    )
+    .expect("kind-filtered search ok");
+    assert!(
+        !out.matches.is_empty(),
+        "the command must still be returned under kind: command"
+    );
+    assert!(
+        out.matches
+            .iter()
+            .all(|m| matches!(m.kind, EntryKind::Command)),
+        "kind: command must return ONLY commands; got kinds: {:?}",
+        out.matches.iter().map(|m| m.kind).collect::<Vec<_>>(),
+    );
+    assert!(
+        out.matches.iter().all(|m| m.name != "deploy-skill"),
+        "the skill row must be filtered out; got names: {:?}",
+        out.matches
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn kind_filter_skill_excludes_commands() {
+    // The mirror of the above: `kind: skill` returns only the skill.
+    let skill_body = "---\nname: build-skill\ndescription: A build skill.\n---\nbody\n";
+    let cmd_body = "---\nname: build-cmd\ndescription: A build command.\n---\nGo.\n";
+    let (_tmp, paths) = stage_workspace(&[("build-skill", skill_body)], &[("build-cmd", cmd_body)]);
+    let state = build_state(&paths);
+
+    let out = invoke(
+        state,
+        input_with_filters("build", Some(EntryKind::Skill), None),
+    )
+    .expect("kind-filtered search ok");
+    assert!(
+        !out.matches.is_empty(),
+        "the skill must still be returned under kind: skill"
+    );
+    assert!(
+        out.matches
+            .iter()
+            .all(|m| matches!(m.kind, EntryKind::Skill)),
+        "kind: skill must return ONLY skills; got kinds: {:?}",
+        out.matches.iter().map(|m| m.kind).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn min_score_below_every_score_keeps_all_results() {
+    // #320: a floor well below every possible score (reranker/similarity scores
+    // are <= ~1.0; -100.0 is below any) must NOT drop anything — the result set
+    // matches the unfiltered baseline.
+    let body = "---\nname: keepme\ndescription: A findable skill.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("keepme", body)], &[]);
+
+    let baseline = invoke(
+        build_state(&paths),
+        input_with_filters("keepme", None, None),
+    )
+    .expect("baseline search ok");
+    let floored = invoke(
+        build_state(&paths),
+        input_with_filters("keepme", None, Some(-100.0)),
+    )
+    .expect("floored search ok");
+
+    assert!(!baseline.matches.is_empty(), "baseline must return matches");
+    assert_eq!(
+        floored.matches.len(),
+        baseline.matches.len(),
+        "a floor below every score must not drop any result",
+    );
+    // A retained result must NOT carry the empty-signal fields.
+    assert!(
+        floored.no_results_reason.is_none(),
+        "a non-empty floored result must not carry no_results_reason"
+    );
+    assert!(
+        floored.hint.is_none(),
+        "a non-empty floored result must not carry a hint"
+    );
+}
+
+#[test]
+fn min_score_above_every_score_reports_no_match_with_signal() {
+    // #320: a floor above every possible score drops EVERY match. On the MCP
+    // surface that is NOT an error (the CLI's exit-40 `QueryNoResultsStrict`) —
+    // it is a normal empty result that rides the #285 empty-signal:
+    // `matches: []` + `no_results_reason: NoMatch` + a rephrase hint. The scope
+    // HAS searchable content, so the reason is `NoMatch` (rephrase / lower the
+    // floor), NOT `IndexEmpty` (reindex).
+    let body = "---\nname: hidden-by-floor\ndescription: A findable skill.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("hidden-by-floor", body)], &[]);
+    let state = build_state(&paths);
+
+    // 100.0 is far above any reranker logit / similarity score the stub produces.
+    let out = invoke(
+        state,
+        input_with_filters("hidden-by-floor", None, Some(100.0)),
+    )
+    .expect("a floor that drops all results is a NORMAL empty result, not an error");
+
+    assert!(
+        out.matches.is_empty(),
+        "a floor above every score must drop all matches; got {} matches",
+        out.matches.len()
+    );
+    assert_eq!(
+        out.no_results_reason,
+        Some(NoResultsReason::NoMatch),
+        "a populated scope emptied by the floor must report no_results_reason = no_match"
+    );
+    let hint = out.hint.expect("no_match must carry a hint");
+    assert!(
+        hint.contains("rephrasing") || hint.contains("broadening"),
+        "no_match hint must point at rephrasing/broadening (not reindex); got: {hint:?}"
+    );
+    assert!(
+        !hint.contains("reindex"),
+        "no_match hint must NOT mention reindex (that's the index_empty path); got: {hint:?}"
+    );
+    // The scope had searchable content — corpus_size (scope-effective) must be > 0
+    // so the reason is `no_match`, not `index_empty`.
+    assert!(
+        out.corpus_size > 0,
+        "a scope with content emptied by the floor must report corpus_size > 0, got {}",
+        out.corpus_size
+    );
+    // M-1 regression guard: the `scoring` wire field on the strict-empty path
+    // must match what a NON-empty MCP result reports. The MCP handler always
+    // supplies a reranker, so a non-empty result is always `reranked` — the
+    // strict-empty path must agree (it must NOT derive from `--no-rerank`).
+    assert_eq!(
+        out.scoring, "reranked",
+        "strict-empty scoring must match the non-empty MCP path (reranker always present); got {:?}",
+        out.scoring
+    );
+}
+
+#[test]
+fn min_score_nan_rejected_as_invalid_min_score() {
+    // #320: a non-finite `min_score` (NaN here) is rejected with the
+    // `invalid_min_score` MCP envelope before the pipeline runs — mirroring the
+    // `invalid_description_max_chars` validation. No range clamp (the meaningful
+    // range is scoring-mode-dependent and unbounded); only finiteness is checked.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+    fs::write(&paths.global_config_file, "[catalogs]\n").unwrap();
+    let state = build_state(&paths);
+
+    let err = invoke(state, input_with_filters("anything", None, Some(f32::NAN)))
+        .expect_err("a non-finite min_score must reject");
+    let data = err.data.expect("structured error envelope");
+    assert_eq!(
+        data.get("code").and_then(|c| c.as_str()),
+        Some("invalid_min_score"),
+        "expected `invalid_min_score` code in data, got: {data}",
+    );
+}
+
+#[test]
+fn min_score_infinity_rejected_as_invalid_min_score() {
+    // Companion to the NaN case: +inf is also non-finite and rejected.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+    fs::write(&paths.global_config_file, "[catalogs]\n").unwrap();
+    let state = build_state(&paths);
+
+    let err = invoke(
+        state,
+        input_with_filters("anything", None, Some(f32::INFINITY)),
+    )
+    .expect_err("+inf min_score must reject");
+    let data = err.data.expect("structured error envelope");
+    assert_eq!(
+        data.get("code").and_then(|c| c.as_str()),
+        Some("invalid_min_score"),
+        "expected `invalid_min_score` code in data, got: {data}",
+    );
+}
+
+#[test]
+fn unknown_kind_value_rejected_at_deserialize() {
+    // #320: the `kind` field is a closed `EntryKind` enum. An unknown value on
+    // the wire fails to deserialise (rmcp handles this before the handler runs).
+    // Confirm via the same serde path the transport uses.
+    let raw = serde_json::json!({"query": "x", "kind": "not-a-kind"});
+    let parsed: Result<Input, _> = serde_json::from_value(raw);
+    assert!(
+        parsed.is_err(),
+        "an unknown `kind` value must be a deserialize error"
+    );
+
+    // A KNOWN kind deserialises cleanly and lands in the field.
+    let ok = serde_json::json!({"query": "x", "kind": "command"});
+    let parsed: Input = serde_json::from_value(ok).expect("known kind deserialises");
+    assert_eq!(
+        parsed.kind,
+        Some(EntryKind::Command),
+        "a known `kind` value must deserialise into the field"
+    );
+}
+
+#[test]
+fn min_score_absent_is_byte_identical_to_pre_320() {
+    // #320: when `min_score` is absent, the result is byte-identical to the
+    // pre-#320 behaviour (top_k scored results, no floor, no signal fields on a
+    // non-empty result). Proven by round-tripping a JSON input WITHOUT the two
+    // new keys — the serde `default` fills them as `None`.
+    let raw = serde_json::json!({"query": "present"});
+    let input: Input = serde_json::from_value(raw).expect("deserialise without kind/min_score");
+    assert_eq!(input.kind, None, "absent kind → None");
+    assert_eq!(input.min_score, None, "absent min_score → None");
+
+    let body = "---\nname: present\ndescription: Present.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("present", body)], &[]);
+    let out = invoke(build_state(&paths), input).expect("search ok");
+    assert!(
+        !out.matches.is_empty(),
+        "absent min_score keeps the default top_k behaviour (non-empty)"
+    );
+    assert!(
+        out.no_results_reason.is_none() && out.hint.is_none(),
+        "absent min_score must not attach any empty-signal to a non-empty result"
     );
 }

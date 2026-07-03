@@ -229,6 +229,21 @@ pub(crate) fn kind_of(arg: TierKindArg) -> EntryKind {
     }
 }
 
+/// The reverse of [`kind_of`]: an [`EntryKind`] → its CLI [`TierKindArg`]
+/// selector. The MCP `search_skills` tool (#320) accepts a single-value
+/// `kind` filter typed as `EntryKind` and threads it through the shared
+/// `QueryArgs.kind: Vec<TierKindArg>` slot, so it needs this symmetric
+/// direction. Kept beside `kind_of` so the two mappings stay in lockstep —
+/// a new `EntryKind` / `TierKindArg` variant fails to compile until both
+/// arms are added.
+pub(crate) fn tierkind_of(kind: EntryKind) -> TierKindArg {
+    match kind {
+        EntryKind::Skill => TierKindArg::Skill,
+        EntryKind::Command => TierKindArg::Command,
+        EntryKind::Agent => TierKindArg::Agent,
+    }
+}
+
 /// Shared JSON / human emit record for `set` and `clear`.
 #[derive(Serialize)]
 pub(crate) struct TierRecord {

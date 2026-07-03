@@ -61,6 +61,8 @@ fn rejects_query_strictly_longer_than_cap_with_dedicated_code() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
@@ -102,6 +104,8 @@ fn accepts_query_exactly_at_cap() {
             top_k: Some(10),
             catalog: None,
             plugin: None,
+            kind: None,
+            min_score: None,
             description_max_chars: Some(150),
         },
     ));
@@ -140,6 +144,8 @@ fn rejects_empty_query_with_existing_error_path() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
+                kind: None,
+                min_score: None,
                 description_max_chars: Some(150),
             },
         ))
