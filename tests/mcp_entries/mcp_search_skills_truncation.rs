@@ -928,6 +928,15 @@ fn min_score_above_every_score_reports_no_match_with_signal() {
         "a scope with content emptied by the floor must report corpus_size > 0, got {}",
         out.corpus_size
     );
+    // M-1 regression guard: the `scoring` wire field on the strict-empty path
+    // must match what a NON-empty MCP result reports. The MCP handler always
+    // supplies a reranker, so a non-empty result is always `reranked` — the
+    // strict-empty path must agree (it must NOT derive from `--no-rerank`).
+    assert_eq!(
+        out.scoring, "reranked",
+        "strict-empty scoring must match the non-empty MCP path (reranker always present); got {:?}",
+        out.scoring
+    );
 }
 
 #[test]

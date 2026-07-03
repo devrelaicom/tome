@@ -469,7 +469,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         match result {
             Ok(o) => Ok((o, compute_elapsed)),
             Err(TomeError::QueryNoResultsStrict { .. }) => {
-                let empty = empty_strict_outcome(&paths, &scope, args.no_rerank);
+                // Mirror the pipeline's `scoring` derivation EXACTLY
+                // (`src/commands/query.rs`: `if deps.reranker.is_some()`), not
+                // `args.no_rerank` — the MCP handler always supplies a reranker,
+                // so a non-empty result always reports `reranked`; the empty path
+                // must agree. Reading `deps.reranker.is_some()` keeps them
+                // structurally in lockstep even if the handler ever conditionally
+                // omits the reranker.
+                let empty = empty_strict_outcome(&paths, &scope, deps.reranker.is_some());
                 Ok((empty, compute_elapsed))
             }
             Err(e) => Err(e),
@@ -745,13 +752,19 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 /// nothing searchable, so reindex, NOT lower the floor) vs `NoMatch` (count
 /// `> 0` — content existed but nothing cleared the floor, so rephrase / lower
 /// it). Best-effort: a count failure falls back to `0`, steering toward reindex
-/// (the safe direction). The `scoring` mode mirrors the pipeline's own choice
-/// (`Reranked` when the reranker ran, else `Similarity`); reranker drift is not
-/// re-derived here (a soft label the handler never surfaces on the empty path).
+/// (the safe direction).
+///
+/// `scoring` MUST match what the pipeline would report for the SAME call, so the
+/// wire field is consistent between a non-empty and a strict-empty result. The
+/// pipeline derives it from `deps.reranker.is_some()` (NOT `--no-rerank`), so the
+/// caller passes `reranker_present` = `deps.reranker.is_some()`; on the MCP path
+/// that is always `true` (the handler always supplies a reranker) → `Reranked`.
+/// Reranker drift is not re-derived here (a soft label the handler never
+/// surfaces on the empty path).
 fn empty_strict_outcome(
     paths: &crate::paths::Paths,
     scope: &crate::workspace::Scope,
-    no_rerank: bool,
+    reranker_present: bool,
 ) -> query::QueryOutcome {
     let scope_searchable_count = crate::index::open_read_only(&paths.index_db)
         .ok()
@@ -759,10 +772,11 @@ fn empty_strict_outcome(
             crate::index::query::scope_searchable_count(&conn, scope.name().as_str()).ok()
         })
         .unwrap_or(0);
-    let scoring = if no_rerank {
-        query::ScoringMode::Similarity
-    } else {
+    // Mirror `src/commands/query.rs`: `if deps.reranker.is_some()` → Reranked.
+    let scoring = if reranker_present {
         query::ScoringMode::Reranked
+    } else {
+        query::ScoringMode::Similarity
     };
     query::QueryOutcome {
         results: Vec::new(),
