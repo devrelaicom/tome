@@ -254,6 +254,7 @@ fn mcp_get_skill_runs_builtins_and_env() {
                 plugin: "plug".to_string(),
                 name: "pipe-skill".to_string(),
                 raw: false,
+                include_resource_bodies: false,
             },
         ))
         .expect("get_skill ok");

@@ -41,6 +41,7 @@ fn get_skill_resolves_db_enrolled_catalog_without_config() {
             plugin: staged.plugin_name.clone(),
             name: "searchable".into(),
             raw: false,
+            include_resource_bodies: false,
         })
         .expect("get_skill must resolve the DB-enrolled catalog (no config.toml)");
 
@@ -65,6 +66,7 @@ fn get_skill_unknown_catalog_still_errors_without_config() {
             plugin: staged.plugin_name.clone(),
             name: "searchable".into(),
             raw: false,
+            include_resource_bodies: false,
         })
         .expect_err("an absent catalog must still reject");
 

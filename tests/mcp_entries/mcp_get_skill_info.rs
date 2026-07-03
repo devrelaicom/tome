@@ -453,8 +453,12 @@ fn unknown_entry_surfaces_unknown_skill() {
     // #295: a real catalog + real plugin but an entry name that doesn't exist
     // now surfaces `unknown_skill` (matching `get_skill`), not the pre-#295
     // collapsed `entry_not_found`.
-    let body = "---\nname: real\ndescription: ok.\n---\nbody\n";
-    let (_tmp, paths) = stage_workspace(&[("real", body, &[])], &[]);
+    // #333: the `unknown_skill` envelope is ENRICHED with the available
+    // `(name, kind)` list for `(catalog, plugin)` — additive; the code / message
+    // / catalog / plugin / name fields are byte-identical to pre-#333.
+    let real = "---\nname: real\ndescription: ok.\n---\nbody\n";
+    let cmd = "---\nname: run-it\ndescription: a command.\n---\ndo it\n";
+    let (_tmp, paths) = stage_workspace(&[("real", real, &[])], &[("run-it", cmd)]);
     let state = build_state(&paths);
 
     let err = invoke(
@@ -487,6 +491,32 @@ fn unknown_entry_surfaces_unknown_skill() {
     assert_eq!(
         err.message,
         "skill `acme/plug/does-not-exist` is not enabled in the resolved scope",
+    );
+
+    // #333: `available` lists BOTH enabled entries for `(acme, plug)` — the
+    // `real` skill and the `run-it` command — each as `{ name, kind }`. Ordered
+    // by `(kind, name)` (list_for_plugin order): the command precedes the skill
+    // alphabetically by kind slug (`command` < `skill`).
+    let available = data
+        .get("available")
+        .and_then(|a| a.as_array())
+        .expect("#333: unknown_skill data must carry an `available` array");
+    let pairs: Vec<(String, String)> = available
+        .iter()
+        .map(|e| {
+            (
+                e.get("name").and_then(|n| n.as_str()).unwrap().to_owned(),
+                e.get("kind").and_then(|k| k.as_str()).unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("run-it".to_owned(), "command".to_owned()),
+            ("real".to_owned(), "skill".to_owned()),
+        ],
+        "available must list every enabled (name, kind) for the plugin",
     );
 }
 
@@ -611,6 +641,182 @@ fn alphabetical_ordering_independent_of_creation_order() {
     assert!(res.files[0].ends_with("apple.txt"));
     assert!(res.files[1].ends_with("mango.txt"));
     assert!(res.files[2].ends_with("zebra.txt"));
+}
+
+// ---------------------------------------------------------------------------
+// #333 — get_skill_info wildcard `name` resolution.
+// ---------------------------------------------------------------------------
+
+/// A glob `name` matching exactly ONE enabled entry of the requested kind
+/// resolves to that entry — and the response reports the CONCRETE name, not
+/// the pattern.
+#[test]
+fn glob_name_matching_one_resolves() {
+    let body = "---\nname: compact-circuits\ndescription: circuit skill.\n---\nbody\n";
+    let other = "---\nname: unrelated\ndescription: other skill.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(
+        &[("compact-circuits", body, &[]), ("unrelated", other, &[])],
+        &[],
+    );
+    let state = build_state(&paths);
+
+    let info = invoke(
+        state,
+        Input {
+            catalog: "acme".into(),
+            plugin: "plug".into(),
+            name: "compact-*".into(),
+            kind: EntryKind::Skill,
+        },
+    )
+    .expect("glob matching one entry must resolve");
+
+    assert_eq!(
+        info.name, "compact-circuits",
+        "the response reports the RESOLVED concrete name, not the glob pattern",
+    );
+    assert!(matches!(info.kind, EntryKind::Skill));
+    assert_eq!(info.description, "circuit skill.");
+    assert!(info.path.ends_with("SKILL.md"));
+}
+
+/// A glob `name` matching MULTIPLE enabled entries of the requested kind is an
+/// ambiguous error listing the candidate `(name, kind)` pairs.
+#[test]
+fn glob_name_matching_many_is_ambiguous() {
+    let a = "---\nname: compact-lint\ndescription: lint.\n---\nbody\n";
+    let b = "---\nname: compact-fmt\ndescription: fmt.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("compact-lint", a, &[]), ("compact-fmt", b, &[])], &[]);
+    let state = build_state(&paths);
+
+    let err = invoke(
+        state,
+        Input {
+            catalog: "acme".into(),
+            plugin: "plug".into(),
+            name: "compact-*".into(),
+            kind: EntryKind::Skill,
+        },
+    )
+    .expect_err("ambiguous glob must reject");
+
+    let data = err.data.expect("structured error data");
+    assert_eq!(
+        data.get("code").and_then(|c| c.as_str()),
+        Some("ambiguous_name"),
+        "ambiguous glob must carry the `ambiguous_name` code; got: {data}",
+    );
+    assert_eq!(data.get("catalog").and_then(|c| c.as_str()), Some("acme"));
+    assert_eq!(data.get("plugin").and_then(|c| c.as_str()), Some("plug"));
+    assert_eq!(data.get("name").and_then(|c| c.as_str()), Some("compact-*"));
+
+    let candidates = data
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .expect("ambiguous error must list `candidates`");
+    let names: Vec<&str> = candidates
+        .iter()
+        .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
+        .collect();
+    assert!(names.contains(&"compact-lint"));
+    assert!(names.contains(&"compact-fmt"));
+    assert_eq!(names.len(), 2, "both matches listed; got: {candidates:?}");
+    // Every candidate carries a `kind` slug.
+    for c in candidates {
+        assert_eq!(c.get("kind").and_then(|k| k.as_str()), Some("skill"));
+    }
+}
+
+/// A glob `name` matching ZERO entries falls through to `unknown_skill` and
+/// carries the available `(name, kind)` list (identical to a mistyped exact
+/// name — a glob that matched nothing IS an entry-not-found).
+#[test]
+fn glob_name_matching_zero_is_unknown_skill_with_available() {
+    let body = "---\nname: real\ndescription: ok.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("real", body, &[])], &[]);
+    let state = build_state(&paths);
+
+    let err = invoke(
+        state,
+        Input {
+            catalog: "acme".into(),
+            plugin: "plug".into(),
+            name: "nomatch-*".into(),
+            kind: EntryKind::Skill,
+        },
+    )
+    .expect_err("zero-match glob must reject as unknown_skill");
+
+    let data = err.data.expect("structured error data");
+    assert_eq!(
+        data.get("code").and_then(|c| c.as_str()),
+        Some("unknown_skill"),
+        "zero-match glob is an entry-not-found; got: {data}",
+    );
+    // The name field echoes the pattern verbatim.
+    assert_eq!(data.get("name").and_then(|c| c.as_str()), Some("nomatch-*"));
+
+    let available = data
+        .get("available")
+        .and_then(|a| a.as_array())
+        .expect("#333: zero-match glob must carry `available`");
+    let names: Vec<&str> = available
+        .iter()
+        .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
+        .collect();
+    assert_eq!(names, vec!["real"], "available lists the one enabled skill");
+}
+
+/// A glob restricted by `kind`: only entries of the requested kind are
+/// candidates, so a `*` glob with `kind: command` resolves the command even
+/// when a same-shaped skill also exists.
+#[test]
+fn glob_name_respects_kind_filter() {
+    let skill = "---\nname: deploy\ndescription: SKILL deploy.\nuser-invocable: true\n---\nbody\n";
+    let cmd = "---\nname: deploy-cmd\ndescription: COMMAND deploy.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("deploy", skill, &[])], &[("deploy-cmd", cmd)]);
+    let state = build_state(&paths);
+
+    // `deploy*` matches the skill `deploy` and the command `deploy-cmd`, but the
+    // command-kind filter restricts candidates to `deploy-cmd` alone → unique.
+    let info = invoke(
+        state,
+        Input {
+            catalog: "acme".into(),
+            plugin: "plug".into(),
+            name: "deploy*".into(),
+            kind: EntryKind::Command,
+        },
+    )
+    .expect("kind-filtered glob resolves the single command candidate");
+
+    assert_eq!(info.name, "deploy-cmd");
+    assert!(matches!(info.kind, EntryKind::Command));
+    assert_eq!(info.description, "COMMAND deploy.");
+}
+
+/// An EXACT (non-glob) name still resolves byte-identically — the wildcard path
+/// triggers ONLY when the name contains `*`.
+#[test]
+fn exact_name_unaffected_by_wildcard_path() {
+    let body = "---\nname: exact-one\ndescription: exact.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("exact-one", body, &[])], &[]);
+    let state = build_state(&paths);
+
+    let info = invoke(
+        state,
+        Input {
+            catalog: "acme".into(),
+            plugin: "plug".into(),
+            name: "exact-one".into(),
+            kind: EntryKind::Skill,
+        },
+    )
+    .expect("exact name resolves");
+
+    assert_eq!(info.name, "exact-one");
+    assert_eq!(info.description, "exact.");
+    assert!(matches!(info.kind, EntryKind::Skill));
 }
 
 // Avoid an unused-import warning on platforms where some paths above

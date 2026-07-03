@@ -167,7 +167,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         // the same fields) for the same not-found case. Pre-#295 this collapsed
         // to a single `entry_not_found`, forcing an agent to round-trip to learn
         // whether the catalog, the plugin, or just the entry name was wrong.
-        LookupOutcome::NotFound(crate::mcp::tools::common::NotFound::UnknownCatalog) => {
+        LookupOutcome::NotFound {
+            which: crate::mcp::tools::common::NotFound::UnknownCatalog,
+            ..
+        } => {
             return Err(emit_error(
                 &input,
                 started,
@@ -185,7 +188,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
                 ),
             ));
         }
-        LookupOutcome::NotFound(crate::mcp::tools::common::NotFound::UnknownPlugin) => {
+        LookupOutcome::NotFound {
+            which: crate::mcp::tools::common::NotFound::UnknownPlugin,
+            ..
+        } => {
             return Err(emit_error(
                 &input,
                 started,
@@ -206,7 +212,17 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
                 ),
             ));
         }
-        LookupOutcome::NotFound(crate::mcp::tools::common::NotFound::UnknownSkill) => {
+        LookupOutcome::NotFound {
+            which: crate::mcp::tools::common::NotFound::UnknownSkill,
+            available,
+        } => {
+            // #333: catalog + plugin resolved but the entry name did not (a
+            // mistyped exact name OR a glob that matched zero). Keep the same
+            // `unknown_skill` code / category / message, but ENRICH `data` with
+            // the enabled `(name, kind)` list for `(catalog, plugin)` so the
+            // agent sees what IS available and doesn't round-trip to
+            // `search_skills`. The extra field is additive — the `code`,
+            // `catalog`, `plugin`, `name` fields are byte-identical to pre-#333.
             return Err(emit_error(
                 &input,
                 started,
@@ -223,6 +239,38 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
                             ("catalog", json!(input.catalog)),
                             ("plugin", json!(input.plugin)),
                             ("name", json!(input.name)),
+                            ("available", available_json(&available)),
+                        ],
+                    )),
+                ),
+            ));
+        }
+        LookupOutcome::AmbiguousGlob { candidates } => {
+            // #333: a glob `name` matched more than one enabled entry of the
+            // requested kind — the agent must pick a concrete name. Reuse
+            // `invalid_params` (a usage-level error, no new code) and list the
+            // candidate `(name, kind)` pairs in the error `data` so the choice
+            // is actionable without a round-trip.
+            return Err(emit_error(
+                &input,
+                started,
+                "ambiguous_name",
+                McpError::invalid_params(
+                    format!(
+                        "name pattern `{}` matched {} entries in `{}/{}`; pick one",
+                        input.name,
+                        candidates.len(),
+                        input.catalog,
+                        input.plugin,
+                    ),
+                    Some(error_data_with_code(
+                        "ambiguous_name",
+                        ErrorCategory::EntryNotFound,
+                        &[
+                            ("catalog", json!(input.catalog)),
+                            ("plugin", json!(input.plugin)),
+                            ("name", json!(input.name)),
+                            ("candidates", available_json(&candidates)),
                         ],
                     )),
                 ),
@@ -232,6 +280,13 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
 
     let LookupHit {
         body_path,
+        // #333: the RESOLVED name + kind. For an exact name these equal
+        // `input.name` / `input.kind`; for a glob they are the single matched
+        // entry's real name + kind, so the response reports the concrete entry,
+        // not the pattern. Downstream (resource walk, output, prompt-name,
+        // telemetry) reads THESE, not `input.name` / `input.kind`.
+        kind: resolved_kind,
+        name: resolved_name,
         description,
         when_to_use,
         plugin_version,
@@ -241,7 +296,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
     // Per FR-083 the resource enumeration is skill-only — commands don't ship
     // with a sibling-files convention (they live at
     // `<plugin>/commands/<name>.md`, not in a per-entry directory).
-    let resources = if matches!(input.kind, EntryKind::Skill) {
+    let resources = if matches!(resolved_kind, EntryKind::Skill) {
         let body_path_for_walk = body_path.clone();
         let walked = tokio::task::spawn_blocking(move || walk_resources(&body_path_for_walk))
             .await
@@ -280,8 +335,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         target: "tome::mcp::tools::get_skill_info",
         catalog = input.catalog,
         plugin = input.plugin,
-        name = input.name,
-        kind = input.kind.as_str(),
+        // #333: log the RESOLVED name/kind (for a glob these differ from the
+        // pattern the caller supplied).
+        name = resolved_name,
+        kind = resolved_kind.as_str(),
         result = "ok",
         elapsed_ms = started.elapsed().as_millis() as u64,
         "call",
@@ -291,8 +348,9 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
     // `rank_bucket` of THIS entry from the preceding search this session (the
     // funnel join). `None` ⇒ no preceding search ranked it ⇒ `RankBucket::None`.
     // Best-effort enqueue (a sub-ms local append; never blocks, never flushes).
+    // #333: rank the RESOLVED name (the concrete entry, not the glob pattern).
     crate::telemetry::emit(crate::telemetry::event::EntryInfo {
-        rank: crate::mcp::rank_for(&state, &input.name),
+        rank: crate::mcp::rank_for(&state, &resolved_name),
         calling_harness: crate::mcp::calling_harness(&state),
     });
 
@@ -301,18 +359,21 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
     // straight from the middle tier); `None` for a non-invocable entry — which
     // is consistent with the `user_invocable` flag also returned above. The
     // lookup is a sub-µs in-memory scan (no DB I/O), safe on the reactor.
+    // #333: keyed on the RESOLVED name/kind so a glob resolves the concrete
+    // entry's prompt.
     let prompt_name = state
         .prompt_registry
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .prompt_name_for(&input.catalog, &input.plugin, input.kind, &input.name)
+        .prompt_name_for(&input.catalog, &input.plugin, resolved_kind, &resolved_name)
         .map(str::to_owned);
 
     Ok(SkillInfo {
         catalog: input.catalog,
         plugin: input.plugin,
-        name: input.name,
-        kind: input.kind,
+        // #333: report the RESOLVED concrete name + kind, not the glob pattern.
+        name: resolved_name,
+        kind: resolved_kind,
         path: body_path.display().to_string(),
         description,
         when_to_use,
@@ -323,12 +384,53 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
     })
 }
 
+/// #333: serialise an available-entries / candidate list to the error-`data`
+/// JSON array `[ { "name": ..., "kind": ... }, ... ]`. `kind` is the wire slug
+/// (`"skill"` / `"command"`), matching how `EntryKind` serialises everywhere
+/// else, so an agent branches on the same values it receives from
+/// `search_skills`.
+fn available_json(entries: &[AvailableEntry]) -> serde_json::Value {
+    serde_json::Value::Array(
+        entries
+            .iter()
+            .map(|e| json!({ "name": e.name, "kind": e.kind.as_str() }))
+            .collect(),
+    )
+}
+
 struct LookupHit {
     body_path: PathBuf,
+    /// #333: the resolved kind. When `name` is a glob, the matched candidate's
+    /// kind may differ from the requested `input.kind` only in that the glob
+    /// candidate set is already filtered to `input.kind` — so this always equals
+    /// `input.kind`. Carried explicitly to keep the exact-vs-glob paths uniform.
+    kind: EntryKind,
+    /// #333: the resolved concrete name. Equals `input.name` for the exact-match
+    /// path; for a glob it is the single matched candidate's name (so the
+    /// `SkillInfo.name` reports the real entry, not the pattern).
+    name: String,
     description: String,
     when_to_use: Option<String>,
     plugin_version: String,
     user_invocable: bool,
+}
+
+/// #333: one `(name, kind)` pair for the available-entries list surfaced in the
+/// `unknown_skill` error `data` (and the ambiguous-glob candidate list), so an
+/// agent that mistyped a name — or globbed too broadly — sees what IS available
+/// for `(catalog, plugin)` without round-tripping back to `search_skills`.
+///
+/// Intentional kind-scope asymmetry (do NOT unify the two uses): the
+/// `unknown_skill` `available` list is deliberately kind-AGNOSTIC — it lists
+/// EVERY enabled entry the caller could ask for in that `(catalog, plugin)`,
+/// across all kinds, because a miss means the caller doesn't yet know which
+/// entry (or kind) exists. The `AmbiguousGlob` `candidates` list is deliberately
+/// kind-SCOPED — it lists only the enabled entries of the REQUESTED `kind` that
+/// the glob matched, because the caller already committed to a kind and just
+/// needs to disambiguate a concrete name within it.
+struct AvailableEntry {
+    name: String,
+    kind: EntryKind,
 }
 
 enum LookupOutcome {
@@ -337,7 +439,49 @@ enum LookupOutcome {
     /// handler can emit `get_skill`'s three-code surface (`unknown_catalog` /
     /// `unknown_plugin` / `unknown_skill`) instead of the pre-#295 collapsed
     /// `entry_not_found`.
-    NotFound(crate::mcp::tools::common::NotFound),
+    ///
+    /// #333: on the `UnknownSkill` classification (catalog + plugin resolved, the
+    /// entry name did not — including a glob that matched zero) the handler
+    /// ENRICHES the error `data` with `available`, so `available` is computed and
+    /// carried here rather than re-opening the DB in the handler.
+    NotFound {
+        which: crate::mcp::tools::common::NotFound,
+        /// The enabled `(name, kind)` list for `(catalog, plugin)`, all kinds,
+        /// sorted `(kind, name)`. Empty unless `which == UnknownSkill` (the only
+        /// case where a plugin-scoped available list is meaningful — for an
+        /// unknown catalog/plugin there are no entries to list).
+        available: Vec<AvailableEntry>,
+    },
+    /// #333: a glob `name` matched MORE THAN ONE enabled entry of the requested
+    /// kind. Ambiguous — the handler rejects with a `Usage`/`invalid_params`
+    /// error listing the candidate `(name, kind)` pairs so the agent can pick a
+    /// concrete name. Carries the candidates in first-listed (`(kind, name)`)
+    /// order.
+    AmbiguousGlob {
+        candidates: Vec<AvailableEntry>,
+    },
+}
+
+/// #333: build the enabled `(name, kind)` list for `(catalog, plugin)` — every
+/// enabled entry of any kind, in `list_for_plugin`'s `(kind, name)` order — for
+/// the `unknown_skill` `available` field. Only enabled rows are included (a
+/// disabled entry isn't actionable).
+fn available_entries(
+    conn: &rusqlite::Connection,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+) -> Result<Vec<AvailableEntry>, TomeError> {
+    Ok(
+        skills::list_for_plugin(conn, workspace_name, catalog, plugin)?
+            .into_iter()
+            .filter(|row| row.enabled)
+            .map(|row| AvailableEntry {
+                name: row.name,
+                kind: row.kind,
+            })
+            .collect(),
+    )
 }
 
 fn lookup_entry(
@@ -350,6 +494,68 @@ fn lookup_entry(
 ) -> Result<LookupOutcome, TomeError> {
     let conn = crate::index::db::open_read_only(&paths.index_db)?;
     let workspace_name = scope.name().as_str();
+
+    // #333: a `name` containing `*` is a glob — resolve it against the enabled
+    // entries of the requested `kind` for `(catalog, plugin)` (reusing the
+    // `plugin::selector` SSOT so glob semantics match the CLI everywhere).
+    // EXACTLY one match resolves to that entry; MULTIPLE ⇒ `AmbiguousGlob`; ZERO
+    // falls through to the shared not-found classification (which, on
+    // `UnknownSkill`, is enriched with the available list — a glob that matched
+    // nothing is an entry-not-found, same as a mistyped exact name).
+    if crate::plugin::selector::is_glob(name) {
+        let mut matches: Vec<skills::SkillRecord> =
+            skills::list_for_plugin(&conn, workspace_name, catalog, plugin)?
+                .into_iter()
+                .filter(|row| row.enabled && row.kind == kind)
+                .filter(|row| crate::plugin::selector::glob_match(name, &row.name))
+                .collect();
+        match matches.len() {
+            1 => {
+                let row = matches.remove(0);
+                let body_path = skills::resolve_entry_body_path(
+                    &conn,
+                    paths,
+                    workspace_name,
+                    catalog,
+                    plugin,
+                    &row.path,
+                )?;
+                return Ok(LookupOutcome::Found(LookupHit {
+                    body_path,
+                    kind: row.kind,
+                    name: row.name,
+                    description: row.description,
+                    when_to_use: row.when_to_use,
+                    plugin_version: row.plugin_version,
+                    user_invocable: row.user_invocable,
+                }));
+            }
+            0 => {
+                // Fall through to the shared not-found classification below.
+            }
+            _ => {
+                let candidates = matches
+                    .into_iter()
+                    .map(|row| AvailableEntry {
+                        name: row.name,
+                        kind: row.kind,
+                    })
+                    .collect();
+                return Ok(LookupOutcome::AmbiguousGlob { candidates });
+            }
+        }
+        // Zero glob matches ⇒ classify the not-found layer + enrich with the
+        // available list (same shape as an unknown exact name).
+        let which =
+            crate::mcp::tools::common::classify_not_found(&conn, workspace_name, catalog, plugin)?;
+        let available = if which == crate::mcp::tools::common::NotFound::UnknownSkill {
+            available_entries(&conn, workspace_name, catalog, plugin)?
+        } else {
+            Vec::new()
+        };
+        return Ok(LookupOutcome::NotFound { which, available });
+    }
+
     match skills::find(&conn, workspace_name, catalog, plugin, kind, name)? {
         Some(row) if row.enabled => {
             let body_path = skills::resolve_entry_body_path(
@@ -362,6 +568,8 @@ fn lookup_entry(
             )?;
             Ok(LookupOutcome::Found(LookupHit {
                 body_path,
+                kind: row.kind,
+                name: row.name,
                 description: row.description,
                 when_to_use: row.when_to_use,
                 plugin_version: row.plugin_version,
@@ -376,9 +584,24 @@ fn lookup_entry(
         // precedence, sparing the agent a second round-trip. (Pre-#295 this
         // collapsed both "row absent" and "row present but disabled" onto a
         // single `entry_not_found` envelope.)
-        Some(_) | None => Ok(LookupOutcome::NotFound(
-            crate::mcp::tools::common::classify_not_found(&conn, workspace_name, catalog, plugin)?,
-        )),
+        //
+        // #333: on the `UnknownSkill` classification (catalog + plugin resolved,
+        // the entry name did not) enrich with the available `(name, kind)` list
+        // so the agent doesn't round-trip to `search_skills`.
+        Some(_) | None => {
+            let which = crate::mcp::tools::common::classify_not_found(
+                &conn,
+                workspace_name,
+                catalog,
+                plugin,
+            )?;
+            let available = if which == crate::mcp::tools::common::NotFound::UnknownSkill {
+                available_entries(&conn, workspace_name, catalog, plugin)?
+            } else {
+                Vec::new()
+            };
+            Ok(LookupOutcome::NotFound { which, available })
+        }
     }
 }
 

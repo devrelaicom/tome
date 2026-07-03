@@ -23,12 +23,23 @@ Tome exposes four tools. The first three form a search-then-load flow:
   candidate matches (KNN + reranker), so the agent can decide what's relevant.
 - **`get_skill_info`** — a middle tier that returns metadata about a skill
   (including its `when_to_use` guidance) without pulling the full body. Useful for
-  confirming relevance before loading.
+  confirming relevance before loading. The `name` accepts a `*` wildcard that
+  resolves to a unique match — a fuzzy name no longer forces a re-search. If the
+  wildcard matches several entries the error lists the candidate `(name, kind)`
+  pairs so the agent can pick one; if a name (exact or wildcard) resolves to
+  nothing, the error's `data` carries the available `(name, kind)` entries for
+  that `(catalog, plugin)`, so the agent needn't round-trip back to
+  `search_skills`.
 - **`get_skill`** — loads a skill's full content, with variable substitution
   applied, ready for the agent to use. Pass `raw: true` to receive the body with
   literal `${TOME_*}` substitution tokens preserved instead — useful for
   authoring or conversion workflows that need the source tokens, not the
-  resolved values.
+  resolved values. Pass `include_resource_bodies: true` to also inline the
+  contents of small text resources as `{ path, content }` alongside the resource
+  paths, avoiding a separate file read per resource (and working even when the
+  host's file tool can't reach a path). Inlining is byte-capped per file and in
+  total, so binary, oversized, or budget-exceeding resources are skipped — their
+  paths still appear in `resources` for the agent to fetch itself.
 
 The typical loop is: `search_skills` to find candidates → `get_skill_info` to
 confirm → `get_skill` to load only the best match.

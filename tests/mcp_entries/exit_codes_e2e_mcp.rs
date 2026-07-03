@@ -88,6 +88,7 @@ fn get_skill_plugin_data_dir_unwritable_exits_9() {
             plugin: staged.plugin_name.clone(),
             name: "needs-data".into(),
             raw: false,
+            include_resource_bodies: false,
         })
         .expect_err("plugin-data dir creation must fail when the root is a file");
 
@@ -172,6 +173,7 @@ fn get_skill_with_missing_plugin_dir_exits_27() {
             plugin: staged.plugin_name.clone(),
             name: "ghost".into(),
             raw: false,
+            include_resource_bodies: false,
         })
         .expect_err("missing plugin dir must surface EntryNotFound");
 
