@@ -290,6 +290,7 @@ fn search_then_get_skill_emits_funnel_with_rank() {
                 plugin: "plug".into(),
                 name: top_entry.clone(),
                 raw: false,
+                include_resource_bodies: false,
             },
         ))
         .expect("get_skill ok");
@@ -405,6 +406,7 @@ fn get_skill_without_preceding_search_has_zero_rank() {
                 plugin: "plug".into(),
                 name: "alpha".into(),
                 raw: false,
+                include_resource_bodies: false,
             },
         ))
         .expect("get_skill ok");
@@ -605,6 +607,7 @@ fn post_resolution_get_skill_failure_on_allowlisted_entry_emits_attributed_error
             plugin: "plug".into(),
             name: "alpha".into(),
             raw: false,
+            include_resource_bodies: false,
         },
     ));
     assert!(

@@ -20,7 +20,7 @@
 //! shape, not the handler's behaviour (covered end-to-end in `entry_e2e.rs`).
 //! Any field rename, reorder, or default-flip will flip this test red.
 
-use tome::mcp::tools::get_skill::Output;
+use tome::mcp::tools::get_skill::{Output, ResourceBody};
 use tome::plugin::identity::EntryKind;
 
 #[test]
@@ -36,20 +36,25 @@ fn get_skill_output_wire_shape_for_skill_kind() {
         // #331: the default (rendered) mode reports `substitutions_applied:
         // true`. Always present (non-`Option`), appended LAST.
         substitutions_applied: true,
+        // #333: `include_resource_bodies` was NOT requested → `resource_bodies`
+        // is `None` and MUST be omitted (skip_serializing_if), so the flag-off
+        // wire shape is byte-identical to pre-#333.
+        resource_bodies: None,
     };
 
     let json = serde_json::to_string(&out).expect("serialise");
 
     // Document order: content, path, resources, kind, [prompt_name omitted],
-    // substitutions_applied. `kind` is lowercase via
+    // substitutions_applied, [resource_bodies omitted]. `kind` is lowercase via
     // `#[serde(rename_all = "lowercase")]` on `EntryKind`. `prompt_name` is
     // ABSENT (None + skip_serializing_if). `substitutions_applied` is the
-    // additive #331 key, appended LAST.
+    // additive #331 key. `resource_bodies` is ABSENT (None + skip_serializing_if,
+    // #333) — the flag-off shape is byte-identical to pre-#333.
     let expected = r#"{"content":"rendered skill body","path":"/abs/path/to/SKILL.md","resources":["/abs/path/to/examples/basic.ts"],"kind":"skill","substitutions_applied":true}"#;
 
     assert_eq!(
         json, expected,
-        "get_skill skill-kind JSON wire shape drift — `kind` must be present (additive #289), `prompt_name` absent, `substitutions_applied` present (additive #331)",
+        "get_skill skill-kind JSON wire shape drift — `kind` must be present (additive #289), `prompt_name` absent, `substitutions_applied` present (additive #331), `resource_bodies` absent (additive #333, flag off)",
     );
 }
 
@@ -65,6 +70,8 @@ fn get_skill_output_wire_shape_for_raw_mode() {
         kind: EntryKind::Skill,
         prompt_name: None,
         substitutions_applied: false,
+        // #333: not requested → absent, byte-identical to pre-#333.
+        resource_bodies: None,
     };
 
     let json = serde_json::to_string(&out).expect("serialise");
@@ -89,6 +96,9 @@ fn get_skill_output_wire_shape_for_command_kind() {
         prompt_name: Some("plug__deploy".into()),
         // #331: rendered mode; `substitutions_applied` follows `prompt_name`.
         substitutions_applied: true,
+        // #333: commands have no resource directory → `resource_bodies` stays
+        // `None`/absent even had the flag been passed.
+        resource_bodies: None,
     };
 
     let json = serde_json::to_string(&out).expect("serialise");
@@ -97,6 +107,44 @@ fn get_skill_output_wire_shape_for_command_kind() {
 
     assert_eq!(
         json, expected,
-        "get_skill command-kind JSON wire shape drift — `kind` lowercase `command`, `prompt_name` then `substitutions_applied` appended LAST",
+        "get_skill command-kind JSON wire shape drift — `kind` lowercase `command`, `prompt_name` then `substitutions_applied` appended LAST, `resource_bodies` absent (#333)",
+    );
+}
+
+#[test]
+fn get_skill_output_wire_shape_with_inlined_resource_bodies() {
+    // #333: when `include_resource_bodies` was requested and at least one
+    // resource fit the byte budget, `resource_bodies` is PRESENT as an array of
+    // `{ path, content }`, appended LAST (after `substitutions_applied`). Each
+    // `path` also appears in `resources` — `resource_bodies` is a parallel VIEW,
+    // not a replacement.
+    let out = Output {
+        content: "rendered skill body".into(),
+        path: "/abs/path/to/SKILL.md".into(),
+        resources: vec![
+            "/abs/path/to/examples/basic.ts".into(),
+            "/abs/path/to/data/blob.bin".into(),
+        ],
+        kind: EntryKind::Skill,
+        prompt_name: None,
+        substitutions_applied: true,
+        // Only the text resource was inlined; the binary one is omitted here but
+        // still present in `resources` above.
+        resource_bodies: Some(vec![ResourceBody {
+            path: "/abs/path/to/examples/basic.ts".into(),
+            content: "export const x = 1;\n".into(),
+        }]),
+    };
+
+    let json = serde_json::to_string(&out).expect("serialise");
+
+    // Order: content, path, resources, kind, [prompt_name omitted],
+    // substitutions_applied, resource_bodies. Each `resource_bodies` element is
+    // `{ "path": ..., "content": ... }` in field order.
+    let expected = r#"{"content":"rendered skill body","path":"/abs/path/to/SKILL.md","resources":["/abs/path/to/examples/basic.ts","/abs/path/to/data/blob.bin"],"kind":"skill","substitutions_applied":true,"resource_bodies":[{"path":"/abs/path/to/examples/basic.ts","content":"export const x = 1;\n"}]}"#;
+
+    assert_eq!(
+        json, expected,
+        "get_skill inlined-resource-bodies JSON wire shape drift — `resource_bodies` appended LAST as an array of path/content objects",
     );
 }

@@ -45,6 +45,38 @@ pub struct Input {
     /// to `false` under `deny_unknown_fields`, preserving current behavior.
     #[serde(default)]
     pub raw: bool,
+    /// Inline the contents of small text resource files alongside their paths,
+    /// so the agent avoids an N+1 file read per resource (and works even when
+    /// the host's file tool can't reach a path). Default false.
+    ///
+    /// The first line is a clean, complete summary because schemars lifts it
+    /// into the generated JSON-schema `title` that `tools/list` shows to an
+    /// agent — the `#333` reference is deliberately kept off the opening line.
+    ///
+    /// When `true`, each enumerated resource that is valid UTF-8 text and fits
+    /// the per-file + total byte budgets is returned in `resource_bodies` as
+    /// `{ path, content }`. Binary, over-cap, or budget-exceeding resources are
+    /// skipped (their paths still appear in `resources` for the agent to fetch
+    /// itself), so a hostile catalog cannot blow up the response. Only skills
+    /// have a resource directory — commands leave `resource_bodies` absent.
+    /// `#[serde(default)]` keeps existing callers parsing under
+    /// `deny_unknown_fields`. (#333)
+    #[serde(default)]
+    pub include_resource_bodies: bool,
+}
+
+/// #333: one inlined resource — the absolute `path` (identical to the entry in
+/// `Output.resources`) plus its UTF-8 `content`. Emitted only for the subset of
+/// resources that fit the per-file + whole-response byte budgets when the caller
+/// passes `include_resource_bodies: true`. An emit-only record (no
+/// `deny_unknown_fields`; the boundary is inputs).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ResourceBody {
+    /// Absolute path of the resource file — matches an entry in `resources`.
+    pub path: String,
+    /// The resource's UTF-8 text content, verbatim (no substitution, no
+    /// normalisation).
+    pub content: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -95,7 +127,32 @@ pub struct Output {
     /// `kind` key). Appended LAST, after `prompt_name`, so it never
     /// reorders the pre-#331 fields.
     pub substitutions_applied: bool,
+    /// #333: the inlined subset of `resources`, present only when the caller
+    /// passed `include_resource_bodies: true` AND at least one resource fit the
+    /// byte budgets. Each `{ path, content }` element's `path` matches an entry
+    /// in `resources` (the additive `resource_bodies` is a parallel VIEW — every
+    /// resource still appears in `resources`; a binary / over-cap / budget-
+    /// exceeding / unreadable resource is simply omitted here). Absent (via
+    /// `skip_serializing_if`) when `include_resource_bodies` is false OR the
+    /// entry is a command (commands have no resource directory) — so with the
+    /// flag off the wire shape is byte-identical to pre-#333. Appended LAST,
+    /// after `substitutions_applied`, so it never reorders the earlier fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_bodies: Option<Vec<ResourceBody>>,
 }
+
+/// #333: per-file cap for an inlined resource (64 KiB). A resource whose
+/// on-disk size exceeds this is NOT inlined (its path stays in `resources`);
+/// bounds the memory a single hostile file can force into the response.
+const MAX_INLINE_RESOURCE_BYTES: u64 = 64 * 1024;
+
+/// #333: whole-response cap across ALL inlined resources (1 MiB). Inlining stops
+/// once the running total of inlined `content` bytes would exceed this; the
+/// remaining resource paths stay in `resources`. Sized so a resource-heavy skill
+/// still inlines a useful slice while a hostile catalog (many/large files)
+/// cannot blow up the response — the total is hard-bounded regardless of the
+/// number of resources.
+const MAX_INLINE_TOTAL_BYTES: u64 = 1024 * 1024;
 
 /// Pipeline:
 ///
@@ -479,6 +536,32 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         .prompt_name_for(&input.catalog, &input.plugin, resolved_kind, &input.name)
         .map(str::to_owned);
 
+    // #333: when the caller opted in AND this is a skill (commands have no
+    // resource directory, so `resources` is empty and `resource_bodies` stays
+    // `None`), inline the byte-capped subset of `resources`. The reads are
+    // synchronous file I/O bounded per-file + in total, so run them on the
+    // blocking pool per the sync-boundary discipline. The paths were already
+    // symlink-refused at enumeration (`walk_dir`) — no new unguarded read.
+    let resource_bodies = if input.include_resource_bodies
+        && matches!(resolved_kind, crate::plugin::identity::EntryKind::Skill)
+    {
+        let resources_for_inline = resources.clone();
+        let bodies =
+            tokio::task::spawn_blocking(move || inline_resource_bodies(&resources_for_inline))
+                .await
+                .map_err(|e| {
+                    internal(
+                        &input,
+                        started,
+                        format!("inline join: {e}"),
+                        ErrorCategory::Internal,
+                    )
+                })?;
+        Some(bodies)
+    } else {
+        None
+    };
+
     Ok(Output {
         content,
         path: skill_path.display().to_string(),
@@ -486,6 +569,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         kind: resolved_kind,
         prompt_name,
         substitutions_applied,
+        resource_bodies,
     })
 }
 
@@ -672,6 +756,60 @@ fn walk_dir(dir: &Path, exclude: &Path, out: &mut Vec<String>) -> std::io::Resul
         }
     }
     Ok(())
+}
+
+/// #333: inline the subset of `resources` whose contents fit the per-file and
+/// whole-response byte budgets, returning `{ path, content }` records in the
+/// SAME order the paths appear in `resources`.
+///
+/// For each resource path (already symlink-refused at enumeration in
+/// [`walk_dir`], so no NEW unguarded read is introduced):
+///
+/// - read it BOUNDED via [`bounded_read_to_string`] with the per-file cap
+///   ([`MAX_INLINE_RESOURCE_BYTES`]) — a huge/hostile file is refused by its
+///   metadata length BEFORE any bytes are slurped, and a non-UTF-8 (binary)
+///   file surfaces as an `InvalidData` read error;
+/// - inline it ONLY if the read succeeded AND the running total plus this
+///   file's byte length stays within the whole-response cap
+///   ([`MAX_INLINE_TOTAL_BYTES`]);
+/// - otherwise SKIP it — a binary / over-per-file-cap / budget-exceeding /
+///   unreadable resource is silently omitted here (its path remains in
+///   `resources` for the agent to fetch itself). Skipping is per-file: a later,
+///   smaller resource can still fit even after a bigger one was skipped by the
+///   total budget, but the total is never exceeded.
+///
+/// Pure synchronous I/O — the caller runs it inside the existing
+/// `spawn_blocking` on the MCP async island.
+///
+/// [`bounded_read_to_string`]: crate::util::bounded_read_to_string
+fn inline_resource_bodies(resources: &[String]) -> Vec<ResourceBody> {
+    let mut out: Vec<ResourceBody> = Vec::new();
+    let mut total: u64 = 0;
+    for path in resources {
+        // Bounded read: refuses over-per-file-cap (by metadata length, no slurp)
+        // and non-UTF-8 (as an `InvalidData` error). A read failure of any kind
+        // (missing, unreadable, over-cap, binary) ⇒ skip this resource.
+        let Ok(content) =
+            crate::util::bounded_read_to_string(Path::new(path), MAX_INLINE_RESOURCE_BYTES)
+        else {
+            continue;
+        };
+        // Byte length of the UTF-8 content (== on-disk size for a text file).
+        // `saturating_add` keeps the budget check panic-free even in the
+        // (unreachable, given the per-file cap) event of an overflow.
+        let len = content.len() as u64;
+        if total.saturating_add(len) > MAX_INLINE_TOTAL_BYTES {
+            // Would exceed the whole-response budget — skip THIS file but keep
+            // scanning: a later, smaller resource may still fit.
+            continue;
+        }
+        total = total.saturating_add(len);
+        out.push(ResourceBody {
+            path: path.clone(),
+            content,
+        });
+    }
+    out
 }
 
 /// Build the [`SubstitutionContext`] for one `get_skill` call.
@@ -901,6 +1039,7 @@ impl Input {
             plugin: self.plugin.clone(),
             name: self.name.clone(),
             raw: self.raw,
+            include_resource_bodies: self.include_resource_bodies,
         }
     }
 }

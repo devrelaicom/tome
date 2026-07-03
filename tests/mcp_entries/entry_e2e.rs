@@ -345,6 +345,7 @@ fn enable_search_get_skill_with_substitution() {
                 plugin: "plug".into(),
                 name: "pipe-skill".into(),
                 raw: false,
+                include_resource_bodies: false,
             },
         ))
         .expect("get_skill ok");
@@ -405,6 +406,7 @@ fn get_skill_raw_mode_preserves_tokens_default_mode_substitutes() {
                 plugin: "plug".into(),
                 name: "raw-skill".into(),
                 raw: false,
+                include_resource_bodies: false,
             },
         ))
         .expect("get_skill (rendered) ok");
@@ -433,6 +435,7 @@ fn get_skill_raw_mode_preserves_tokens_default_mode_substitutes() {
                 plugin: "plug".into(),
                 name: "raw-skill".into(),
                 raw: true,
+                include_resource_bodies: false,
             },
         ))
         .expect("get_skill (raw) ok");
@@ -564,6 +567,7 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
                 plugin: "plug".into(),
                 name: "deploy".into(),
                 raw: false,
+                include_resource_bodies: false,
             },
         ))
         .expect("get_skill must resolve the command, not return unknown_skill");
@@ -947,4 +951,281 @@ fn matrix_plugin_filters_searches_and_prompts_per_flag_combination() {
         "default skill (user_invocable=false) MUST NOT appear in prompts/list; \
          got: {prompt_names:?}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// #333 — get_skill `include_resource_bodies`: byte-capped inline of small text
+// resources as `{ path, content }`.
+// ---------------------------------------------------------------------------
+
+/// Write extra sibling resource files into an enabled skill's on-disk
+/// directory (reachable via the cache symlink). The skill body was staged with
+/// `stage_workspace`; these land alongside the `SKILL.md` so `get_skill`'s
+/// resource walk enumerates them.
+fn write_skill_resource(catalog_root: &Path, skill: &str, rel: &str, bytes: &[u8]) {
+    let dir = catalog_root.join("plug").join("skills").join(skill);
+    let path = dir.join(rel);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+/// `include_resource_bodies: true` inlines small text resources as
+/// `{ path, content }` (content byte-exact), skips a binary/non-UTF-8
+/// resource (its path stays in `resources`, absent from `resource_bodies`),
+/// and leaves the flag-off output free of the key.
+#[test]
+fn get_skill_inlines_small_text_resources_and_skips_binary() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+
+    let skill_body = "---\nname: res-skill\ndescription: has resources.\n---\nbody\n";
+    let catalog_root = stage_workspace(&tmp, &paths, &[("res-skill", skill_body)], &[]);
+
+    // A UTF-8 text resource (inlined) + a binary resource (skipped). Invalid
+    // UTF-8 bytes: a lone 0xFF is never valid UTF-8.
+    write_skill_resource(
+        &catalog_root,
+        "res-skill",
+        "notes.txt",
+        b"hello resources\n",
+    );
+    write_skill_resource(
+        &catalog_root,
+        "res-skill",
+        "blob.bin",
+        &[0xFF, 0xFE, 0x00, 0x01],
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Flag off → `resource_bodies` absent (None) but both resources still in `resources`.
+    let off = rt
+        .block_on(get_skill::handle(
+            build_state(&paths, PromptRegistry::default()),
+            get_skill::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "res-skill".into(),
+                raw: false,
+                include_resource_bodies: false,
+            },
+        ))
+        .expect("get_skill (flag off) ok");
+    assert!(
+        off.resource_bodies.is_none(),
+        "flag off must leave resource_bodies None; got: {:?}",
+        off.resource_bodies,
+    );
+    // Both files enumerated in `resources` regardless of the flag.
+    assert!(off.resources.iter().any(|p| p.ends_with("notes.txt")));
+    assert!(off.resources.iter().any(|p| p.ends_with("blob.bin")));
+
+    // Flag on → the text resource is inlined; the binary one is skipped.
+    let on = rt
+        .block_on(get_skill::handle(
+            build_state(&paths, PromptRegistry::default()),
+            get_skill::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "res-skill".into(),
+                raw: false,
+                include_resource_bodies: true,
+            },
+        ))
+        .expect("get_skill (flag on) ok");
+
+    // `resources` still lists BOTH files (resource_bodies is a parallel view).
+    assert!(on.resources.iter().any(|p| p.ends_with("notes.txt")));
+    assert!(on.resources.iter().any(|p| p.ends_with("blob.bin")));
+
+    let bodies = on
+        .resource_bodies
+        .expect("flag on must populate resource_bodies");
+    // Only the text file is inlined, with byte-exact content.
+    assert_eq!(
+        bodies.len(),
+        1,
+        "binary resource must be skipped; got: {bodies:?}"
+    );
+    assert!(bodies[0].path.ends_with("notes.txt"));
+    assert_eq!(bodies[0].content, "hello resources\n");
+    assert!(
+        !bodies.iter().any(|b| b.path.ends_with("blob.bin")),
+        "non-UTF-8 resource must NOT be inlined; got: {bodies:?}",
+    );
+}
+
+/// An over-per-file-cap resource (> 64 KiB) is skipped even though it's valid
+/// text; its path stays in `resources`.
+#[test]
+fn get_skill_skips_resource_over_per_file_cap() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+
+    let skill_body = "---\nname: big-res\ndescription: oversized resource.\n---\nbody\n";
+    let catalog_root = stage_workspace(&tmp, &paths, &[("big-res", skill_body)], &[]);
+
+    // Small text (inlined) + a 65 KiB text file (> the 64 KiB per-file cap → skipped).
+    write_skill_resource(&catalog_root, "big-res", "small.txt", b"tiny\n");
+    let big = "A".repeat(65 * 1024);
+    write_skill_resource(&catalog_root, "big-res", "huge.txt", big.as_bytes());
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let out = rt
+        .block_on(get_skill::handle(
+            build_state(&paths, PromptRegistry::default()),
+            get_skill::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "big-res".into(),
+                raw: false,
+                include_resource_bodies: true,
+            },
+        ))
+        .expect("get_skill ok");
+
+    // Both still enumerated in `resources`.
+    assert!(out.resources.iter().any(|p| p.ends_with("huge.txt")));
+
+    let bodies = out.resource_bodies.expect("resource_bodies present");
+    assert_eq!(
+        bodies.len(),
+        1,
+        "over-per-file-cap file must be skipped; got: {bodies:?}"
+    );
+    assert!(bodies[0].path.ends_with("small.txt"));
+    assert!(
+        !bodies.iter().any(|b| b.path.ends_with("huge.txt")),
+        "over-cap resource must NOT be inlined",
+    );
+}
+
+/// The whole-response TOTAL budget (1 MiB) caps the inlined set: a directory of
+/// many ~50 KiB files inlines a prefix that fits, and the remaining paths still
+/// appear in `resources`. The total inlined content never exceeds the budget.
+#[test]
+fn get_skill_total_budget_caps_inlined_set() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+
+    let skill_body = "---\nname: many-res\ndescription: many resources.\n---\nbody\n";
+    let catalog_root = stage_workspace(&tmp, &paths, &[("many-res", skill_body)], &[]);
+
+    // 40 files × 50 KiB = 2000 KiB of text — each under the 64 KiB per-file cap,
+    // but well over the 1 MiB (1024 KiB) whole-response budget in aggregate.
+    // Zero-padded names so the sorted `resources` order is deterministic.
+    let chunk = "B".repeat(50 * 1024);
+    for i in 0..40 {
+        write_skill_resource(
+            &catalog_root,
+            "many-res",
+            &format!("part-{i:02}.txt"),
+            chunk.as_bytes(),
+        );
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let out = rt
+        .block_on(get_skill::handle(
+            build_state(&paths, PromptRegistry::default()),
+            get_skill::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "many-res".into(),
+                raw: false,
+                include_resource_bodies: true,
+            },
+        ))
+        .expect("get_skill ok");
+
+    // All 40 files are enumerated in `resources` (the walk isn't budget-gated).
+    assert_eq!(out.resources.len(), 40, "all resources enumerated");
+
+    let bodies = out.resource_bodies.expect("resource_bodies present");
+    // The budget stops inlining before all 40 — a strict prefix is inlined.
+    assert!(
+        bodies.len() < 40,
+        "total budget must cap the inlined set below the full 40; got {}",
+        bodies.len(),
+    );
+    assert!(!bodies.is_empty(), "at least the first files must inline");
+    // Hard bound: total inlined content bytes never exceed the 1 MiB budget.
+    let total: usize = bodies.iter().map(|b| b.content.len()).sum();
+    assert!(
+        total as u64 <= 1024 * 1024,
+        "inlined total {total} bytes must not exceed the 1 MiB whole-response budget",
+    );
+    // 50 KiB chunks: 1 MiB / 50 KiB = 20 full files fit (20 * 50 = 1000 KiB ≤ 1024 KiB).
+    assert_eq!(
+        bodies.len(),
+        20,
+        "expected exactly 20 × 50 KiB files under a 1 MiB budget"
+    );
+}
+
+/// A command entry never carries resource bodies — even with the flag set —
+/// because commands have no per-entry resource directory (`resources` empty,
+/// `resource_bodies` None).
+#[test]
+fn get_skill_command_omits_resource_bodies() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+
+    let cmd_body = "---\nname: run-it\ndescription: a command.\n---\ndo the thing\n";
+    stage_workspace(&tmp, &paths, &[], &[("run-it", cmd_body)]);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let out = rt
+        .block_on(get_skill::handle(
+            build_state(&paths, PromptRegistry::default()),
+            get_skill::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "run-it".into(),
+                raw: false,
+                include_resource_bodies: true,
+            },
+        ))
+        .expect("get_skill ok for command");
+
+    assert_eq!(out.kind, EntryKind::Command);
+    assert!(out.resources.is_empty(), "command has no resources");
+    assert!(
+        out.resource_bodies.is_none(),
+        "command must omit resource_bodies even with the flag set; got: {:?}",
+        out.resource_bodies,
+    );
+}
+
+/// #333 back-compat: an `Input` JSON omitting `include_resource_bodies`
+/// deserializes to `false` under `deny_unknown_fields` (the `#[serde(default)]`).
+#[test]
+fn get_skill_input_omitting_include_resource_bodies_defaults_to_false() {
+    let input: get_skill::Input =
+        serde_json::from_value(json!({ "catalog": "acme", "plugin": "plug", "name": "s" }))
+            .expect("legacy Input (no include_resource_bodies) must still deserialize");
+    assert!(
+        !input.include_resource_bodies,
+        "omitting include_resource_bodies must default to false",
+    );
+
+    let explicit: get_skill::Input = serde_json::from_value(json!({
+        "catalog": "acme", "plugin": "plug", "name": "s", "include_resource_bodies": true
+    }))
+    .expect("explicit include_resource_bodies:true must deserialize");
+    assert!(explicit.include_resource_bodies);
 }

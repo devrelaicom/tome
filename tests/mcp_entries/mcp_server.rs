@@ -214,6 +214,152 @@ fn get_skill_input_schema_advertises_raw_boolean() {
 }
 
 #[test]
+fn get_skill_input_schema_advertises_include_resource_bodies_boolean() {
+    // #333: the `get_skill` input schema (what `tools/list` exposes to an agent)
+    // must advertise the optional `include_resource_bodies` boolean so a client
+    // can discover the inline-resource mode. It carries `#[serde(default)]` ⇒ it
+    // is NOT in `required`. A rename, type change, or accidental promotion to
+    // required flips this test red.
+    let tools = Server::tool_router().list_all();
+    let get = tools
+        .iter()
+        .find(|t| t.name == "get_skill")
+        .expect("get_skill advertised");
+
+    let schema = &get.input_schema;
+    let properties = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("input schema has a `properties` object");
+
+    let flag = properties
+        .get("include_resource_bodies")
+        .expect("input schema advertises the `include_resource_bodies` property (#333)");
+    assert_eq!(
+        flag.get("type").and_then(|t| t.as_str()),
+        Some("boolean"),
+        "`include_resource_bodies` must be a boolean in the input schema; got: {flag}",
+    );
+
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .expect("get_skill input schema has a `required` array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        !required.contains(&"include_resource_bodies"),
+        "`include_resource_bodies` is defaulted (optional) and must not be required; got: {required:?}",
+    );
+}
+
+#[test]
+fn get_skill_output_schema_advertises_resource_bodies_array() {
+    // #333: the `get_skill` OUTPUT schema (derived by the #[tool] macro from
+    // `Result<Json<Output>, _>`) must advertise the optional `resource_bodies`
+    // property as an array of `{ path, content }` objects, so a client can
+    // discover the inlined-resource view. It is `Option` (skip_serializing_if)
+    // ⇒ NOT required.
+    let tools = Server::tool_router().list_all();
+    let get = tools
+        .iter()
+        .find(|t| t.name == "get_skill")
+        .expect("get_skill advertised");
+
+    let output_schema = get
+        .output_schema
+        .as_ref()
+        .expect("get_skill advertises an output schema");
+    let properties = output_schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("output schema has a `properties` object");
+
+    let rb = properties
+        .get("resource_bodies")
+        .expect("output schema advertises the `resource_bodies` property (#333)");
+
+    // `resource_bodies` is `Option<Vec<ResourceBody>>`; schemars models the
+    // Option as a nullable/`anyOf`-wrapped array whose `items` is a `$ref` into
+    // the top-level `$defs`. Rather than pin the exact Option-wrapping shape
+    // (schemars can render it as `anyOf` or `type:["array","null"]`), assert an
+    // `array` shape is reachable, then resolve the element `$ref` (if any) and
+    // confirm it carries `path` + `content` properties.
+    let items = find_array_items(rb)
+        .unwrap_or_else(|| panic!("resource_bodies must model an array; got: {rb}"));
+    let item_schema = resolve_ref(output_schema.as_ref(), items);
+    let item_props = item_schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .unwrap_or_else(|| panic!("resource_bodies items must be objects; got: {item_schema}"));
+    assert!(
+        item_props.contains_key("path"),
+        "resource_bodies item must have a `path` field; got: {item_schema}",
+    );
+    assert!(
+        item_props.contains_key("content"),
+        "resource_bodies item must have a `content` field; got: {item_schema}",
+    );
+
+    // `resource_bodies` must NOT be in `required` (it is an Option).
+    if let Some(required) = output_schema.get("required").and_then(|r| r.as_array()) {
+        let required: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            !required.contains(&"resource_bodies"),
+            "`resource_bodies` is optional and must not be required; got: {required:?}",
+        );
+    }
+}
+
+/// Locate the array-`items` object for a schemars-generated property that may
+/// be a bare array (`{"type":"array","items":{…}}`) OR an Option-wrapped array
+/// (rendered as `anyOf`/`oneOf` with one array branch, or
+/// `type:["array","null"]`). Returns the `items` object of the array branch.
+fn find_array_items(schema: &serde_json::Value) -> Option<&serde_json::Value> {
+    fn is_array_type(v: &serde_json::Value) -> bool {
+        match v.get("type") {
+            Some(serde_json::Value::String(s)) => s == "array",
+            Some(serde_json::Value::Array(types)) => {
+                types.iter().any(|t| t.as_str() == Some("array"))
+            }
+            _ => false,
+        }
+    }
+    if is_array_type(schema) {
+        return schema.get("items");
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(branches) = schema.get(key).and_then(|b| b.as_array()) {
+            for branch in branches {
+                if is_array_type(branch) {
+                    return branch.get("items");
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a schemars `{"$ref":"#/$defs/Name"}` node against the top-level
+/// schema's `$defs`; a non-`$ref` node is returned as-is. Only the local
+/// `#/$defs/<Name>` form (what schemars emits) is followed.
+fn resolve_ref<'a>(
+    root: &'a serde_json::Map<String, serde_json::Value>,
+    node: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    let Some(reference) = node.get("$ref").and_then(|r| r.as_str()) else {
+        return node;
+    };
+    let name = reference
+        .strip_prefix("#/$defs/")
+        .unwrap_or_else(|| panic!("unexpected $ref form: {reference}"));
+    root.get("$defs")
+        .and_then(|d| d.get(name))
+        .unwrap_or_else(|| panic!("$ref `{reference}` not found in $defs"))
+}
+
+#[test]
 fn get_skill_info_kind_schema_description_names_all_valid_kinds() {
     // #332: the `get_skill_info` input schema's `kind` property description
     // (what `tools/list` exposes to an agent) must enumerate the valid values
@@ -526,6 +672,7 @@ fn get_skill_returns_unknown_catalog_for_missing_name() {
                 plugin: "p".into(),
                 name: "s".into(),
                 raw: false,
+                include_resource_bodies: false,
             },
         ))
         .expect_err("unknown catalog must reject");
@@ -556,6 +703,7 @@ fn get_skill_rejects_empty_fields() {
                 plugin: "p".into(),
                 name: "s".into(),
                 raw: false,
+                include_resource_bodies: false,
             },
         ))
         .expect_err("empty catalog must reject");

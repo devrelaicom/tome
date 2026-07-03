@@ -164,7 +164,7 @@ impl Server {
             .map(Json)
     }
 
-    /// Fetch the body of one skill by `(catalog, plugin, name)` — typically a triple returned by a prior `search_skills` call. Returns the skill body with frontmatter stripped, plus the absolute paths of every sibling resource file in the skill's directory. Pass `raw: true` to receive the body with literal `${TOME_*}` substitution tokens preserved — for authoring/conversion workflows.
+    /// Fetch the body of one skill by `(catalog, plugin, name)` — typically a triple returned by a prior `search_skills` call. Returns the skill body with frontmatter stripped, plus the absolute paths of every sibling resource file in the skill's directory. Pass `raw: true` to receive the body with literal `${TOME_*}` substitution tokens preserved — for authoring/conversion workflows. Pass `include_resource_bodies: true` to also inline the contents of small text resources as `{ path, content }` (byte-capped per-file and in total), avoiding an extra file read per resource.
     #[tool(name = "get_skill")]
     async fn get_skill(
         &self,
@@ -173,7 +173,7 @@ impl Server {
         get_skill::handle(self.state.clone(), input).await.map(Json)
     }
 
-    /// Inspect one entry without loading its full body: full description, `when_to_use` guidance, plugin version, user-invocable flag, absolute path, and (for skills) a capped enumeration of adjacent files and subdirectories. The middle tier between `search_skills` (ranked discovery) and `get_skill` (full body). Use this to decide whether to load the body or to surface the description to a user.
+    /// Inspect one entry without loading its full body: full description, `when_to_use` guidance, plugin version, user-invocable flag, absolute path, and (for skills) a capped enumeration of adjacent files and subdirectories. The middle tier between `search_skills` (ranked discovery) and `get_skill` (full body). Use this to decide whether to load the body or to surface the description to a user. `name` accepts a `*` wildcard that resolves a unique match; if the name resolves nothing the error lists the available `(name, kind)` entries so you needn't re-search.
     #[tool(name = "get_skill_info")]
     async fn get_skill_info(
         &self,
