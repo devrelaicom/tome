@@ -120,6 +120,7 @@ Manage the local embedding and rerank models, against a pinned registry.
 | `remove [<name>...]` | `--all`, `--force` | Remove installed model directories and their manifests. Name one or more models, or pass `--all` to evict every installed model. `--force` skips the confirmation prompt — asked once for the whole set (required on a non-TTY). A failure on one model still processes the rest, then surfaces the first error's exit code. |
 | `profile [<tier>]` | — | Show or set the active model profile (`small\|medium\|large`). Omit `<tier>` to show the current profile; pass one to switch. The profile selects which embedder + reranker Tome uses; changing the embedder prints a `tome reindex` notice (never auto-reindexes). |
 | `test <capability>` | `--verify` | Run ONE real round-trip against the active model for `summariser`, `embedding`, or `reranker` (the configured remote provider, else the bundled local model) and report success. `--verify` additionally rehashes the active bundled model's on-disk primary artefact against its pinned SHA-256 (the same check `status`/`doctor`/`list` perform); a no-op for a remote provider (no on-disk artefact). Read-only — writes no stored state. |
+| `update` | `--include-registry` | Bring local model assets up to date: ensure the active profile's models are present, re-downloading any missing. `--include-registry` also refreshes the harness model-id registry override (`~/.tome/cache/model-registry.json`) from models.dev. |
 
 ## `tome reindex`
 
@@ -209,7 +210,8 @@ Per-project scopes and composition.
 | `rename <old> <new>` | | Rename a workspace, updating every bound project's marker atomically. Refuses either side of `global`. |
 | `regen-summary [<name>]` | | Force regeneration of a workspace's cached summaries and rules file. `<name>` defaults to the resolved workspace, but only after an interactive confirmation; on a non-terminal the name is required (exit `54` when there is no TTY, exit `2` under `--non-interactive` / `TOME_NONINTERACTIVE`), so the resolved (often `global`) scope is never regenerated silently. |
 | `remove <name>` | `--force` | Remove a workspace and its DB rows. Refuses the reserved `global` (exit `15`) and refuses without `--force` while projects are bound (exit `16`). |
-| `sync [<name>]` | | Copy the workspace's central rules file to every bound project. Idempotent; never regenerates summaries. |
+
+Workspace state is propagated to bound projects by the top-level [`tome sync`](#tome-sync) (the former `tome workspace sync`).
 
 See [Workspaces](../using-tome/workspaces.md).
 
@@ -224,8 +226,9 @@ OpenCode). Bare `tome harness` enumerates every supported harness.
 | `use [<name>...]` | `--all`, `--include-opt-in`, `--scope`, `--force` | Configure one or more harnesses in the chosen scope and run the sync. With **names**, exactly those (aliases and the opt-in targets `generic`/`generic-op` resolve by name). With **no names and no `--all`**, every auto-detected harness. With **`--all`**, every auto-detectable harness — but NOT the opt-in `generic`/`generic-op` targets; when it skips them it prints a one-line `note:` on stderr naming them (human output only, suppressed under `--json`). Add **`--include-opt-in`** (requires `--all`) to ALSO configure those opt-in targets. `--scope` is `project` (default), `workspace`, or `global`. `--force` overrides a harness-clash on the MCP config write (otherwise exit `19`). |
 | `remove [<name>...]` | `--all`, `--scope` | Remove one or more harnesses from the chosen scope and run the cleanup pass. Name harnesses, or pass `--all` to clear every harness configured in the resolved scope. (Unlike `use`, an empty selection with no `--all` is a usage error — there is no "all detected" default for a destructive op.) A per-harness failure still processes the rest, then surfaces the first error. |
 | `info [<name>]` | | Per-harness details for the current project: detection, targets, integration state, source-of-scope. With a **name**, reports that one harness. With **no name**, reports one section per harness in the effective list (the same set `harness list` reports), like `workspace info [<name>]`; `--json` returns an array. When nothing is configured for the scope it prints a short hint (exit `0`, not an error). An unknown explicit name exits `18`. |
-| `preview <name>` | `--plugin` | Preview what `harness sync` would deliver vs drop for one harness, per enabled entry: agents native/persona/unrepresented (with dropped model/tools), skills/commands MCP-routing, and hooks native vs `GUARDRAILS.md` fallback. `--plugin` scopes the preview to one enabled plugin. Read-only. |
-| `sync` | | Reconcile the project's filesystem against the effective harness list. Byte-for-byte idempotent. |
+| `preview <name>` | `--plugin` | Preview what harness sync would deliver vs drop for one harness, per enabled entry: agents native/persona/unrepresented (with dropped model/tools), skills/commands MCP-routing, and hooks native vs `GUARDRAILS.md` fallback. `--plugin` scopes the preview to one enabled plugin. Read-only. |
+| `session-start` | `--harness` | Reconcile the project, then print the workspace's skill-routing directive to stdout, generated fresh from live state. Intended as a `SessionStart` hook target; not usually run by hand. `--harness <name>` selects the host harness whose stdout envelope wraps the directive (absent → the raw directive). |
+| `run-hook` | `--event`, `--explain`, `--harness` | Translate a plugin hook event from the target harness's native format, run the enabled plugins' matching hooks, and emit the harness's wire decision. A hook-dispatch target; not run by hand — fails open. `--event <name>` is the CC event (`PreToolUse`, `PostToolUse`, …); `--harness <name>` is the host harness; `--explain` is a dry-run that reports what would fire without running anything. |
 
 `use` and `remove` take their harness selection as a bare **positional** (`<name>...`) — the deliberate exception. Every other multi-select of harnesses (`tome sync`, `tome meta add`/`remove`) uses the repeatable **`--harness`** flag, because there the harness is a filter on some other subject. `use`/`remove` act *on* the harnesses, so the positional reads naturally.
 
@@ -319,6 +322,22 @@ tome tier clear --all                       # reset every enabled entry in the w
 
 Tiers persist on `workspace_skills.tier`; `set`/`clear` run one UPDATE batch under
 the advisory index lock and regenerate the workspace `RULES.md` once afterwards.
+
+## `tome telemetry`
+
+Inspect and control anonymous usage telemetry. Telemetry is opt-out, auto-disabled
+under CI, and never blocks the foreground: commands only append to a local queue,
+which a detached background flusher drains best-effort.
+
+| Subcommand | Flags | Purpose |
+| --- | --- | --- |
+| `status` | | Report telemetry state: enabled + why, install UUID (if any), the delivery endpoint, queued-event count, and last-flush stamp. Read-only — never mints an install id. |
+| `inspect` | | Pretty-print the pending event queue WITHOUT sending it. Read-only — the queue file is byte-identical after. Reports any corrupt/unparsable lines; exits `92` if any exist. |
+| `on` | | Enable telemetry (sets the opt-out switch on) and ensure an install identity exists. |
+| `off` | | Disable telemetry. The install UUID is left intact; a later `on` resumes it. Use `purge` to also delete the identity. |
+| `reset` | `--yes` | Sever telemetry continuity: mint a fresh install UUID and clear the queue. Prompts for confirmation unless `--yes`. |
+| `purge` | | Delete all telemetry state (install UUID + queue) and switch telemetry off until explicitly re-enabled. |
+| `flush` | `--quiet` | Drain the pending event queue to the collector in the FOREGROUND and report the outcome. Exits `90` (`telemetry_endpoint_unreachable`) if the endpoint is unreachable. The detached background flusher invokes this with `--quiet` (no output, always exit `0`). |
 
 ## `tome config`
 

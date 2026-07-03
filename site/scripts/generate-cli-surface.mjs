@@ -14,7 +14,16 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const contractPath = path.join(root, 'specs/reference/cli-surface.json');
 const bin = process.argv[2] ?? path.join(root, '../target/release/tome');
 
-const IGNORED_FLAGS = new Set(['--help', '--version', '--json', '--workspace']);
+// clap `global = true` flags propagate onto every subcommand's `--help`, so
+// they must NOT be listed per-command — they belong in `globalFlags`.
+const IGNORED_FLAGS = new Set([
+  '--help',
+  '--version',
+  '--json',
+  '--no-color',
+  '--non-interactive',
+  '--workspace',
+]);
 const IGNORED_SUBCOMMANDS = new Set(['help']);
 
 function help(args) {
