@@ -102,6 +102,14 @@ The complete table, codes 0–89, is in
 - **An installed meta skill is missing, stale, or modified** — `tome doctor`
   reports it; `tome doctor --fix` re-installs from the bundled copy. See
   [Meta skills](./meta-skills.md).
+- **The MCP server never starts on a PATH-less or sandboxed host** (a CI runner,
+  an agent SDK) — an older Tome wrote the launch command as the bare name
+  `tome`, resolved against the host `PATH`. Where `tome` isn't on `PATH`, the
+  server never started and the agent got zero skills. Re-run
+  `tome sync` (or `tome doctor --fix`) to rewrite the config with an
+  absolute launcher; set `$TOME_BIN` to an absolute path first to pin the
+  launcher explicitly. Re-syncing stays idempotent, so it's safe to run on hosts
+  that were already fine.
 
 If `doctor` reports a problem it can't fix safely, it tells you what it found so
 you can resolve it by hand.
