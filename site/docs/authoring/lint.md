@@ -63,6 +63,14 @@ prints a `== <source> ==` section per source, and `--json` switches from the
 single object to JSONL — one `{ "source", "findings", "summary" }` record per
 line (see [below](#scripting-with---json)).
 
+Note the exit-code nuance for a source that fails *before* linting (an
+unreadable path, a level mismatch, or an autofix I/O error): with a **single**
+source that failure keeps its own exit code (`2` for a usage/parse error, `7`
+for an I/O error), preserving the pre-existing single-source behaviour; with
+**multiple** sources it is folded into the aggregate verdict and surfaces as
+`85`. So `tome plugin lint bad-path` exits `2`, while `tome plugin lint
+bad-path other-path` exits `85`.
+
 ## `--autofix`
 
 `--autofix` applies the mechanically-safe fixes — rewritable harness-isms,
