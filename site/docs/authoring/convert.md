@@ -101,11 +101,14 @@ Convert never modifies the source — it writes a converted copy:
 
 ## Remote sources
 
-The source can be a local path, an `owner/repo` shorthand, or a git URL.
-Remote sources are fetched as a shallow clone into a temporary directory and
-cleaned up on every exit path — success, failure, or `--strict` abort. If the
-source string could be read both ways (a local directory named `owner/repo`
-exists), the local path wins.
+The source is a single positional — a local path, an `owner/repo` shorthand, or
+a git URL. Remote sources are fetched as a shallow clone into a temporary
+directory and cleaned up on every exit path — success, failure, or `--strict`
+abort. If the source string could be read both ways (a local directory named
+`owner/repo` exists), the local path wins. (`convert` is single-source by
+design — unlike `lint`, it does not take multiple sources, because its staging
+is all-or-nothing.) A source path that is not valid UTF-8 is rejected with a
+clear usage error (exit `2`).
 
 For `tome catalog convert` only, `--no-fetch` (alias `--local-only`) skips the
 marketplace's remote-source plugins: they're warned and skipped instead of

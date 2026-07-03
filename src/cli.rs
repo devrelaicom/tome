@@ -1326,8 +1326,11 @@ pub struct SkillCreateArgs {
 pub struct ConvertArgs {
     /// Source to convert: a local path, an `owner/repo` shorthand, or a git
     /// URL. Remote sources are fetched into a temp clone (cleaned up on every
-    /// exit path). The source is never modified.
-    pub source: String,
+    /// exit path). The source is never modified. Typed as a path (an
+    /// `owner/repo`/URL source resolves through the same value); a non-UTF-8
+    /// path is rejected with a clear usage error.
+    #[arg(value_name = "PATH|REPO|URL", value_hint = clap::ValueHint::DirPath)]
+    pub source: PathBuf,
     /// New name for the converted artifact. Defaults to `<source-name>-tome`.
     pub name: Option<String>,
     /// Override source-format detection (closed set): claude-code | codex |
@@ -1377,8 +1380,12 @@ pub struct CatalogConvertArgs {
 /// Shared `lint` arguments across all three artifact levels.
 #[derive(Debug, clap::Args)]
 pub struct LintArgs {
-    /// The Tome artifact to validate (a local path).
-    pub source: String,
+    /// One or more Tome artifacts to validate (local paths). At least one is
+    /// required; the shell expands a glob (`plugins/*`) into multiple args.
+    /// Each source is linted independently (never-halt); the exit code is the
+    /// worst verdict across all of them.
+    #[arg(value_name = "PATH", value_hint = clap::ValueHint::DirPath, num_args = 1.., required = true)]
+    pub sources: Vec<PathBuf>,
     /// Apply mechanically-safe fixes (rewritable harness-isms, `name == dir`);
     /// report fixed vs. still-manual.
     #[arg(long)]
@@ -1656,6 +1663,75 @@ mod tests {
             panic!("expected `skill lint`");
         };
         assert!(a.autofix && a.dry_run);
+    }
+
+    // ---- issue #326: lint variadic sources + convert typed source ----------
+
+    /// Parse a `plugin lint` and pluck out its [`LintArgs`], or panic.
+    fn plugin_lint(args: &[&str]) -> super::LintArgs {
+        let cli = parse(args);
+        let Command::Plugin(super::PluginArgs {
+            command: Some(super::PluginCommand::Lint(a)),
+        }) = cli.command
+        else {
+            panic!("expected `plugin lint`");
+        };
+        a
+    }
+
+    #[test]
+    fn lint_accepts_a_single_source_as_a_pathbuf() {
+        // Back-compat: one positional still parses; `sources` holds exactly it.
+        let a = plugin_lint(&["tome", "plugin", "lint", "plugins/a"]);
+        assert_eq!(a.sources, vec![PathBuf::from("plugins/a")]);
+    }
+
+    #[test]
+    fn lint_accepts_multiple_sources() {
+        // The shell expands `plugins/*` into multiple args; the variadic
+        // positional collects them all (in order).
+        let a = plugin_lint(&[
+            "tome",
+            "plugin",
+            "lint",
+            "plugins/a",
+            "plugins/b",
+            "plugins/c",
+        ]);
+        assert_eq!(
+            a.sources,
+            vec![
+                PathBuf::from("plugins/a"),
+                PathBuf::from("plugins/b"),
+                PathBuf::from("plugins/c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lint_with_zero_sources_is_a_usage_error() {
+        // `num_args = 1..` ⇒ at least one source is required (clap usage → 2).
+        assert_eq!(parse_exit(&["tome", "plugin", "lint"]), 2);
+    }
+
+    #[test]
+    fn lint_multiple_sources_still_take_the_shared_flags() {
+        // Variadic positionals + trailing flags coexist: the flags bind, and all
+        // preceding positionals collect into `sources`.
+        let a = plugin_lint(&["tome", "plugin", "lint", "a", "b", "--strict", "--autofix"]);
+        assert_eq!(a.sources, vec![PathBuf::from("a"), PathBuf::from("b")]);
+        assert!(a.strict && a.autofix);
+    }
+
+    #[test]
+    fn convert_source_is_a_pathbuf_and_normal_sources_still_parse() {
+        // A plain path, an `owner/repo` shorthand, and a URL all parse into the
+        // typed `source: PathBuf` (the value_name/value_hint change parsing of
+        // none of them).
+        for src in ["./local/dir", "owner/repo", "https://example.com/x.git"] {
+            let a = skill_convert(&["tome", "skill", "convert", src]);
+            assert_eq!(a.source, PathBuf::from(src));
+        }
     }
 
     // ---- issue #314: plugin enable/disable variadic ids + --catalog -------

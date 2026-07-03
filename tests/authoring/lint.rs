@@ -1,12 +1,21 @@
 //! Integration coverage for `lint` (US3): parse a native Tome artifact +
 //! run the rule registry → verdict + exit codes. Read-only (the `--autofix`
 //! application + command wrappers land in US3-2).
+//!
+//! Issue #326 adds the variadic-source command path
+//! (`variadic_*`/`aggregate_*`/`never_halt_*` below), driven through
+//! `tome::commands::lint::run` so the loop, aggregate exit code, and never-halt
+//! forward-progress are exercised over the real command surface.
 
 use std::fs;
 use std::path::Path;
 
+use tome::authoring::detect::ArtifactLevel;
 use tome::authoring::lint::parse::parse_artifact;
 use tome::authoring::lint::{rules, run};
+use tome::cli::LintArgs;
+use tome::output::Mode;
+use tome::workspace::ResolvedScope;
 
 fn write_clean_plugin(dir: &Path) {
     fs::write(
@@ -384,4 +393,135 @@ fn findings_order_is_deterministic_across_runs() {
     let a = run(&parse_artifact(&dir).unwrap(), &rules::all());
     let b = run(&parse_artifact(&dir).unwrap(), &rules::all());
     assert_eq!(seq(&a), seq(&b), "findings order must be stable");
+}
+
+// --- issue #326: variadic `lint` command path ------------------------------
+
+/// A clean plugin at `<dir>/<name>`.
+fn clean_plugin_at(dir: &Path, name: &str) -> std::path::PathBuf {
+    let p = dir.join(name);
+    fs::create_dir(&p).unwrap();
+    write_clean_plugin(&p);
+    p
+}
+
+/// A plugin with an ERROR finding (invalid version + skill `name != dir`).
+fn erroring_plugin_at(dir: &Path, name: &str) -> std::path::PathBuf {
+    let p = dir.join(name);
+    fs::create_dir(&p).unwrap();
+    fs::write(
+        p.join("tome-plugin.toml"),
+        "name = \"p\"\nversion = \"notsemver\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(p.join("skills/realdir")).unwrap();
+    fs::write(
+        p.join("skills/realdir/SKILL.md"),
+        "---\nname: wrong\ndescription: a skill\n---\nbody\n",
+    )
+    .unwrap();
+    p
+}
+
+/// A plugin with a WARNING-only finding (a skill missing its description).
+fn warning_plugin_at(dir: &Path, name: &str) -> std::path::PathBuf {
+    let p = dir.join(name);
+    fs::create_dir(&p).unwrap();
+    fs::write(
+        p.join("tome-plugin.toml"),
+        "name = \"p\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(p.join("skills/foo")).unwrap();
+    fs::write(p.join("skills/foo/SKILL.md"), "---\nname: foo\n---\nbody\n").unwrap();
+    p
+}
+
+fn lint_args(sources: Vec<std::path::PathBuf>, strict: bool) -> LintArgs {
+    LintArgs {
+        sources,
+        autofix: false,
+        dry_run: false,
+        strict,
+    }
+}
+
+/// Run the plugin-level `lint` command path (JSON mode so no human noise) and
+/// return the boundary result. `Ok(())` = exit 0; the `Err`'s `exit_code()` is
+/// the aggregate exit code (85/86/2/...).
+fn run_plugin_lint(args: LintArgs) -> Result<(), i32> {
+    let scope = ResolvedScope::global_fallback();
+    tome::commands::lint::run(args, &scope, Mode::Json, ArtifactLevel::Plugin)
+        .map_err(|e| e.exit_code())
+}
+
+#[test]
+fn variadic_two_clean_sources_exit_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = clean_plugin_at(tmp.path(), "a");
+    let b = clean_plugin_at(tmp.path(), "b");
+    assert_eq!(run_plugin_lint(lint_args(vec![a, b], false)), Ok(()));
+}
+
+#[test]
+fn aggregate_exit_is_85_when_any_source_has_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let good = clean_plugin_at(tmp.path(), "good");
+    let bad = erroring_plugin_at(tmp.path(), "bad");
+    // Good source first, erroring second: the aggregate is still 85 (worst-of),
+    // and the good source was NOT skipped by the bad one (order-independent).
+    assert_eq!(run_plugin_lint(lint_args(vec![good, bad], false)), Err(85));
+}
+
+#[test]
+fn aggregate_exit_is_86_when_strict_and_only_warnings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let clean = clean_plugin_at(tmp.path(), "clean");
+    let warn = warning_plugin_at(tmp.path(), "warn");
+    // Without --strict, warnings pass (exit 0).
+    assert_eq!(
+        run_plugin_lint(lint_args(vec![clean.clone(), warn.clone()], false)),
+        Ok(())
+    );
+    // With --strict, the warning-only source promotes the aggregate to 86.
+    assert_eq!(run_plugin_lint(lint_args(vec![clean, warn], true)), Err(86));
+}
+
+#[test]
+fn never_halt_a_bad_source_does_not_abort_the_rest_and_dominates() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A non-existent / unparsable source sandwiched between two clean ones.
+    let good1 = clean_plugin_at(tmp.path(), "good1");
+    let missing = tmp.path().join("does-not-exist");
+    let good2 = clean_plugin_at(tmp.path(), "good2");
+
+    // The missing source is a pre-report failure; in multi-source mode it is
+    // captured (never-halt) and drives the aggregate to errors → 85, while the
+    // two clean sources are still linted (no early abort). If the loop had
+    // halted on the missing source, `good2` would never be reached — the fact
+    // that we get a deterministic 85 (not a propagated Usage/2) proves both the
+    // never-halt AND the aggregate-worst-of behaviour.
+    assert_eq!(
+        run_plugin_lint(lint_args(vec![good1, missing, good2], false)),
+        Err(85)
+    );
+}
+
+#[test]
+fn single_source_propagates_a_parse_error_as_usage_not_85() {
+    // Back-compat: a SINGLE non-Tome/non-existent source keeps the pre-#326
+    // behaviour — the parse `Usage`(2) propagates verbatim, NOT the aggregate
+    // 85. (The multi path converts it to 85; the single path must not.)
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("nope");
+    assert_eq!(run_plugin_lint(lint_args(vec![missing], false)), Err(2));
+}
+
+#[test]
+fn single_source_clean_and_error_exit_codes_are_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let clean = clean_plugin_at(tmp.path(), "clean");
+    let bad = erroring_plugin_at(tmp.path(), "bad");
+    assert_eq!(run_plugin_lint(lint_args(vec![clean], false)), Ok(()));
+    assert_eq!(run_plugin_lint(lint_args(vec![bad], false)), Err(85));
 }

@@ -7,9 +7,9 @@ sidebar_position: 4
 
 Before you publish a catalog — or enable one you just converted — you want a
 clear answer: what is malformed, what is lossy, and what will misbehave at
-read time. `tome {catalog,plugin,skill} lint <path>` reads a Tome artifact and
-reports findings. It never modifies files unless you pass `--autofix`, and it
-never stops partway through a run.
+read time. `tome {catalog,plugin,skill} lint <PATH>...` reads one or more Tome
+artifacts and reports findings. It never modifies files unless you pass
+`--autofix`, and it never stops partway through a run.
 
 ## Worked example
 
@@ -38,6 +38,30 @@ unparseable frontmatter becomes a finding against that file, and lint
 continues with the rest of the tree. You always get the complete report and
 the `Summary` line — never a stack trace partway through, and never a report
 that silently stopped at the first bad file.
+
+## Linting multiple sources
+
+`lint` accepts more than one source. Pass several paths, or let the shell expand
+a glob — Tome does no globbing of its own, so `plugins/*` is expanded by your
+shell into one argument per match:
+
+```bash
+tome plugin lint plugins/*
+tome skill lint skills/foo skills/bar skills/baz
+```
+
+Each source is linted independently, with the same never-halt guarantee applied
+per source: a source that fails to parse (or mismatches the command level, or
+hits an autofix I/O error) is reported as that source's failure and does **not**
+abort the remaining sources. The command's exit code is the **worst verdict
+across every source**: if any source has errors → `85`; else, under `--strict`,
+if any source has warnings → `86`; else `0`. This makes `tome plugin lint
+plugins/* --strict` a single CI gate over a whole tree.
+
+Single-source output is unchanged. With more than one source, human output
+prints a `== <source> ==` section per source, and `--json` switches from the
+single object to JSONL — one `{ "source", "findings", "summary" }` record per
+line (see [below](#scripting-with---json)).
 
 ## `--autofix`
 
@@ -79,8 +103,9 @@ users. The full code table lives in the
 
 ## Scripting with `--json`
 
-`--json` emits a single object — `{ "findings": [...], "summary": {...} }` —
-suitable for `jq`. Every finding carries the same fields:
+For a single source, `--json` emits a single object —
+`{ "findings": [...], "summary": {...} }` — suitable for `jq`. Every finding
+carries the same fields:
 
 ```json
 {
@@ -103,6 +128,14 @@ The per-finding shape is identical to a `convert --json` diagnostic line — see
 script that reads lint findings can read convert diagnostics with the same
 parser; convert only adds a `"type": "diagnostic"` discriminator and wraps the
 stream as JSONL.
+
+With **multiple** sources, `lint --json` also becomes JSONL: one record per
+source, each the single-source object with a leading `"source"` field naming the
+path it came from — `{ "source": "...", "findings": [...], "summary": {...} }`.
+A source that failed to lint still emits a record (its failure is surfaced as a
+`lint/source-failed` error finding plus an `"error"` field), so the stream
+accounts for every source you passed. The single-source object is left exactly
+as above — the `"source"` wrapper is added only when there is more than one.
 
 ## Pitfalls
 
