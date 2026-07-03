@@ -75,16 +75,24 @@ The manual version of that workflow lives in
 
 ## Keep installs up to date
 
-Installed copies can drift from the binary: a Tome upgrade ships a newer
-revision (**stale**), a file gets deleted (**missing**), or someone edits the
-installed copy (**modified**). `tome doctor` reports all three states for
-every installed meta skill, and
+An installed copy can drift from the binary. Tome compares the revision
+stamped on the on-disk `SKILL.md` against the one bundled in the running
+binary, and a copy whose revision no longer matches is **stale** — whether a
+Tome upgrade shipped a newer revision, or someone edited the installed file, or
+the file went malformed on disk. There is no separate "modified" state; an
+edited copy is a revision mismatch like any other, so it reads as stale.
+
+`tome doctor` reports every stale meta-skill install, and
 
 ```bash
 tome doctor --fix
 ```
 
-re-installs from the bundled copy.
+refreshes each one in place from the bundled copy. A location where the skill
+was never installed is `not-installed`, not stale, so `doctor` leaves it alone
+rather than installing where you didn't ask. To see what is installed and what
+isn't across every harness × scope pair, run `tome meta list` — that is the
+surface that shows `up-to-date`, `stale`, and `not-installed` side by side.
 
 ## Pitfalls
 
