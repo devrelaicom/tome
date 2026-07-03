@@ -22,13 +22,22 @@ use super::bind_cwd_and_sync;
 
 pub fn run(args: WorkspaceInitArgs, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
     let name = WorkspaceName::parse(&args.name)?;
+    // All-or-nothing for `init --bind`: run the dangerous-cwd guard BEFORE
+    // `init::init` creates the workspace, so `tome workspace init foo --bind`
+    // at $HOME / `/` refuses (exit 2) WITHOUT creating an orphan. `init` has
+    // no `--force`, so the effective bind force is always false. Plain `init`
+    // (no `--bind`) is UNCHANGED — never guarded; it may run at any CWD.
+    if args.bind {
+        super::guard_dangerous_cwd(false)?;
+    }
     let mut outcome = workspace::init::init(name, args.inherit_global, paths)?;
     if args.bind {
         // Mirror of `use --create`: bind `$CWD` to the freshly-created
         // workspace through the shared bind+sync path. `force` is false —
         // `init --bind` is not a "bind a dangerous CWD" escape hatch; the
         // home/`/` refusal still applies (rerun `workspace use --force` if
-        // that is genuinely intended).
+        // that is genuinely intended). The bind step re-checks the guard
+        // (idempotent defense-in-depth).
         let _ = bind_cwd_and_sync(outcome.name.clone(), false, paths)?;
         outcome.bound = true;
     }

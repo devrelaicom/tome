@@ -273,3 +273,102 @@ fn regen_summary_no_name_non_tty_refuses() {
         "refusal must not regenerate; got stdout {stdout}",
     );
 }
+
+/// True if a workspace named `name` appears in `tome workspace list --json`
+/// (a bare array of `{name, …}` rows). Used by the orphan-prevention tests.
+fn workspace_exists(env: &ToolEnv, name: &str) -> bool {
+    let output = env
+        .cmd()
+        .env_remove("TOME_WORKSPACE")
+        .args(["--json", "workspace", "list"])
+        .output()
+        .expect("spawn tome list");
+    assert!(
+        output.status.success(),
+        "workspace list must succeed; exit={:?} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let rows: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("list json: {e}; {stdout}"));
+    rows.as_array()
+        .expect("list is a JSON array")
+        .iter()
+        .any(|r| r["name"] == name)
+}
+
+/// All-or-nothing regression: `use --create <name>` run from a DANGEROUS CWD
+/// (the test's `$HOME`) WITHOUT `--force` must refuse (exit 2) and create
+/// NOTHING — the guard runs before the create step, so no orphan
+/// created-but-unbound workspace is left behind.
+#[test]
+fn use_create_at_dangerous_cwd_refuses_and_creates_nothing() {
+    let env = ToolEnv::new();
+    // `$HOME` is the dangerous CWD. `ToolEnv::cmd()` sets HOME to this path,
+    // and the guard canonicalises both sides — running from `$HOME` trips the
+    // "refusing to bind … home directory" refusal (exit 2).
+    let output = env
+        .cmd()
+        .env_remove("TOME_WORKSPACE")
+        .current_dir(env.home_path())
+        .args(["workspace", "use", "--create", "orphan-ws"])
+        .output()
+        .expect("spawn tome");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "use --create at $HOME without --force must refuse (2); stderr={}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !workspace_exists(&env, "orphan-ws"),
+        "refused use --create must NOT have created the workspace (no orphan)",
+    );
+}
+
+/// Mirror of the above for `init --bind`: a dangerous CWD without `--force`
+/// must refuse before `init` creates the workspace, leaving no orphan. (`init`
+/// has no `--force`; the refusal is intentional — rerun `workspace use --force`
+/// to bind a genuinely-unusual root.)
+#[test]
+fn init_bind_at_dangerous_cwd_refuses_and_creates_nothing() {
+    let env = ToolEnv::new();
+    let output = env
+        .cmd()
+        .env_remove("TOME_WORKSPACE")
+        .current_dir(env.home_path())
+        .args(["workspace", "init", "--bind", "orphan-init-ws"])
+        .output()
+        .expect("spawn tome");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "init --bind at $HOME must refuse (2); stderr={}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !workspace_exists(&env, "orphan-init-ws"),
+        "refused init --bind must NOT have created the workspace (no orphan)",
+    );
+
+    // And plain `init <name>` at the SAME dangerous CWD is UNCHANGED — it is
+    // never guarded, so it succeeds and creates the workspace.
+    let plain = env
+        .cmd()
+        .env_remove("TOME_WORKSPACE")
+        .current_dir(env.home_path())
+        .args(["workspace", "init", "plain-at-home"])
+        .output()
+        .expect("spawn tome");
+    assert!(
+        plain.status.success(),
+        "plain init (no --bind) must be unchanged / never guarded; exit={:?} stderr={}",
+        plain.status.code(),
+        String::from_utf8_lossy(&plain.stderr),
+    );
+    assert!(
+        workspace_exists(&env, "plain-at-home"),
+        "plain init must have created the workspace",
+    );
+}

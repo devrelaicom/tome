@@ -86,6 +86,23 @@ fn resolve_home() -> Result<PathBuf, TomeError> {
     })
 }
 
+/// Run the dangerous-cwd guard against `$CWD` (refuses `$HOME` / `/` without
+/// `--force`, exit 2). Extracted so the `use --create` / `init --bind`
+/// callers can run it BEFORE the create step, making those flows
+/// all-or-nothing: a refusal creates nothing, so no orphan workspace is left
+/// behind. `bind_cwd_and_sync` runs the same check again as cheap,
+/// idempotent defense-in-depth (a canonicalise + path comparison).
+///
+/// A no-op when `force` is set — mirroring the wrapper's `!args.force` gate.
+pub(crate) fn guard_dangerous_cwd(force: bool) -> Result<(), TomeError> {
+    if force {
+        return Ok(());
+    }
+    let cwd = std::env::current_dir().map_err(TomeError::Io)?;
+    let home_root = resolve_home()?;
+    binding::is_project_root_acceptable(&cwd, &home_root)
+}
+
 /// The single "bind `$CWD` to `name` + harness sync" sequence shared by
 /// `workspace use <name>`, `workspace use --create`, and
 /// `workspace init --bind` (issue #321). Factoring it here means all three

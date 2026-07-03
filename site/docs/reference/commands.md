@@ -193,7 +193,7 @@ Per-project scopes and composition.
 | `current` | | Print the workspace bound to the current directory on one line, with no decoration — for shell prompts / scripting (`$(tome workspace current 2>/dev/null)`). Read-only. Exits `12` (`workspace_not_bound`) with a clear stderr message and no stdout when nothing is bound. |
 | `info [<name>]` | | Report a workspace's details. Read-only; never acquires the advisory lock. Defaults to the resolved workspace. |
 | `rename <old> <new>` | | Rename a workspace, updating every bound project's marker atomically. Refuses either side of `global`. |
-| `regen-summary [<name>]` | | Force regeneration of a workspace's cached summaries and rules file. `<name>` defaults to the resolved workspace, but only after an interactive confirmation; on a non-terminal the name is required (exit `54`), so the resolved (often `global`) scope is never regenerated silently. |
+| `regen-summary [<name>]` | | Force regeneration of a workspace's cached summaries and rules file. `<name>` defaults to the resolved workspace, but only after an interactive confirmation; on a non-terminal the name is required (exit `54` when there is no TTY, exit `2` under `--non-interactive` / `TOME_NONINTERACTIVE`), so the resolved (often `global`) scope is never regenerated silently. |
 | `remove <name>` | `--force` | Remove a workspace and its DB rows. Refuses the reserved `global` (exit `15`) and refuses without `--force` while projects are bound (exit `16`). |
 | `sync [<name>]` | | Copy the workspace's central rules file to every bound project. Idempotent; never regenerates summaries. |
 

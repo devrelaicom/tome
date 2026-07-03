@@ -42,6 +42,11 @@ pub fn run(
             log_global_flag_ignored(global_workspace, raw);
             let name = WorkspaceName::parse(raw)?;
             let created = if args.create {
+                // All-or-nothing: run the dangerous-cwd guard BEFORE creating
+                // the workspace so a refusal at $HOME / `/` (without --force)
+                // leaves NO orphan created-but-unbound workspace behind. The
+                // bind step re-checks this (idempotent defense-in-depth).
+                super::guard_dangerous_cwd(args.force)?;
                 create_if_absent(&name, paths)?
             } else {
                 false
