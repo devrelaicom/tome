@@ -82,6 +82,14 @@ pub struct InitOutcome {
     pub catalogs_inherited: u32,
     /// Auto-assigned `workspaces.id` from the central DB.
     pub id: i64,
+    /// True when `tome workspace init --bind` also bound the current
+    /// directory to the freshly-created workspace. `init` itself never
+    /// binds, so it always returns `false`; the CLI wrapper flips it after
+    /// running the shared bind path. `#[serde(skip_serializing_if)]` keeps
+    /// the pre-#321 `init` JSON byte-identical: the field is absent unless
+    /// `--bind` ran.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bound: bool,
 }
 
 /// Create a new workspace.
@@ -225,6 +233,9 @@ pub fn init(
         path: workspace_dir,
         catalogs_inherited: inherited_count,
         id: new_workspace_id,
+        // `init` never binds; the CLI wrapper flips this after running the
+        // shared bind path when `--bind` was passed.
+        bound: false,
     })
 }
 

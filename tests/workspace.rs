@@ -8,6 +8,8 @@
 
 mod common;
 
+#[path = "workspace/arg_ergonomics.rs"]
+mod arg_ergonomics;
 #[path = "workspace/atomic_dir.rs"]
 mod atomic_dir;
 #[path = "workspace/atomicity.rs"]
