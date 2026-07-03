@@ -30,6 +30,21 @@ Overall:            [ok] healthy
 
 `--verify` runs deeper checks; `--json` emits machine-readable output.
 
+On a brand-new install with no catalog enrolled, `status` renders a "Getting
+started" block naming the real first-run flow instead of reading as broken:
+
+```text
+Getting started
+Not set up yet — start with:
+  1. tome catalog add <source>
+  2. tome plugin enable <catalog>/<plugin>
+  3. tome harness use <name>
+```
+
+This is guidance, not a failure — the health verdict and exit code are
+unchanged, and `--json` carries the same state through the existing
+`catalogs_enrolled` and `entries` fields rather than the onboarding prose.
+
 ## `tome doctor`
 
 `doctor` reports on every subsystem — index, models, harness config,
@@ -70,6 +85,26 @@ overall verdict (`Overall: [ok] healthy` when everything is healthy).
 repair inherits all their safety (marker-bounded edits, structural-match-only
 removal, symlink refusal). It won't take a destructive shortcut.
 
+### Informational advisories
+
+Some of what `doctor` reports is guidance, not a fault. These entries never
+affect the health verdict or the exit code, so a pristine install stays healthy
+and doesn't flip to a spurious [exit `75`](../reference/exit-codes.md).
+
+On a fresh install, `doctor` emits onboarding suggestions under the
+`onboarding` subsystem for the not-set-up conditions — no catalog enrolled, no
+plugins once a catalog exists, no harness configured. They are `auto_fixable:
+false` and are excluded from the `--fix` remaining-manual-fixes gate, so
+`doctor --fix` on a pristine install won't report them as unfixed manual work.
+
+`doctor` also reports **unrepresented hooks** — enabled-plugin hook events that
+a harness can only receive as `GUARDRAILS.md` prose because it has no native
+hook mechanism for them, so the hook is described rather than enforced. `status`
+shows an `unrepresented_hooks` count and `tome harness info` shows a
+`hooks_notice`. It is an advisory, not a failure, and mirrors the parallel
+report for unrepresented agents (agents with no native form on a rules-only
+harness).
+
 ## Common failures
 
 Every failure maps to a specific exit code — no generic "something went wrong".
@@ -88,8 +123,34 @@ Common cases:
 | `create`/`convert` refuses to overwrite existing output | `81` | Choose a fresh `--output`, or pass `--force`. |
 | `lint` found errors, or warnings under `--strict` | `85` / `86` | These are verdicts, not crashes — fix the findings. See [Linting](../authoring/lint.md). |
 
-The complete table, codes 0–89, is in
+The complete table, codes 0–95, is in
 [Exit codes](../reference/exit-codes.md).
+
+## Guidance in output
+
+Tome's human output points you at the next step so a result is never a dead end.
+
+Successful commands print a `next:` hint: `catalog add` points at browsing and
+enabling plugins, `plugin enable` at querying and syncing, `workspace use` at
+enrolling a catalog. Common first-run errors carry a recovery `hint:` line
+pointing at the right command — a `CatalogNotFound` names `tome catalog list`
+and `tome catalog add`, a `PluginNotFound` names `tome plugin list`, and an
+invalid `<catalog>/<plugin>` id does the same.
+
+Human error output is styled: a red `error:` prefix with the `hint:` and any
+other continuation lines dimmed and indented under it. The styling is gated on
+colour, so a piped, `NO_COLOR`, or `--no-color` invocation prints the plain
+`error: …` / `hint: …` text. `--json` output is unaffected — the `hint:` rides
+the error message into both stderr and the `--json` error envelope, while
+`next:` is human-stdout only.
+
+Empty results carry the same nudge. `tome query` distinguishes an empty corpus
+("No skills indexed for this scope yet — enable a plugin …") from a genuine
+no-match ("No match — try rephrasing …"), so you know whether to index or to
+rephrase. `tome plugin list` is catalog-aware: it tells you to add a catalog
+when none are enrolled, and to enable a plugin when catalogs exist but none are
+enabled. A bare `tome` or `tome --help` ends with a three-step "Getting started"
+quickstart. All of these are human-only; `--json` is untouched.
 
 ## Common issues
 

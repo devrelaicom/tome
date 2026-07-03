@@ -61,3 +61,30 @@ tome --version
 
 If that prints a version, the installation succeeded — continue to the
 [Quickstart](./quickstart.md).
+
+## Shell completions
+
+`tome completions <shell>` prints a completion script to stdout. Generating it
+is a pure static operation over the command tree, so it reads no HOME, index, or
+config — you can run it during shell setup before Tome is otherwise configured.
+Supported shells are `bash`, `zsh`, `fish`, `powershell`, and `elvish`; an
+unknown shell is a usage error (exit `2`) that lists the valid values.
+
+Redirect the output to the file your shell loads completions from. For zsh:
+
+```bash
+tome completions zsh > ~/.zfunc/_tome
+# ensure ~/.zfunc is on your fpath and compinit runs, e.g. in ~/.zshrc:
+#   fpath=(~/.zfunc $fpath)
+#   autoload -U compinit && compinit
+```
+
+For bash, source it directly or write it to a `bash_completion.d` file:
+
+```bash
+source <(tome completions bash)
+# or: tome completions bash > /usr/local/etc/bash_completion.d/tome
+```
+
+See [`tome completions`](../reference/commands.md#tome-completions) for the
+`fish`, `powershell`, and `elvish` recipes.
