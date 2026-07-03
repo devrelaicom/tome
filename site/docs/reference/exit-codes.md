@@ -113,7 +113,7 @@ below). It is never carried by the `--json` *error* envelope's `category`.
 | `43` | `hook_spec_parse_error` | Hook spec parse error. |
 | `44` | `hook_settings_write_failed` | Failed to write hook settings. |
 | `45` | `agent_translation_failed` | Agent translation failed. |
-| `46` | `guardrails_write_failed` | Failed to write the guardrails/rules file. |
+| `46` | `guardrails_write_failed` | Failed to write the guardrails file. |
 | `50` | `index_busy` | The index is locked by another process. |
 | `51` | `index_integrity_check_failure` | Index integrity check failed. |
 | `52` | `schema_too_new` | Index schema is newer than this binary supports. |

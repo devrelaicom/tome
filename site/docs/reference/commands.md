@@ -337,7 +337,7 @@ which a detached background flusher drains best-effort.
 | `off` | | Disable telemetry. The install UUID is left intact; a later `on` resumes it. Use `purge` to also delete the identity. |
 | `reset` | `--yes` | Sever telemetry continuity: mint a fresh install UUID and clear the queue. Prompts for confirmation unless `--yes`. |
 | `purge` | | Delete all telemetry state (install UUID + queue) and switch telemetry off until explicitly re-enabled. |
-| `flush` | `--quiet` | Drain the pending event queue to the collector in the FOREGROUND and report the outcome. Exits `90` (`telemetry_endpoint_unreachable`) if the endpoint is unreachable. The detached background flusher invokes this with `--quiet` (no output, always exit `0`). |
+| `flush` | `--quiet` | Drain the pending event queue to the collector in the FOREGROUND and report the outcome. The drain is best-effort: an unreachable endpoint does not fail the command, so `flush` always exits `0` and deliverability is never surfaced as an exit code. The detached background flusher invokes this with `--quiet` (no output). |
 
 ## `tome config`
 
