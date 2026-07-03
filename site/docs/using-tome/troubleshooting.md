@@ -156,7 +156,7 @@ quickstart. All of these are human-only; `--json` is untouched.
 
 ## Common issues
 
-- **A harness's config drifted** — run `tome harness sync`, or
+- **A harness's config drifted** — run `tome sync`, or
   `tome doctor --fix` to reconcile rules, MCP wiring, agents, and hooks from
   current state.
 - **Search returns nothing or stale results** — reindex the affected scope.

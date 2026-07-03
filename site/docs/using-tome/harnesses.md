@@ -53,7 +53,7 @@ supports:
   written as per-plugin marker regions in the harness's rules file. Tome only
   ever edits inside its own markers, so your hand-written content is left alone.
 - **MCP server config** — wiring so the harness can reach `tome mcp` for search
-  and skill loading. When `tome harness sync` writes this wiring, it stamps the
+  and skill loading. When `tome sync` writes this wiring, it stamps the
   host's identity into the spawned server's arguments
   (`tome mcp --workspace <ws> --harness <name>`) — the
   [MCP server](./mcp-server.md)'s `meta` tool relies on that stamp to know which
@@ -103,7 +103,7 @@ tome harness list          # show configured harnesses
 tome harness info          # show what Tome manages for every effective harness
 tome harness info <name>   # ...or just one harness
 tome harness preview <name> # what sync would deliver vs drop for this harness (read-only)
-tome harness sync          # re-write native config from current state
+tome sync                  # re-write native config from current state
 tome harness remove <name> # remove Tome-managed config for a harness
 ```
 
