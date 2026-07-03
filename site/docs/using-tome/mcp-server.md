@@ -77,7 +77,7 @@ The fourth tool lets the agent extend its own harness:
 - **`meta`** — installs a bundled [meta skill](./meta-skills.md) into the
   **host harness**, the agent the server is running inside. Install-only:
   there is no removal over MCP. The host's identity comes from the `--harness`
-  flag that `tome harness sync` stamps into the server arguments
+  flag that `tome sync` stamps into the server arguments
   (`tome mcp --workspace <ws> --harness <name>`). If the server was started
   with no host, an unknown one, or one without native skill support, the tool
   **fails closed** with the `no_harness_detected` category — the MCP
