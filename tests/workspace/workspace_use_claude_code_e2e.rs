@@ -122,6 +122,7 @@ impl Fixture {
             workspace_name: &self.workspace,
             force,
             only_harness: None,
+            dry_run: false,
         }
     }
 

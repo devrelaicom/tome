@@ -71,7 +71,7 @@ pub(crate) fn reconcile_open_plugins(
         let action = if is_live {
             emit_bundle(snap, root, deps, project_root, outcome, &mut first_error)
         } else {
-            remove_bundle(snap, root, outcome, &mut first_error)
+            remove_bundle(snap, root, deps.dry_run, outcome, &mut first_error)
         };
         actions.insert(snap.name.clone(), action);
     }
@@ -94,6 +94,24 @@ fn emit_bundle(
     // for the Created-vs-Updated label, and `emit_tome_op` re-runs the symlink
     // guard before any write.
     let pre_existed = root.exists();
+    // Dry run: the atomic landing always replaces, so the real run's
+    // classification is fully determined by `pre_existed` — record it without
+    // staging or landing anything.
+    if deps.dry_run {
+        let action = if pre_existed {
+            Action::Updated
+        } else {
+            Action::Created
+        };
+        record_action(
+            outcome,
+            &snap.name,
+            SyncSubsystem::OpenPlugins,
+            root,
+            action,
+        );
+        return action;
+    }
     match open_plugins::emit_tome_op(root, project_root, deps.workspace_name.as_str(), &snap.name) {
         Ok(()) => {
             let action = if pre_existed {
@@ -124,10 +142,19 @@ fn emit_bundle(
 fn remove_bundle(
     snap: &HarnessSnapshot,
     root: &Path,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
 ) -> Action {
-    match open_plugins::remove_tome_op(root) {
+    // Dry run: the read-only probe half of `remove_tome_op` (same refusal +
+    // structural-ownership checks), so preview and real removal cannot
+    // disagree about what is Tome's to remove.
+    let result = if dry_run {
+        open_plugins::probe_tome_op_removal(root)
+    } else {
+        open_plugins::remove_tome_op(root)
+    };
+    match result {
         Ok(RemoveOutcome::Removed) => {
             record_action(
                 outcome,
@@ -170,6 +197,7 @@ mod tests {
             workspace_name: ws,
             force: false,
             only_harness: None,
+            dry_run: false,
         }
     }
 

@@ -240,6 +240,7 @@ fn deps_for<'a>(fx: &'a Fixture) -> SyncDeps<'a> {
         workspace_name: &fx.workspace,
         force: false,
         only_harness: None,
+        dry_run: false,
     }
 }
 

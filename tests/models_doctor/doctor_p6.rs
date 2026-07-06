@@ -359,6 +359,7 @@ fn hooks_and_guardrails_and_agents_reports_after_sync() {
         workspace_name: &workspace,
         force: false,
         only_harness: None,
+        dry_run: false,
     };
     tome::harness::sync::sync_project(tmp.path(), &deps).expect("sync project");
 
@@ -422,6 +423,7 @@ fn fix_reemits_and_removes_orphan_agents() {
         workspace_name: &workspace,
         force: false,
         only_harness: None,
+        dry_run: false,
     };
     tome::harness::sync::sync_project(tmp.path(), &deps).expect("initial sync");
 
@@ -973,6 +975,7 @@ fn fix_rerenders_stale_guardrails() {
         workspace_name: &workspace,
         force: false,
         only_harness: None,
+        dry_run: false,
     };
     tome::harness::sync::sync_project(project_root, &deps).expect("initial sync");
 

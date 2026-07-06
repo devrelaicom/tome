@@ -437,6 +437,7 @@ fn drifted_harness_rules_fix_resyncs() {
         workspace_name: &ws,
         force: false,
         only_harness: None,
+        dry_run: false,
     };
     tome::harness::sync::sync_project(&project_root, &sync_deps).expect("initial sync");
 
@@ -515,6 +516,7 @@ fn missing_harness_mcp_fix_resyncs() {
         workspace_name: &ws,
         force: false,
         only_harness: None,
+        dry_run: false,
     };
     tome::harness::sync::sync_project(&project_root, &sync_deps).expect("initial sync");
 

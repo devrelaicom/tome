@@ -42,6 +42,7 @@ pub fn run(
             rules_only: false,
             harness_only: false,
             harness: vec![],
+            dry_run: false,
         };
         if let Err(e) =
             crate::commands::sync::sync_one_project(&name, project_root, &sync_args, paths)

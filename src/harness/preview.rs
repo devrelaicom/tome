@@ -317,6 +317,7 @@ pub fn pipeline(
         workspace_name: workspace,
         force: false,
         only_harness: None,
+        dry_run: false,
     };
     // The read-only enumeration records a first parse error but never halts; a
     // hook whose source is malformed/unreadable is omitted from `canonical`

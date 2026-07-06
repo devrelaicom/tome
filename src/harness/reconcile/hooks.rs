@@ -203,6 +203,7 @@ pub(crate) fn reconcile_hooks(
                 &prepared,
                 &tome_session,
                 &tome_session_suffix,
+                deps.dry_run,
                 outcome,
                 &mut recon,
             )
@@ -213,6 +214,7 @@ pub(crate) fn reconcile_hooks(
                 &prepared,
                 &tome_session,
                 &tome_session_suffix,
+                deps.dry_run,
                 outcome,
                 &mut recon,
             )
@@ -270,13 +272,14 @@ fn merge_hooks_for_harness(
     prepared: &[crate::harness::hooks::RewrittenHooks],
     tome_session: &crate::harness::hooks::RewrittenHooks,
     tome_session_suffix: &str,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     recon: &mut HooksReconciliation,
 ) -> Action {
     let pre_existed = settings_path.exists();
     let mut changed = false;
     for hooks in prepared {
-        match crate::harness::hooks::merge_into_settings(settings_path, hooks) {
+        match crate::harness::hooks::merge_into_settings_with(settings_path, hooks, dry_run) {
             Ok(true) => changed = true,
             Ok(false) => {}
             Err(e) => {
@@ -287,10 +290,11 @@ fn merge_hooks_for_harness(
         }
     }
     // Tome's own SessionStart entry via the launcher-tolerant upsert.
-    match crate::harness::hooks::merge_tome_owned_into_settings(
+    match crate::harness::hooks::merge_tome_owned_into_settings_with(
         settings_path,
         tome_session,
         tome_session_suffix,
+        dry_run,
     ) {
         Ok(true) => changed = true,
         Ok(false) => {}
@@ -323,12 +327,13 @@ fn remove_hooks_for_harness(
     prepared: &[crate::harness::hooks::RewrittenHooks],
     tome_session: &crate::harness::hooks::RewrittenHooks,
     tome_session_suffix: &str,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     recon: &mut HooksReconciliation,
 ) -> Action {
     let mut changed = false;
     for hooks in prepared {
-        match crate::harness::hooks::remove_from_settings(settings_path, hooks) {
+        match crate::harness::hooks::remove_from_settings_with(settings_path, hooks, dry_run) {
             Ok(true) => changed = true,
             Ok(false) => {}
             Err(e) => {
@@ -340,10 +345,11 @@ fn remove_hooks_for_harness(
     }
     // Tome's own SessionStart entry via the launcher-tolerant removal (so a
     // previously-written absolute-launcher entry is removed, not orphaned).
-    match crate::harness::hooks::remove_tome_owned_from_settings(
+    match crate::harness::hooks::remove_tome_owned_from_settings_with(
         settings_path,
         tome_session,
         tome_session_suffix,
+        dry_run,
     ) {
         Ok(true) => changed = true,
         Ok(false) => {}
@@ -404,7 +410,12 @@ pub(crate) fn reconcile_tome_session_hooks(
         let is_live = effective_names.contains(&snap.name);
         let action = if is_live {
             let pre_existed = path.exists();
-            match crate::harness::hooks::merge_tome_owned_into_settings(path, &entry, &suffix) {
+            match crate::harness::hooks::merge_tome_owned_into_settings_with(
+                path,
+                &entry,
+                &suffix,
+                deps.dry_run,
+            ) {
                 Ok(true) => {
                     let a = if pre_existed {
                         Action::Updated
@@ -423,7 +434,12 @@ pub(crate) fn reconcile_tome_session_hooks(
                 }
             }
         } else {
-            match crate::harness::hooks::remove_tome_owned_from_settings(path, &entry, &suffix) {
+            match crate::harness::hooks::remove_tome_owned_from_settings_with(
+                path,
+                &entry,
+                &suffix,
+                deps.dry_run,
+            ) {
                 Ok(true) => {
                     record_action(
                         outcome,
@@ -533,6 +549,7 @@ pub(crate) fn reconcile_command_hooks(
                 event,
                 &command,
                 &suffix,
+                deps.dry_run,
                 outcome,
                 &mut first_error,
             )
@@ -544,6 +561,7 @@ pub(crate) fn reconcile_command_hooks(
                 event,
                 &command,
                 &suffix,
+                deps.dry_run,
                 outcome,
                 &mut first_error,
             )
@@ -1028,6 +1046,7 @@ fn merge_command_hook(
     event: HookEvent,
     command: &str,
     args_suffix: &str,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
 ) -> Action {
@@ -1071,7 +1090,7 @@ fn merge_command_hook(
     if !changed {
         return Action::LeftAlone;
     }
-    if let Err(e) = write_hook_file(path, &doc) {
+    if !dry_run && let Err(e) = write_hook_file(path, &doc) {
         if first_error.is_none() {
             *first_error = Some(e);
         }
@@ -1100,6 +1119,7 @@ fn remove_command_hook(
     event: HookEvent,
     command: &str,
     args_suffix: &str,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
 ) -> Action {
@@ -1142,7 +1162,7 @@ fn remove_command_hook(
     // effort: a failed navigation here just leaves an empty array, harmless.
     prune_empty(&mut doc, spec, event);
 
-    if let Err(e) = write_hook_file(path, &doc) {
+    if !dry_run && let Err(e) = write_hook_file(path, &doc) {
         if first_error.is_none() {
             *first_error = Some(e);
         }
@@ -1445,6 +1465,7 @@ fn reconcile_one_harness_dispatch(
         &snap.hook_event_names,
         workspace,
         &used,
+        deps.dry_run,
         outcome,
         first_error,
     );
@@ -1454,6 +1475,7 @@ fn reconcile_one_harness_dispatch(
         effective_canonical,
         &used,
         is_live,
+        deps.dry_run,
         outcome,
         first_error,
         raw_event_passthrough,
@@ -1473,6 +1495,7 @@ fn reconcile_dispatch_hook_file(
     event_names: &[(PortableEvent, &'static str)],
     workspace: &str,
     used: &[PortableEvent],
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
 ) -> Action {
@@ -1565,7 +1588,7 @@ fn reconcile_dispatch_hook_file(
     if !added_any && !removed_any && !version_stamped {
         return Action::LeftAlone;
     }
-    if let Err(e) = write_hook_file(path, &doc) {
+    if !dry_run && let Err(e) = write_hook_file(path, &doc) {
         if first_error.is_none() {
             *first_error = Some(e);
         }
@@ -1599,6 +1622,7 @@ fn reconcile_dispatch_manifest(
     canonical: &[CanonicalHook],
     used: &[PortableEvent],
     is_live: bool,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
     raw_event_passthrough: bool,
@@ -1652,6 +1676,10 @@ fn reconcile_dispatch_manifest(
             }
             return Action::LeftAlone;
         }
+        if dry_run {
+            record_action(outcome, name, SyncSubsystem::Hooks, path, Action::Removed);
+            return Action::Removed;
+        }
         match std::fs::remove_file(path) {
             Ok(()) => {
                 record_action(outcome, name, SyncSubsystem::Hooks, path, Action::Removed);
@@ -1683,7 +1711,7 @@ fn reconcile_dispatch_manifest(
         if !need_write {
             return Action::LeftAlone;
         }
-        if let Err(e) = write_manifest(path, &manifest) {
+        if !dry_run && let Err(e) = write_manifest(path, &manifest) {
             if first_error.is_none() {
                 *first_error = Some(e);
             }
@@ -1742,6 +1770,7 @@ mod command_hook_tests {
             event,
             CMD,
             SUFFIX,
+            false,
             &mut outcome,
             &mut first_error,
         );
@@ -1880,6 +1909,7 @@ mod command_hook_tests {
             HookEvent::SessionStart,
             CMD,
             SUFFIX,
+            false,
             &mut outcome,
             &mut first_error,
         );
@@ -1916,6 +1946,7 @@ mod command_hook_tests {
             HookEvent::SessionStart,
             CMD,
             SUFFIX,
+            false,
             &mut outcome,
             &mut first_error,
         );
@@ -1956,6 +1987,7 @@ mod command_hook_tests {
             HookEvent::SessionStart,
             CMD,
             SUFFIX,
+            false,
             &mut outcome,
             &mut first_error,
         );
@@ -1971,6 +2003,7 @@ mod command_hook_tests {
             HookEvent::SessionStart,
             CMD,
             SUFFIX,
+            false,
             &mut outcome,
             &mut first_error,
         );
@@ -2008,6 +2041,7 @@ mod command_hook_tests {
             HookEvent::SessionStart,
             CMD,
             SUFFIX,
+            false,
             &mut outcome,
             &mut first_error,
         );
@@ -2039,6 +2073,7 @@ mod command_hook_tests {
             HookEvent::PreInvocation,
             CMD,
             SUFFIX,
+            false,
             &mut outcome,
             &mut first_error,
         );
@@ -2064,6 +2099,7 @@ mod command_hook_tests {
             HookEvent::SessionStart,
             CMD,
             SUFFIX,
+            false,
             &mut outcome,
             &mut first_error,
         );
@@ -2088,6 +2124,7 @@ mod command_hook_tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
         // A default stub returns `SessionSteering::None`.
         let stub = StubHarness::default();
@@ -2121,6 +2158,7 @@ mod command_hook_tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
         let stub = StubHarness::default().with_session_steering(SessionSteering::CommandHook {
             file_spec: HookFileSpec::DevinHooksV1,
@@ -2229,6 +2267,7 @@ mod us2_real_harness_tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
         let snapshots = vec![crate::harness::sync::snapshot_for_test(
             module,
@@ -2380,6 +2419,7 @@ mod us2_real_harness_tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
         let snapshots = vec![crate::harness::sync::snapshot_for_test(
             &crate::harness::devin::DEVIN,
@@ -2442,6 +2482,7 @@ mod us2_real_harness_tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
         let snapshots = vec![crate::harness::sync::snapshot_for_test(
             &crate::harness::copilot_cli::COPILOT_CLI,
@@ -2492,6 +2533,7 @@ mod us2_real_harness_tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
         let snapshots = vec![crate::harness::sync::snapshot_for_test(
             &crate::harness::gemini::GEMINI,
@@ -2682,6 +2724,7 @@ mod launcher_change_tests {
                 HookEvent::SessionStart,
                 &a,
                 SUFFIX,
+                false,
                 &mut outcome,
                 &mut err,
             ),
@@ -2695,6 +2738,7 @@ mod launcher_change_tests {
                 HookEvent::SessionStart,
                 &a,
                 SUFFIX,
+                false,
                 &mut outcome,
                 &mut err,
             ),
@@ -2721,6 +2765,7 @@ mod launcher_change_tests {
             HookEvent::SessionStart,
             &cmd_with("tome"),
             SUFFIX,
+            false,
             &mut outcome,
             &mut err,
         );
@@ -2734,6 +2779,7 @@ mod launcher_change_tests {
                 HookEvent::SessionStart,
                 &cmd_with(b),
                 SUFFIX,
+                false,
                 &mut outcome,
                 &mut err,
             ),
@@ -2761,6 +2807,7 @@ mod launcher_change_tests {
             HookEvent::SessionStart,
             &cmd_with("/opt/a/tome"),
             SUFFIX,
+            false,
             &mut outcome,
             &mut err,
         );
@@ -2773,6 +2820,7 @@ mod launcher_change_tests {
                 HookEvent::SessionStart,
                 &cmd_with("/usr/bin/tome"),
                 SUFFIX,
+                false,
                 &mut outcome,
                 &mut err,
             ),
@@ -2817,6 +2865,7 @@ mod launcher_change_tests {
                 HookEvent::SessionStart,
                 &cmd_with("tome"),
                 SUFFIX,
+                false,
                 &mut outcome,
                 &mut err,
             ),
@@ -2946,6 +2995,7 @@ mod launcher_change_tests {
             event_names,
             "ws",
             &used,
+            false,
             &mut outcome,
             &mut err,
         );
@@ -3002,6 +3052,7 @@ mod launcher_change_tests {
             event_names,
             "ws",
             &used,
+            false,
             &mut outcome2,
             &mut err2,
         );

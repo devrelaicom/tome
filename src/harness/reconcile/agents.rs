@@ -181,6 +181,7 @@ pub(crate) fn reconcile_agents(
                     &enabled_plugins,
                     strip_agent_privileges,
                     &model_registry,
+                    deps.dry_run,
                     outcome,
                     &mut recon,
                 )
@@ -189,7 +190,14 @@ pub(crate) fn reconcile_agents(
                 Action::LeftAlone
             } else {
                 // Non-live or non-supporting: remove all Tome-owned files/dirs.
-                cleanup_all_owned_agents(name, &dir, m.agent_path_strategy(), outcome, &mut recon)
+                cleanup_all_owned_agents(
+                    name,
+                    &dir,
+                    m.agent_path_strategy(),
+                    deps.dry_run,
+                    outcome,
+                    &mut recon,
+                )
             };
             recon.actions.insert(name.to_string(), action);
         }
@@ -263,6 +271,7 @@ fn emit_agents_for_harness(
     enabled_plugins: &HashSet<String>,
     strip_agent_privileges: bool,
     model_registry: &crate::model_registry::ModelRegistry,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     recon: &mut AgentReconciliation,
 ) -> Action {
@@ -328,7 +337,7 @@ fn emit_agents_for_harness(
             continue;
         }
         let agent_label = format!("{}/{}", agent.canonical.plugin, agent.canonical.name);
-        match write_agent_file(&target, &translated.rendered, &agent_label) {
+        match write_agent_file(&target, &translated.rendered, &agent_label, dry_run) {
             Ok(AgentWrite::Created) => {
                 wrote = true;
                 record_action(
@@ -369,7 +378,7 @@ fn emit_agents_for_harness(
     match removed_disabled_owned(dir, enabled_plugins) {
         Ok(paths) => {
             for path in paths {
-                match remove_owned_agent(&path, removal_strategy) {
+                match remove_owned_agent(&path, removal_strategy, dry_run) {
                     Ok(()) => {
                         removed = true;
                         record_action(
@@ -414,6 +423,7 @@ fn cleanup_all_owned_agents(
     name: &str,
     dir: &Path,
     strategy: crate::harness::AgentPathStrategy,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     recon: &mut AgentReconciliation,
 ) -> Action {
@@ -421,7 +431,7 @@ fn cleanup_all_owned_agents(
     match all_owned_in_dir(dir) {
         Ok(paths) => {
             for path in paths {
-                match remove_owned_agent(&path, strategy) {
+                match remove_owned_agent(&path, strategy, dry_run) {
                     Ok(()) => {
                         any_removed = true;
                         record_action(outcome, name, SyncSubsystem::Agents, &path, Action::Removed);
@@ -452,6 +462,7 @@ fn cleanup_all_owned_agents(
 fn remove_owned_agent(
     path: &Path,
     strategy: crate::harness::AgentPathStrategy,
+    dry_run: bool,
 ) -> Result<(), TomeError> {
     crate::util::refuse_symlinked_component(path).map_err(|_| {
         TomeError::AgentTranslationFailed {
@@ -462,6 +473,11 @@ fn remove_owned_agent(
                 .to_string(),
         }
     })?;
+    // Dry run: the symlink refusal above still applies (a real run would fail
+    // the same way), but the removal itself is previewed, not performed.
+    if dry_run {
+        return Ok(());
+    }
     match strategy {
         crate::harness::AgentPathStrategy::FlatFile => rules_file::remove_standalone(path),
         crate::harness::AgentPathStrategy::DirPerAgent { .. } => {
@@ -551,6 +567,7 @@ fn write_agent_file(
     target: &Path,
     rendered: &str,
     agent_label: &str,
+    dry_run: bool,
 ) -> Result<AgentWrite, TomeError> {
     // Map the symlink refusal to THIS sink's dedicated exit code (45), never
     // a regression to `Io` (7). Non-symlink IO from the read/write below keeps
@@ -573,7 +590,9 @@ fn write_agent_file(
     // `write_standalone` is idempotent + atomic + symlink-refusing + creates
     // the parent dir via umask-governed `create_dir_all` — exactly the
     // agent-file discipline.
-    rules_file::write_standalone(target, rendered)?;
+    if !dry_run {
+        rules_file::write_standalone(target, rendered)?;
+    }
     Ok(classification)
 }
 
@@ -714,6 +733,7 @@ mod tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
 
         // Build a faithful snapshot via the same path the orchestrator uses
@@ -792,6 +812,7 @@ mod tests {
             &target,
             "---\nname: reviewer\n---\nbody\n",
             "plugin/reviewer",
+            false,
         )
         .expect_err("symlinked intermediate component must be refused");
         assert_eq!(
@@ -823,6 +844,7 @@ mod tests {
             &target,
             "---\nname: reviewer\n---\nbody\n",
             "plugin/reviewer",
+            false,
         )
         .expect_err("symlinked final node must be refused");
         assert_eq!(
@@ -846,6 +868,7 @@ mod tests {
             &target,
             "---\nname: reviewer\n---\nbody\n",
             "plugin/reviewer",
+            false,
         )
         .expect("clean agent write must succeed");
         assert_eq!(out, AgentWrite::Created);
@@ -895,6 +918,7 @@ mod tests {
             "stub",
             &dir,
             crate::harness::AgentPathStrategy::FlatFile,
+            false,
             &mut outcome,
             &mut recon,
         );
@@ -968,6 +992,7 @@ mod tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
         let snapshots = vec![
             crate::harness::sync::snapshot_for_test(&live, &project, home.path()),
@@ -1057,6 +1082,7 @@ mod tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
 
         // Snapshot both real modules.
@@ -1176,6 +1202,7 @@ mod tests {
             workspace_name: &workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         };
         let snapshots = vec![crate::harness::sync::snapshot_for_test(
             &stub,

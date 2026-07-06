@@ -1580,6 +1580,7 @@ pub fn build_unrepresented_hooks_report(
         workspace_name: workspace,
         force: false,
         only_harness: None,
+        dry_run: false,
     };
     let mut first_error: Option<TomeError> = None;
     let canonical =

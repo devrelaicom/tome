@@ -132,6 +132,8 @@ mod settings_workspace_ref_outside_project;
 mod sync_algorithm;
 #[path = "harness_settings/sync_boundary.rs"]
 mod sync_boundary;
+#[path = "harness_settings/sync_dry_run.rs"]
+mod sync_dry_run;
 #[path = "harness_settings/sync_idempotence.rs"]
 mod sync_idempotence;
 #[path = "harness_settings/sync_outcome_json_shape.rs"]

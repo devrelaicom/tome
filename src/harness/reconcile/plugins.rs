@@ -72,6 +72,7 @@ pub(crate) fn reconcile_plugins(
     project_root: &Path,
     effective_names: &HashSet<String>,
     snapshots: &[HarnessSnapshot],
+    dry_run: bool,
     outcome: &mut SyncOutcome,
 ) -> (std::collections::HashMap<String, Action>, Option<TomeError>) {
     let mut actions = std::collections::HashMap::new();
@@ -98,9 +99,22 @@ pub(crate) fn reconcile_plugins(
         let is_live = effective_names.contains(&snap.name);
 
         let action = if is_live {
-            install_shim(&snap.name, &resolved_dir, *kind, outcome, &mut first_error)
+            install_shim(
+                &snap.name,
+                &resolved_dir,
+                *kind,
+                dry_run,
+                outcome,
+                &mut first_error,
+            )
         } else {
-            remove_shim(&snap.name, &resolved_dir, outcome, &mut first_error)
+            remove_shim(
+                &snap.name,
+                &resolved_dir,
+                dry_run,
+                outcome,
+                &mut first_error,
+            )
         };
         actions.insert(snap.name.clone(), action);
     }
@@ -129,6 +143,7 @@ fn install_shim(
     name: &str,
     dir: &Path,
     kind: ShimKind,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
 ) -> Action {
@@ -162,7 +177,7 @@ fn install_shim(
             }
             continue;
         }
-        match write_shim_file(&target, file.bytes) {
+        match write_shim_file(&target, file.bytes, dry_run) {
             Ok(ShimWrite::Created) => {
                 wrote = true;
                 record_action(
@@ -211,6 +226,7 @@ fn install_shim(
 fn remove_shim(
     name: &str,
     dir: &Path,
+    dry_run: bool,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
 ) -> Action {
@@ -220,6 +236,24 @@ fn remove_shim(
     // is detected here and then refused by `remove_standalone` below.
     if target.symlink_metadata().is_err() {
         return Action::LeftAlone;
+    }
+    // Dry run: preview the removal. The symlink refusal a real run would hit
+    // still applies (read-only probe), so the preview surfaces the same error.
+    if dry_run {
+        if let Err(e) = crate::util::refuse_symlinked_component(&target).map_err(TomeError::Io) {
+            if first_error.is_none() {
+                *first_error = Some(e);
+            }
+            return Action::LeftAlone;
+        }
+        record_action(
+            outcome,
+            name,
+            SyncSubsystem::Plugins,
+            &target,
+            Action::Removed,
+        );
+        return Action::Removed;
     }
     match rules_file::remove_standalone(&target) {
         Ok(()) => {
@@ -258,7 +292,7 @@ enum ShimWrite {
 /// A symlinked component on the write path → `Io` (exit 7), matching how
 /// `write_standalone` classifies a refused symlink (the shim sink has no
 /// dedicated exit code; generic IO is the contract for it).
-fn write_shim_file(target: &Path, bytes: &[u8]) -> Result<ShimWrite, TomeError> {
+fn write_shim_file(target: &Path, bytes: &[u8], dry_run: bool) -> Result<ShimWrite, TomeError> {
     // Map the symlink refusal explicitly to `Io` (7) up front so a refused
     // intermediate/final component fails closed BEFORE the write. The shim
     // bytes are UTF-8 TypeScript source; decode for the byte-stable idempotence
@@ -288,7 +322,9 @@ fn write_shim_file(target: &Path, bytes: &[u8]) -> Result<ShimWrite, TomeError> 
     // `write_standalone` is idempotent + atomic + symlink-refusing + creates
     // the parent dir via umask-governed `create_dir_all` — exactly the shim
     // write discipline.
-    rules_file::write_standalone(target, contents)?;
+    if !dry_run {
+        rules_file::write_standalone(target, contents)?;
+    }
     Ok(classification)
 }
 
@@ -339,7 +375,7 @@ mod tests {
         // --- Live install ---
         let live: HashSet<String> = std::iter::once("stub".to_string()).collect();
         let mut outcome = SyncOutcome::default();
-        let (actions, err) = reconcile_plugins(&project, &live, &snapshots, &mut outcome);
+        let (actions, err) = reconcile_plugins(&project, &live, &snapshots, false, &mut outcome);
         assert!(err.is_none(), "{err:?}");
         assert_eq!(actions.get("stub"), Some(&Action::Created));
         let shim = project.join(".opencode/plugin/tome.ts");
@@ -354,7 +390,7 @@ mod tests {
 
         // --- Idempotent re-run (still live) ---
         let mut outcome2 = SyncOutcome::default();
-        let (actions2, err2) = reconcile_plugins(&project, &live, &snapshots, &mut outcome2);
+        let (actions2, err2) = reconcile_plugins(&project, &live, &snapshots, false, &mut outcome2);
         assert!(err2.is_none());
         assert_eq!(actions2.get("stub"), Some(&Action::LeftAlone));
         assert!(outcome2.added.is_empty() && outcome2.updated.is_empty());
@@ -363,7 +399,7 @@ mod tests {
         // --- Non-live: remove ONLY tome.ts ---
         let none: HashSet<String> = HashSet::new();
         let mut outcome3 = SyncOutcome::default();
-        let (actions3, err3) = reconcile_plugins(&project, &none, &snapshots, &mut outcome3);
+        let (actions3, err3) = reconcile_plugins(&project, &none, &snapshots, false, &mut outcome3);
         assert!(err3.is_none());
         assert_eq!(actions3.get("stub"), Some(&Action::Removed));
         assert!(!shim.exists(), "tome.ts removed on non-live");
@@ -383,14 +419,14 @@ mod tests {
         // Install live, then seed a developer file alongside tome.ts.
         let live: HashSet<String> = std::iter::once("stub".to_string()).collect();
         let mut outcome = SyncOutcome::default();
-        reconcile_plugins(&project, &live, &snapshots, &mut outcome);
+        reconcile_plugins(&project, &live, &snapshots, false, &mut outcome);
         let dev = project.join(".pi/extensions/dev.ts");
         std::fs::write(&dev, b"// developer's own extension\n").unwrap();
 
         // Non-live: only tome.ts goes.
         let none: HashSet<String> = HashSet::new();
         let mut outcome2 = SyncOutcome::default();
-        let (_, err) = reconcile_plugins(&project, &none, &snapshots, &mut outcome2);
+        let (_, err) = reconcile_plugins(&project, &none, &snapshots, false, &mut outcome2);
         assert!(err.is_none());
         assert!(
             !project.join(".pi/extensions/tome.ts").exists(),
@@ -426,7 +462,7 @@ mod tests {
 
         let live: HashSet<String> = std::iter::once("stub".to_string()).collect();
         let mut outcome = SyncOutcome::default();
-        let (actions, err) = reconcile_plugins(&project, &live, &snapshots, &mut outcome);
+        let (actions, err) = reconcile_plugins(&project, &live, &snapshots, false, &mut outcome);
         assert!(err.is_none(), "{err:?}");
         assert_eq!(
             actions.get("stub"),
@@ -462,7 +498,7 @@ mod tests {
         )];
         let live: HashSet<String> = std::iter::once("stub".to_string()).collect();
         let mut outcome = SyncOutcome::default();
-        let (actions, err) = reconcile_plugins(&project, &live, &snapshots, &mut outcome);
+        let (actions, err) = reconcile_plugins(&project, &live, &snapshots, false, &mut outcome);
         assert!(actions.is_empty(), "no TsPlugin harness → no actions");
         assert!(err.is_none());
         assert!(outcome.added.is_empty() && outcome.removed.is_empty());
@@ -486,7 +522,7 @@ mod tests {
         symlink(&real_dir, base.join("link_plugins")).unwrap();
 
         let target = base.join("link_plugins").join("tome.ts");
-        let err = write_shim_file(&target, b"// shim\n")
+        let err = write_shim_file(&target, b"// shim\n", false)
             .expect_err("symlinked intermediate component must be refused");
         assert_eq!(
             err.exit_code(),
@@ -513,7 +549,7 @@ mod tests {
         let target = dir.join("tome.ts");
         symlink(base.join("decoy.ts"), &target).unwrap();
 
-        let err = write_shim_file(&target, b"// shim\n")
+        let err = write_shim_file(&target, b"// shim\n", false)
             .expect_err("symlinked final node must be refused");
         assert_eq!(err.exit_code(), 7, "got {err:?}");
         // The decoy target is untouched (write refused, not followed).
@@ -536,7 +572,7 @@ mod tests {
 
         let mut outcome = SyncOutcome::default();
         let mut first_error = None;
-        let action = remove_shim("stub", &dir, &mut outcome, &mut first_error);
+        let action = remove_shim("stub", &dir, false, &mut outcome, &mut first_error);
         assert_eq!(action, Action::LeftAlone);
         let err = first_error.expect("symlinked shim must be refused + recorded");
         assert_eq!(err.exit_code(), 7, "got {err:?}");
@@ -565,7 +601,7 @@ mod tests {
         )];
         let live: HashSet<String> = std::iter::once("stub".to_string()).collect();
         let mut outcome = SyncOutcome::default();
-        let (actions, err) = reconcile_plugins(&project, &live, &snapshots, &mut outcome);
+        let (actions, err) = reconcile_plugins(&project, &live, &snapshots, false, &mut outcome);
         assert!(err.is_none());
         assert_eq!(actions.get("stub"), Some(&Action::Created));
         assert!(project.join(".cline/plugins/tome.ts").is_file());

@@ -386,6 +386,7 @@
       "subcommands": {},
       "flags": [
         "--all",
+        "--dry-run",
         "--harness",
         "--harness-only",
         "--rules-only",
