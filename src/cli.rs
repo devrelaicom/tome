@@ -204,6 +204,8 @@ pub struct CompletionsArgs {
 pub enum ConfigCommand {
     /// Print every curated config knob with its effective value and a
     /// `(default)`/`(config)`/`(env)` provenance annotation. Read-only.
+    /// Output honours the global `--json` flag (`tome config show --json`
+    /// emits the same knobs as a machine-readable document).
     Show(ConfigShowArgs),
     /// Run the strict config parse. Prints "config is valid" and exits 0 on a
     /// good (or absent) config; on a malformed config, prints the legible
@@ -252,17 +254,19 @@ pub enum TierCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct TierSetArgs {
-    /// The entry to retier, as `<plugin>/<name>`, followed by the tier. The name
-    /// segment may be a `*` glob (`<plugin>/*` retiers every entry of the plugin;
+    /// The entry to retier, as `<plugin>/<name>`, followed by the tier (1, 2,
+    /// or 3): `tome tier set my-plugin/my-skill 1`. The name segment may be a
+    /// `*` glob (`<plugin>/*` retiers every entry of the plugin;
     /// `<plugin>/foo-*` retiers a subset). Mutually exclusive with `--plugin`;
-    /// exactly one selection source is required. With `--plugin` the sole
-    /// positional is the tier.
-    ///
-    /// clap sees these as two optional trailing positionals so the tier can be
-    /// the only one when `--plugin` is present; the id/tier split, the XOR with
-    /// `--plugin`, and the tier's 1..=3 range are all validated at runtime
-    /// (missing/both/out-of-range → usage exit 2), preserving the pre-#317 exit
-    /// codes for the single-id form.
+    /// pick exactly one of the two. With `--plugin`, the tier is the only
+    /// positional.
+    // #441: the paragraph above is USER-VISIBLE `--help` text — keep it
+    // usage-oriented. The engineering rationale: clap sees these as two
+    // optional trailing positionals so the tier can be the only one when
+    // `--plugin` is present; the id/tier split, the XOR with `--plugin`, and
+    // the tier's 1..=3 range are all validated at runtime
+    // (missing/both/out-of-range → usage exit 2), preserving the pre-#317
+    // exit codes for the single-id form.
     #[arg(value_name = "ID", num_args = 0..=2)]
     pub positionals: Vec<String>,
     /// Retier every enabled tierable entry of a plugin, selected as
