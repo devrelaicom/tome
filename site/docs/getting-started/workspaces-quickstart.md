@@ -189,7 +189,7 @@ tome workspace list
 ```
 
 A global `[workspace] default` (priority 3) wins over a project marker (priority
-4). When one is set, the per-project binding goes inactive: harness sync,
+4). When one is set, the per-project binding goes inactive: `tome sync`,
 `${TOME_PROJECT_DIR}`, and the status `harness_mcp` report stop tracking the
 project. Tome prints a one-line `note:` on stderr when this happens, so the
 shadowing is never silent. Unset the default or run `tome workspace use` in the

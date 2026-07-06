@@ -75,9 +75,15 @@ any context window.
 
 ## Enable a plugin
 
+Plugins are addressed as `<catalog>/<plugin>`:
+
 ```bash
-tome plugin enable midnight-verify
+tome plugin enable midnight-expert/midnight-verify
 ```
+
+A bare plugin name (`tome plugin enable midnight-verify`) also resolves when
+exactly one enrolled catalog has a plugin by that name; an ambiguous bare name
+is an error that lists the candidates.
 
 Enabling parses the plugin's entries — skills, commands, agents — and indexes
 them for [search](./search.md). Check the current state:
@@ -110,10 +116,10 @@ nothing until you enable them.
 
 ### Variations
 
-- `tome plugin show <name>` prints one plugin's entries, grouped by kind with
-  per-entry annotations — useful before deciding whether to enable it.
-- `tome plugin disable <name>` reverses this: the plugin's entries are removed
-  from the index, and your harnesses drop them on the next sync.
+- `tome plugin show <catalog>/<plugin>` prints one plugin's entries, grouped by
+  kind with per-entry annotations — useful before deciding whether to enable it.
+- `tome plugin disable <catalog>/<plugin>` reverses this: the plugin's entries
+  are removed from the index, and your harnesses drop them on the next sync.
 - Enable or disable **several plugins at once**, and use `*` wildcards to match
   by pattern:
 
@@ -177,7 +183,7 @@ devnet tooling, and more, available across every harness Tome supports.
 
 ```bash
 tome catalog add devrelaicom/midnight-expert-tome
-tome plugin enable midnight-expert
+tome plugin enable midnight-expert/midnight-expert
 ```
 
 The catalog bundles **13 plugins** covering the Compact development lifecycle,

@@ -95,7 +95,7 @@ tome query "verify a Compact contract"
 tome query "deploy a contract" --top-k 5 --json
 ```
 
-On a fresh machine, the first `tome plugin enable` prompts to download the pinned inference models (~804 MB total — see [Models](#models)); that step needs a network connection and a little patience. Pass `--yes` to skip the prompt.
+On a fresh machine, the first `tome plugin enable` prompts to download the pinned inference models (~1.16 GB total for the default `medium` profile — see [Models](#models)); that step needs a network connection and a little patience. Pass `--yes` to skip the prompt.
 
 Inside a configured harness, the same search runs over the [MCP server](#run-as-an-mcp-server): the agent searches, then loads only the top result instead of holding every indexed entry in context.
 

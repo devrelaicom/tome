@@ -192,7 +192,7 @@ code, signalling "the repair did something, but manual work remains".
 
 | Flag | Meaning |
 | --- | --- |
-| `--fix` | Apply the safe automatic repairs: re-download missing/corrupt models, re-clone broken catalog caches, forward-migrate the index schema, re-copy project rules, re-run harness sync for drifted harnesses. Destructive repairs are never automatic. |
+| `--fix` | Apply the safe automatic repairs: re-download missing/corrupt models, re-clone broken catalog caches, forward-migrate the index schema, re-copy project rules, re-run the sync for drifted harnesses. Destructive repairs are never automatic. |
 | `--force` | Override the safe-by-default repair gates (currently: rewrite developer-authored harness MCP `tome` entries on `--fix`). |
 | `--verify` | Rehash installed models against their pinned SHA-256. |
 
@@ -203,7 +203,7 @@ Per-project scopes and composition.
 | Subcommand | Flags | Purpose |
 | --- | --- | --- |
 | `use [<name>]` | `--create`, `--force` | Bind the current project directory to a workspace (writes `<cwd>/.tome/config.toml`). `--create` creates the workspace first (create-if-absent), so `init` + `use` happen in one step; it requires an explicit `<name>`. Omit `<name>` on a terminal to pick from a list of existing workspaces; on a non-terminal an omitted name is a usage error (exit `54`). `--force` bypasses the refusal when CWD is your home directory or the filesystem root. |
-| `init <name>` | `--bind`, `--inherit-global` | Create a workspace. `--bind` also binds the current directory to the new workspace (the mirror of `use --create`), running harness sync in the same step. `--inherit-global` seeds its catalogs from the global workspace's enrolments at creation time. |
+| `init <name>` | `--bind`, `--inherit-global` | Create a workspace. `--bind` also binds the current directory to the new workspace (the mirror of `use --create`), running a sync in the same step. `--inherit-global` seeds its catalogs from the global workspace's enrolments at creation time. |
 | `list` | `--absolute` | List workspaces with catalog, plugin, skill, and bound-project counts. The workspace resolved for the current directory is marked with `*` in the `Cur` column. `Last used` renders as a relative time (e.g. `2 days ago`) by default; `--absolute` forces the RFC 3339 timestamp. `--json` adds a per-row `current` boolean and always emits the absolute `last_used_at` (the relative rendering is human-only). |
 | `current` | | Print the workspace bound to the current directory on one line, with no decoration — for shell prompts / scripting (`$(tome workspace current 2>/dev/null)`). Read-only. Exits `12` (`workspace_not_bound`) with a clear stderr message and no stdout when nothing is bound. |
 | `info [<name>]` | | Report a workspace's details. Read-only; never acquires the advisory lock. Defaults to the resolved workspace. |
@@ -226,7 +226,7 @@ OpenCode). Bare `tome harness` enumerates every supported harness.
 | `use [<name>...]` | `--all`, `--include-opt-in`, `--scope`, `--force` | Configure one or more harnesses in the chosen scope and run the sync. With **names**, exactly those (aliases and the opt-in targets `generic`/`generic-op` resolve by name). With **no names and no `--all`**, every auto-detected harness. With **`--all`**, every auto-detectable harness — but NOT the opt-in `generic`/`generic-op` targets; when it skips them it prints a one-line `note:` on stderr naming them (human output only, suppressed under `--json`). Add **`--include-opt-in`** (requires `--all`) to ALSO configure those opt-in targets. `--scope` is `project` (default), `workspace`, or `global`. `--force` overrides a harness-clash on the MCP config write (otherwise exit `19`). |
 | `remove [<name>...]` | `--all`, `--scope` | Remove one or more harnesses from the chosen scope and run the cleanup pass. Name harnesses, or pass `--all` to clear every harness configured in the resolved scope. (Unlike `use`, an empty selection with no `--all` is a usage error — there is no "all detected" default for a destructive op.) A per-harness failure still processes the rest, then surfaces the first error. |
 | `info [<name>]` | | Per-harness details for the current project: detection, targets, integration state, source-of-scope. With a **name**, reports that one harness. With **no name**, reports one section per harness in the effective list (the same set `harness list` reports), like `workspace info [<name>]`; `--json` returns an array. When nothing is configured for the scope it prints a short hint (exit `0`, not an error). An unknown explicit name exits `18`. |
-| `preview <name>` | `--plugin` | Preview what harness sync would deliver vs drop for one harness, per enabled entry: agents native/persona/unrepresented (with dropped model/tools), skills/commands MCP-routing, and hooks native vs `GUARDRAILS.md` fallback. `--plugin` scopes the preview to one enabled plugin. Read-only. |
+| `preview <name>` | `--plugin` | Preview what a sync would deliver vs drop for one harness, per enabled entry: agents native/persona/unrepresented (with dropped model/tools), skills/commands MCP-routing, and hooks native vs `GUARDRAILS.md` fallback. `--plugin` scopes the preview to one enabled plugin. Read-only. |
 | `session-start` | `--harness` | Reconcile the project, then print the workspace's skill-routing directive to stdout, generated fresh from live state. Intended as a `SessionStart` hook target; not usually run by hand. `--harness <name>` selects the host harness whose stdout envelope wraps the directive (absent → the raw directive). |
 | `run-hook` | `--event`, `--explain`, `--harness` | Translate a plugin hook event from the target harness's native format, run the enabled plugins' matching hooks, and emit the harness's wire decision. A hook-dispatch target; not run by hand — fails open. `--event <name>` is the CC event (`PreToolUse`, `PostToolUse`, …); `--harness <name>` is the host harness; `--explain` is a dry-run that reports what would fire without running anything. |
 
@@ -409,7 +409,7 @@ built-in `meta` tool, plus user-invocable entries as MCP prompts.
 `--harness <name>` tells the server which harness is hosting it
 (`claude-code`, `cursor`, `codex`, `opencode`) so the built-in `meta` tool can
 install skills into the right place. You rarely write it yourself — `tome
-harness sync` stamps it into the spawned server's arguments. See the
+sync` stamps it into the spawned server's arguments. See the
 [MCP server](../using-tome/mcp-server.md).
 
 The server writes a rotating JSON-lines log to `~/.tome/logs/mcp.log`
