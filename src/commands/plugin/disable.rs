@@ -2,7 +2,7 @@
 //!
 //! Thin CLI wrapper over `plugin::lifecycle::disable`. The lock acquisition,
 //! "already-disabled" detection, and atomic UPDATE all live in the library.
-//! This module owns the confirmation-prompt UX (`--force` short-circuit,
+//! This module owns the confirmation-prompt UX (`--yes` short-circuit,
 //! non-TTY refusal with pointer message) and the human / JSON presentation
 //! contract.
 //!
@@ -60,16 +60,17 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
         .map(crate::plugin::SelectorError::into_tome_error);
 
     // ---- confirmation (ONE prompt for the whole batch) --------------------
-    // `--force`/`prompt::non_interactive()` skip the prompt (as before). A
-    // non-TTY without `--force` refuses with the documented pointer + exit 54
+    // `--yes` (or its hidden `--force` alias, #438)/`prompt::non_interactive()`
+    // skip the prompt (as before). A non-TTY without it refuses with the
+    // documented pointer + exit 54
     // (`NotATerminal`). Interactive: a SINGLE resolved id keeps the exact
     // "Disable {id}?" string; MULTIPLE ids ask once naming them.
-    if !args.force && !crate::presentation::prompt::non_interactive() {
+    if !args.yes && !crate::presentation::prompt::non_interactive() {
         if !(output::stdin_is_tty() && output::stdout_is_tty()) {
             let mut err = std::io::stderr().lock();
             let _ = writeln!(
                 err,
-                "Disable requires confirmation. Re-run with --force to skip the prompt."
+                "Disable requires confirmation. Re-run with --yes to skip the prompt."
             );
             return Err(TomeError::NotATerminal);
         }

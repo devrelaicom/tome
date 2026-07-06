@@ -1046,9 +1046,12 @@ pub struct ModelsRemoveArgs {
     #[arg(long)]
     pub all: bool,
     /// Skip the confirmation prompt. Required when stdin is not a TTY.
-    /// `--yes` is accepted as a hidden alias (FR-021).
-    #[arg(long, alias = "yes")]
-    pub force: bool,
+    /// `--force` is accepted as a hidden alias for back-compat.
+    // #438: removal is prompted, not gated — the flag only skips the
+    // confirmation (models re-download on demand), so `--yes` is the primary
+    // spelling; `--force` is reserved for safety-behaviour overrides.
+    #[arg(long, alias = "force")]
+    pub yes: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1193,10 +1196,14 @@ pub struct PluginDisableArgs {
     #[arg(long)]
     pub catalog: Option<String>,
     /// Skip the confirmation prompt. Required to disable a plugin from a
-    /// non-interactive context (e.g. CI). `--yes` is accepted as a hidden
-    /// alias so both non-interactive spellings work everywhere (FR-021).
-    #[arg(long, alias = "yes")]
-    pub force: bool,
+    /// non-interactive context (e.g. CI). `--force` is accepted as a hidden
+    /// alias for back-compat.
+    // #438: disabling only skips a confirmation (nothing destructive is
+    // overridden — embeddings stay on disk), so `--yes` is the primary
+    // spelling; `--force` is reserved for safety-behaviour overrides
+    // (`catalog remove`'s cascade, `doctor`'s repair gates, …).
+    #[arg(long, alias = "force")]
+    pub yes: bool,
     /// Apply the change to your harnesses immediately: after disabling, run the
     /// same propagation `tome sync` performs over every project bound to the
     /// resolved workspace (write `.tome/RULES.md` and reconcile harness files).
@@ -1706,6 +1713,55 @@ mod tests {
         else {
             panic!("expected `harness run-hook` to parse");
         };
+    }
+
+    // ---- issue #438: --yes is the primary confirmation-skip spelling -------
+
+    /// `plugin disable` and `models remove` only skip a confirmation prompt
+    /// (no safety behaviour is overridden), so `--yes` is the visible flag
+    /// and the historical `--force` stays as a hidden back-compat alias —
+    /// both spellings set the same field.
+    #[test]
+    fn confirmation_skips_take_yes_with_hidden_force_alias() {
+        use clap::CommandFactory;
+
+        for spelling in ["--yes", "--force"] {
+            let cli = parse(&["tome", "plugin", "disable", "cat/p", spelling]);
+            let Command::Plugin(PluginArgs {
+                command: Some(PluginCommand::Disable(a)),
+            }) = cli.command
+            else {
+                panic!("expected `plugin disable`");
+            };
+            assert!(a.yes, "`plugin disable {spelling}` must set `yes`");
+
+            let cli = parse(&["tome", "models", "remove", "m", spelling]);
+            let Command::Models(ModelsCommand::Remove(a)) = cli.command else {
+                panic!("expected `models remove`");
+            };
+            assert!(a.yes, "`models remove {spelling}` must set `yes`");
+        }
+
+        // The alias is hidden: the rendered options list `--yes`, and no
+        // option ENTRY is spelled `--force` (the flag description may still
+        // mention the alias in prose, so scan option heads, not the whole
+        // text).
+        let mut cmd = Cli::command();
+        for path in [["plugin", "disable"], ["models", "remove"]] {
+            let sub = cmd
+                .find_subcommand_mut(path[0])
+                .and_then(|c| c.find_subcommand_mut(path[1]))
+                .unwrap_or_else(|| panic!("subcommand {path:?}"));
+            let help = sub.render_long_help().to_string();
+            assert!(
+                help.contains("--yes"),
+                "help for {path:?} must list --yes:\n{help}",
+            );
+            assert!(
+                !help.lines().any(|l| l.trim_start().starts_with("--force")),
+                "help for {path:?} must not list a --force option entry:\n{help}",
+            );
+        }
     }
 
     // ---- issue #324: authoring flag consistency --------------------------
