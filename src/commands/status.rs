@@ -58,22 +58,7 @@ pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     };
     let scope = &effective;
 
-    let mut report = assemble_report(&paths, &scope.scope, args.verify)?;
-    // Phase 11 / US5 (T065): augment with per-harness MCP integration state
-    // (needs the ResolvedScope's project root, which `assemble_report` lacks).
-    fill_harness_mcp(&mut report, scope, &paths);
-    // Phase 2 / Task 14: populate the unrepresented-agents count (needs the
-    // effective harness list and DB — read-only, best-effort).
-    fill_unrepresented_agents(&mut report, scope, &paths);
-    // US11: populate the hook-translation harness count (read-only, best-effort).
-    fill_hook_translation_harnesses(&mut report, scope, &paths);
-    // Issue #292: populate the unrepresented-hooks count (read-only, best-effort).
-    fill_unrepresented_hooks(&mut report, scope, &paths);
-    // Issue #287: report a malformed `~/.tome/config.toml` instead of dying.
-    // `status` is dispatched through the lenient resolver (see `main.rs`), so it
-    // reaches here even when the config won't parse; this surfaces the parse
-    // problem as a finding and flips overall to Unhealthy.
-    fill_config_health(&mut report, &paths);
+    let report = full_report(scope, &paths, args.verify)?;
     emit(&report, mode)?;
     // Issue #282: three distinct health verdicts. Ok returns normally (exit 0
     // via `main.rs`); Degraded and Unhealthy exit non-zero with DISTINCT codes
@@ -204,6 +189,35 @@ pub struct StatusReport {
 }
 
 // ---- Assembly --------------------------------------------------------------
+
+/// [`assemble_report`] plus every scope-aware `fill_*` augmentation — the
+/// exact report `tome status` renders. Extracted so a second consumer
+/// (`tome init`'s closing panel) composes the identical surface instead of
+/// re-listing the fills (which would silently drift as new ones land).
+/// Read-only; never takes the advisory lock.
+pub(crate) fn full_report(
+    scope: &ResolvedScope,
+    paths: &Paths,
+    verify: bool,
+) -> Result<StatusReport, TomeError> {
+    let mut report = assemble_report(paths, &scope.scope, verify)?;
+    // Phase 11 / US5 (T065): augment with per-harness MCP integration state
+    // (needs the ResolvedScope's project root, which `assemble_report` lacks).
+    fill_harness_mcp(&mut report, scope, paths);
+    // Phase 2 / Task 14: populate the unrepresented-agents count (needs the
+    // effective harness list and DB — read-only, best-effort).
+    fill_unrepresented_agents(&mut report, scope, paths);
+    // US11: populate the hook-translation harness count (read-only, best-effort).
+    fill_hook_translation_harnesses(&mut report, scope, paths);
+    // Issue #292: populate the unrepresented-hooks count (read-only, best-effort).
+    fill_unrepresented_hooks(&mut report, scope, paths);
+    // Issue #287: report a malformed `~/.tome/config.toml` instead of dying.
+    // `status` is dispatched through the lenient resolver (see `main.rs`), so it
+    // reaches here even when the config won't parse; this surfaces the parse
+    // problem as a finding and flips overall to Unhealthy.
+    fill_config_health(&mut report, paths);
+    Ok(report)
+}
 
 /// Build a `StatusReport` from the on-disk state. Read-only; does not take
 /// the advisory lock. With `verify = true`, each model's primary artefact is
@@ -643,7 +657,11 @@ fn emit(report: &StatusReport, mode: Mode) -> Result<(), TomeError> {
     }
 }
 
-fn emit_human(report: &StatusReport) -> Result<(), TomeError> {
+/// Human-mode panel emit. `pub(crate)` so `tome init` can close with the
+/// byte-identical status panel WITHOUT `run`'s health-code `process::exit`
+/// semantics (a fresh, half-configured install is expected mid-wizard — the
+/// wizard must not exit 1 just because the panel reports Unhealthy).
+pub(crate) fn emit_human(report: &StatusReport) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
     let panel = render_panel(report);
 

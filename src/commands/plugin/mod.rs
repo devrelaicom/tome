@@ -94,6 +94,30 @@ pub(crate) fn missing_models_for_profile(
         .collect())
 }
 
+/// [`missing_models_for_profile`] with the fresh-install fallback folded in:
+/// resolve the active profile from the index `meta` when a DB exists; with no
+/// DB yet, use the default profile — which is exactly what the bootstrap will
+/// stamp. One helper because it has two consumers whose numbers must agree:
+/// the `plugin enable` download prompt and the `tome init` up-front
+/// download-size warning.
+pub(crate) fn missing_models_for_active_profile(
+    paths: &Paths,
+) -> Result<Vec<&'static ModelEntry>, TomeError> {
+    if paths.index_db.is_file() {
+        let conn = crate::index::open_read_only(&paths.index_db)?;
+        missing_models_for_profile(paths, &conn)
+    } else {
+        use crate::embedding::profile::{Profile, embedder_for, reranker_for};
+        Ok([
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        ]
+        .into_iter()
+        .filter(|e| !model_manifest_ok(paths, e))
+        .collect())
+    }
+}
+
 /// `MetaSeed` values matching the `MODEL_REGISTRY` embedder / reranker /
 /// summariser. Wrapping access keeps the CLI from hard-coding indices.
 /// Phase 4 / F9 grows the tuple to three elements alongside the

@@ -20,7 +20,7 @@
 
 use std::sync::OnceLock;
 
-use inquire::{Confirm, MultiSelect, Select};
+use inquire::{Confirm, MultiSelect, Select, Text};
 
 use crate::error::TomeError;
 use crate::output;
@@ -86,6 +86,18 @@ pub fn multiselect<T: std::fmt::Display>(
         .map_err(prompt_error_to_tome)
 }
 
+/// Free-text input. An empty submission is allowed (callers use it as the
+/// "skip" signal — e.g. the `tome init` catalog-source prompt); Esc/Ctrl-C
+/// map to [`TomeError::Interrupted`] like every other prompt here.
+pub fn text(message: &str, help: Option<&str>) -> Result<String, TomeError> {
+    require_terminal()?;
+    let mut t = Text::new(message);
+    if let Some(help) = help {
+        t = t.with_help_message(help);
+    }
+    t.prompt().map_err(prompt_error_to_tome)
+}
+
 /// Ask a yes/no question with `default` as the pre-selected answer.
 pub fn confirm(message: &str, default: bool) -> Result<bool, TomeError> {
     require_terminal()?;
@@ -146,6 +158,12 @@ mod tests {
     #[test]
     fn confirm_short_circuits_in_non_tty_context() {
         let r = confirm("are you sure?", false);
+        assert!(matches!(r, Err(TomeError::NotATerminal)));
+    }
+
+    #[test]
+    fn text_short_circuits_in_non_tty_context() {
+        let r = text("type something", Some("help"));
         assert!(matches!(r, Err(TomeError::NotATerminal)));
     }
 

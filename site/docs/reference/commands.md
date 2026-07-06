@@ -8,6 +8,25 @@ sidebar_position: 1
 Every command, subcommand, and flag. Tome exits `0` on success and a specific
 non-zero code for every failure class; see [Exit codes](./exit-codes.md).
 
+## `tome init`
+
+Guided first-run setup wizard. Walks the same flow you would run by hand —
+bind the current directory to a workspace (the `tome workspace use --create`
+path), multi-select detected harnesses to configure (`tome harness use`), add
+a catalog (`tome catalog add`), and enable plugins (`tome plugin enable`,
+preceded by an up-front warning naming the active model profile and the real
+total download size when models are not yet on disk) — then closes with the
+standard `tome status` panel and any remaining steps.
+
+The wizard takes no flags. It is idempotent — a re-run detects existing state
+and offers only the outstanding steps; when everything is already configured
+it says so and shows status. Every step is skippable (Esc or an explicit skip
+moves on, never errors).
+
+Interactive only: without a terminal it exits `54` (`not_a_terminal`) and
+prints the equivalent manual commands. `--json` is not supported — script the
+individual commands instead.
+
 ## `tome catalog`
 
 Manage catalogs — the git repositories of plugins you have registered — plus

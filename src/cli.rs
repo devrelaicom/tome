@@ -30,6 +30,7 @@ Getting started:
   2. tome plugin enable <catalog>/<plugin>  Enable a plugin and index its skills
   3. tome query \"<what you need>\"            Search enabled skills by intent
 
+Or run `tome init` for a guided, step-by-step setup of the same flow.
 Run `tome <command> --help` for details on any command.";
 
 #[derive(Debug, Parser)]
@@ -96,6 +97,13 @@ pub struct GlobalScopeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Guided first-run setup wizard: bind a workspace, configure detected
+    /// harnesses, add a catalog, and enable plugins — composing the same
+    /// commands you would run by hand. Idempotent (a re-run offers only the
+    /// outstanding steps) and every step is skippable. Interactive only:
+    /// requires a terminal and does not support `--json` (script the
+    /// individual commands instead).
+    Init(InitArgs),
     /// Manage registered catalogs.
     #[command(subcommand)]
     Catalog(CatalogCommand),
@@ -174,6 +182,12 @@ pub enum Command {
     /// configured. Example: `tome completions zsh > ~/.zfunc/_tome`.
     Completions(CompletionsArgs),
 }
+
+/// `tome init` — the guided setup wizard. Deliberately flag-free: state
+/// detection replaces flags (a re-run offers only the outstanding steps),
+/// and the non-interactive equivalents are the individual commands.
+#[derive(Debug, clap::Args)]
+pub struct InitArgs {}
 
 /// `tome completions <shell>` — emit a completion script for the named shell.
 #[derive(Debug, clap::Args)]
