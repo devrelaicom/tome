@@ -184,6 +184,7 @@ fn main() {
     let is_mcp_or_telemetry = matches!(cli.command, Command::Mcp(_) | Command::Telemetry(_));
 
     let result = match cli.command {
+        Command::Init(_) => commands::init::run(&scope, mode),
         Command::Catalog(cmd) => commands::catalog::run(cmd, &scope, mode),
         Command::Plugin(args) => match args.command {
             Some(cmd) => commands::plugin::run(cmd, &scope, mode),

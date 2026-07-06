@@ -5,6 +5,7 @@ pub mod convert;
 pub mod create;
 pub mod doctor;
 pub mod harness;
+pub mod init;
 pub mod lint;
 pub mod mcp;
 pub mod meta;

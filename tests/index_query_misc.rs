@@ -26,6 +26,8 @@ mod frontmatter_p5_fields;
 mod index_lock;
 #[path = "index_query_misc/index_schema_bootstrap.rs"]
 mod index_schema_bootstrap;
+#[path = "index_query_misc/init_cli.rs"]
+mod init_cli;
 #[path = "index_query_misc/manifest_strictness.rs"]
 mod manifest_strictness;
 #[path = "index_query_misc/no_directories_imports.rs"]

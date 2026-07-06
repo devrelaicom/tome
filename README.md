@@ -72,7 +72,13 @@ Confirm the install with `tome --version`, then continue to the [Quick start](#q
 
 ## Quick start
 
-Four commands take you from a fresh install to an agent that loads exactly the skill it needs during a task. The walkthrough uses the public **Midnight Expert** catalog as a concrete example — swap the source for any git-hosted catalog (an `owner/repo` shorthand, a full git URL, or a `file://` path to a local clone).
+Four commands take you from a fresh install to an agent that loads exactly the skill it needs during a task. Prefer a guided flow? `tome init` walks the same four steps interactively, detects what is already set up, and warns about the model download size up front:
+
+```sh
+tome init
+```
+
+The walkthrough uses the public **Midnight Expert** catalog as a concrete example — swap the source for any git-hosted catalog (an `owner/repo` shorthand, a full git URL, or a `file://` path to a local clone).
 
 ```sh
 # 1. Register a catalog. Tome clones it and registers every plugin inside.

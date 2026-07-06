@@ -32,8 +32,7 @@ use crate::presentation::{colour, progress, prompt};
 use crate::workspace::ResolvedScope;
 
 use super::{
-    discoverable_plugin_ids, human_mb, missing_models_for_profile, open_index_for_read,
-    registry_seeds, resolve_plugin_dir,
+    discoverable_plugin_ids, human_mb, open_index_for_read, registry_seeds, resolve_plugin_dir,
 };
 
 pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
@@ -397,22 +396,9 @@ fn ensure_models_or_prompt(
     mode: Mode,
 ) -> Result<(), TomeError> {
     // B2: only prompt for the ACTIVE profile's embedder + reranker, not every
-    // profile's models in the registry. Resolve the active profile from the
-    // index `meta`; on a fresh install (no DB yet) fall back to the default
-    // profile, which is exactly what the bootstrap will stamp.
-    let missing = if paths.index_db.is_file() {
-        let conn = crate::index::open_read_only(&paths.index_db)?;
-        missing_models_for_profile(paths, &conn)?
-    } else {
-        use crate::embedding::profile::{Profile, embedder_for, reranker_for};
-        [
-            embedder_for(Profile::DEFAULT),
-            reranker_for(Profile::DEFAULT),
-        ]
-        .into_iter()
-        .filter(|e| !super::model_manifest_ok(paths, e))
-        .collect::<Vec<_>>()
-    };
+    // profile's models in the registry (fresh-install fallback folded into the
+    // shared helper — `tome init` reads the same set for its up-front warning).
+    let missing = super::missing_models_for_active_profile(paths)?;
     if missing.is_empty() {
         return Ok(());
     }
