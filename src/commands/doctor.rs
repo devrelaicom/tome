@@ -870,7 +870,19 @@ fn telemetry_source_label(source: crate::telemetry::config::Source) -> &'static 
     }
 }
 
-fn harness_display_name(machine_name: &str) -> &'static str {
+/// Human label for a harness machine name (issue #428).
+///
+/// Resolved from the harness module registry so a newly-added harness can
+/// never render as "unknown": [`crate::harness::lookup`] covers every
+/// registered module (supported + opt-in targets + aliases), and its
+/// `description()` is the same compact label `tome harness` prints. The
+/// explicit arms keep the shorter labels this section has always used for
+/// the original harnesses — their registry descriptions carry vendor
+/// prefixes ("Anthropic's Claude Code CLI") too wide for the aligned
+/// column — plus `continue`, which doctor probes but the registry does not
+/// know. Anything else missing from the registry falls back to the raw
+/// machine name, never a lying "unknown".
+fn harness_display_name(machine_name: &str) -> &str {
     match machine_name {
         "claude-code" => "Claude Code",
         "codex" => "Codex",
@@ -878,7 +890,9 @@ fn harness_display_name(machine_name: &str) -> &'static str {
         "gemini" => "Gemini CLI",
         "opencode" => "OpenCode",
         "continue" => "Continue",
-        _ => "unknown",
+        other => crate::harness::lookup(other)
+            .map(|m| m.description())
+            .unwrap_or(other),
     }
 }
 
@@ -911,4 +925,50 @@ fn human_size(bytes: u64) -> String {
     }
     let mib = kib / 1024.0;
     format!("{:.1} MiB", mib)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::harness_display_name;
+
+    /// Issue #428: a Phase 11 harness resolves a real label from the module
+    /// registry instead of "unknown".
+    #[test]
+    fn phase_11_harness_renders_registry_label() {
+        assert_eq!(harness_display_name("zed"), "Zed editor");
+        assert_eq!(harness_display_name("kiro"), "AWS Kiro IDE");
+        assert_eq!(
+            harness_display_name("jetbrains-ai"),
+            "JetBrains AI Assistant"
+        );
+    }
+
+    /// The original six keep their historical short labels (the registry
+    /// descriptions carry vendor prefixes too wide for the aligned column).
+    #[test]
+    fn original_harnesses_keep_short_labels() {
+        assert_eq!(harness_display_name("claude-code"), "Claude Code");
+        assert_eq!(harness_display_name("gemini"), "Gemini CLI");
+        assert_eq!(harness_display_name("continue"), "Continue");
+    }
+
+    /// Every registered module (supported + opt-in) resolves to SOME real
+    /// label — the registry is the source of truth, so a future harness
+    /// cannot go stale here. A name missing from the registry falls back to
+    /// the raw string; nothing ever renders "unknown".
+    #[test]
+    fn every_registered_harness_has_a_label_and_fallback_is_raw() {
+        for m in crate::harness::SUPPORTED_HARNESSES
+            .iter()
+            .chain(crate::harness::OPT_IN_TARGETS)
+        {
+            let label = harness_display_name(m.name());
+            assert!(!label.is_empty(), "{}: empty label", m.name());
+            assert_ne!(label, "unknown", "{}: stale label", m.name());
+        }
+        assert_eq!(
+            harness_display_name("some-future-harness"),
+            "some-future-harness"
+        );
+    }
 }
