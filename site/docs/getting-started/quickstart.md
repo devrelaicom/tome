@@ -58,8 +58,10 @@ server wiring, and (where the harness supports them) native agents and hooks.
 tome harness use cursor
 ```
 
-Replace `cursor` with `claude-code`, `codex`, `gemini`, or `opencode` as needed.
-See [Harnesses](../using-tome/harnesses.md) for what Tome writes for each.
+Replace `cursor` with any of the seventeen supported harness names —
+`claude-code`, `codex`, `gemini`, `zed`, `copilot`, and more. See
+[Harnesses](../using-tome/harnesses.md) for the full table and what Tome writes
+for each.
 
 ## 4. Search
 

@@ -99,10 +99,11 @@ tome workspace use <name>
 
 ## Harness
 
-A **harness** is a coding agent that Tome targets: Claude Code, Cursor, Codex,
-Gemini CLI, or OpenCode. Running `tome harness use <name>` writes that harness's
-native configuration — rules file, MCP server wiring, and native agents/hooks
-where the harness supports them.
+A **harness** is a coding agent that Tome targets; seventeen are supported,
+from Claude Code, Cursor, and Codex to Zed, Copilot, and Goose. Running
+`tome harness use <name>` writes that harness's native configuration — rules
+file, MCP server wiring, and native agents/hooks where the harness supports
+them. See [Harnesses](../using-tome/harnesses.md) for the full matrix.
 
 ## The central index
 

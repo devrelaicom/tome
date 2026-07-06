@@ -3,6 +3,9 @@
 // either direction:
 //   forward: everything in the contract must appear in the docs
 //   reverse: every exit code documented / `tome X` heading must be in the contract
+// Also checks the harness matrix in docs/using-tome/harnesses.md against the
+// registries in ../src/harness/mod.rs (the site lives inside the tome repo, so
+// the Rust source is readable at check time — no binary build needed).
 import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
@@ -55,6 +58,71 @@ for (const m of exitCodesDoc.matchAll(/^\| `(\d+)` \|/gm)) {
 }
 for (const m of commandsDoc.matchAll(/^## `tome ([a-z-]+)`/gm)) {
   if (!(m[1] in contract.commands)) errors.push(`commands.md: documents \`tome ${m[1]}\`, not in contract`);
+}
+
+// -- harness matrix: src/harness/mod.rs is the registry SSOT -------------------
+// Machine names come from each module's `name()` literal, reached through the
+// `use <module>::<CONST>;` imports in mod.rs — never hardcoded here, so a new
+// harness (or a rename) fails this check until the doc table follows.
+const harnessesDoc = readFileSync(path.join(root, 'docs/using-tome/harnesses.md'), 'utf8');
+const modRs = readFileSync(path.join(root, '../src/harness/mod.rs'), 'utf8');
+
+const constToModule = new Map();
+for (const m of modRs.matchAll(/^use ([a-z_]+)::([A-Z_]+);$/gm)) {
+  constToModule.set(m[2], m[1]);
+}
+
+function registryNames(registry) {
+  const slice = modRs.match(new RegExp(`pub static ${registry}[^=]*=\\s*&\\[([\\s\\S]*?)\\];`));
+  if (!slice) {
+    errors.push(`mod.rs: could not locate the ${registry} slice`);
+    return [];
+  }
+  const names = [];
+  for (const m of slice[1].matchAll(/&([A-Z_]+)/g)) {
+    const module = constToModule.get(m[1]);
+    if (!module) {
+      errors.push(`mod.rs: no \`use\` import found for registry entry ${m[1]}`);
+      continue;
+    }
+    const src = readFileSync(path.join(root, `../src/harness/${module}.rs`), 'utf8');
+    const name = src.match(/fn name\(&self\) -> &'static str \{\s*"([^"]+)"/);
+    if (!name) {
+      errors.push(`src/harness/${module}.rs: could not extract the name() literal`);
+      continue;
+    }
+    names.push(name[1]);
+  }
+  return names;
+}
+
+const supported = registryNames('SUPPORTED_HARNESSES');
+const optIn = registryNames('OPT_IN_TARGETS');
+const aliases = [...modRs.matchAll(/HarnessAlias\s*\{\s*name:\s*"([^"]+)",\s*target:\s*"([^"]+)"/g)]
+  .map((m) => ({name: m[1], target: m[2]}));
+
+// forward: every registered machine name (and alias) appears in the doc.
+for (const name of [...supported, ...optIn, ...aliases.map((a) => a.name)]) {
+  if (!harnessesDoc.includes(`\`${name}\``)) {
+    errors.push(`harnesses.md: missing harness \`${name}\` (registered in src/harness/mod.rs)`);
+  }
+}
+
+// reverse: every machine name in the summary tables is still registered, and
+// the row count matches the registries (a dropped row fails loudly).
+const knownHarnesses = new Set([...supported, ...optIn]);
+const summarySection = harnessesDoc.split('## Per-harness summary')[1]?.split(/\n## /)[0] ?? '';
+const documented = new Set();
+for (const m of summarySection.matchAll(/^\|[^|`]*`([a-z0-9-]+)`/gm)) {
+  documented.add(m[1]);
+  if (!knownHarnesses.has(m[1])) {
+    errors.push(`harnesses.md: summary table documents \`${m[1]}\`, not in the registries`);
+  }
+}
+if (documented.size !== knownHarnesses.size) {
+  errors.push(
+    `harnesses.md: summary tables document ${documented.size} harnesses; the registries define ${knownHarnesses.size}`,
+  );
 }
 
 if (errors.length) {

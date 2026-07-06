@@ -35,7 +35,8 @@ Two habits protect your users from the common failure modes:
    ```
 
 That is the entire process — any git repository of plugins becomes a Tome
-catalog, usable across Claude Code, Cursor, Codex, Gemini CLI, and OpenCode.
+catalog, usable across every harness Tome supports, from Claude Code and
+Cursor to Zed and Copilot.
 For what your users see on their side, read
 [Plugins & catalogs](../using-tome/plugins-and-catalogs.md).
 
