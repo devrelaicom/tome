@@ -1,0 +1,73 @@
+name: Bug report
+description: Something Tome did wrong — a crash, a wrong result, an unexpected exit code.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The fields below map to what a maintainer needs to
+        reproduce the problem — the more of them you fill in, the faster the fix.
+
+        For a security issue (credential leak, path traversal, …) do NOT file a
+        public issue — see [SECURITY.md](https://github.com/devrelaicom/tome/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Tome version
+      description: Paste the output of `tome --version`.
+      placeholder: "tome 0.7.13 (embedder bge-base-en-v1.5, reranker bge-reranker-large)"
+    validations:
+      required: true
+  - type: input
+    id: os-arch
+    attributes:
+      label: OS and architecture
+      description: e.g. `macOS 14.5 aarch64`, `Ubuntu 24.04 x86_64`.
+      placeholder: "macOS 14.5 aarch64"
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - crates.io (cargo install tome-mcp)
+        - Homebrew (brew install aaronbassett/tap/tome)
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Exact command run
+      description: The full command line, verbatim.
+      placeholder: "tome plugin enable midnight-expert/midnight-verify"
+    validations:
+      required: true
+  - type: input
+    id: exit-code
+    attributes:
+      label: Exit code
+      description: Run `echo $?` immediately after the failing command. Exit codes are a stability contract in Tome, so the number matters.
+      placeholder: "44"
+    validations:
+      required: false
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected
+      description: What Tome did, and what you expected it to do instead. Include stderr output if there was any.
+    validations:
+      required: true
+  - type: textarea
+    id: json-output
+    attributes:
+      label: Relevant --json or doctor output
+      description: |
+        Where it applies, paste the failing command's `--json` output and/or
+        `tome doctor --json`. Check it for anything you consider private before
+        posting — it can include workspace names and local paths.
+      render: json
+    validations:
+      required: false
