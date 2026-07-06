@@ -385,17 +385,11 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
     }
     writeln!(out)?;
 
-    // FR-M-DOC-2: workspace-registry status line.
-    if report.workspace_registry.present {
-        writeln!(
-            out,
-            "Workspace registry: opt-in (file present, {} tracked)",
-            report.workspace_registry.tracked,
-        )?;
-    } else {
-        writeln!(out, "Workspace registry: opt-in (file absent)")?;
-    }
-    writeln!(out)?;
+    // Issue #432: the Phase 3 opt-in workspace registry file is gone —
+    // `check_workspace_registry` is a permanent `present: false` stub kept
+    // only for the byte-stable JSON envelope (see its doc comment). The
+    // human section it fed read like something was missing on every healthy
+    // install, so it is no longer rendered; the JSON field is untouched.
 
     writeln!(out, "Detected harnesses:")?;
     for h in &report.harnesses {
