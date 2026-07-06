@@ -173,7 +173,16 @@ fn view_loop(paths: &Paths, scope: &ResolvedScope, id: &PluginId) -> LoopFlow {
     loop {
         // Render the plugin view and capture the resolved status so the
         // action menu can offer the right verb without re-querying.
-        let status = render_plugin_view(paths, scope, id)?;
+        let (status, unindexable_reason) = render_plugin_view(paths, scope, id)?;
+
+        // Issue #440: an unindexable plugin's menu offers only "Back" — with
+        // no explanation the missing "Enable" reads like a bug rather than a
+        // property of the plugin. Read-only line above the action prompt.
+        if status == PluginStatus::Unindexable {
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "{}", unindexable_notice(unindexable_reason.as_deref()))
+                .map_err(TomeError::from)?;
+        }
 
         let actions = build_action_menu(status);
         let pick = match prompt_select("Action", actions) {
@@ -379,12 +388,14 @@ fn build_action_menu(status: PluginStatus) -> Vec<ActionChoice> {
 
 /// Render the plugin view (same content as `tome plugin show`) and return the
 /// resolved status so the action menu can pick the right verb without
-/// re-querying the index.
+/// re-querying the index. For an `Unindexable` plugin the second element
+/// carries the manifest error's rendering — the specific reason behind the
+/// status (issue #440) — else `None`.
 fn render_plugin_view(
     paths: &Paths,
     scope: &ResolvedScope,
     id: &PluginId,
-) -> Result<PluginStatus, TomeError> {
+) -> Result<(PluginStatus, Option<String>), TomeError> {
     // F11b: the catalog enrolment is read from the DB, so the read handle is
     // opened before resolving the plugin directory and reused for the
     // aggregate below. The surrounding menu builders read the same
@@ -395,15 +406,16 @@ fn render_plugin_view(
     let component_counts = count_components(&plugin_dir);
     let agg = aggregate_for_plugin(&conn, scope.scope.name().as_str(), &id.catalog, &id.plugin)?;
 
-    let status = match &manifest {
-        Err(_) => PluginStatus::Unindexable,
-        Ok(_) => {
+    let (status, unindexable_reason) = match &manifest {
+        Err(e) => (PluginStatus::Unindexable, Some(e.to_string())),
+        Ok(_) => (
             if agg.total > 0 && agg.enabled > 0 {
                 PluginStatus::Enabled
             } else {
                 PluginStatus::Disabled
-            }
-        }
+            },
+            None,
+        ),
     };
 
     let manifest_ok = manifest.as_ref().ok();
@@ -423,7 +435,22 @@ fn render_plugin_view(
     };
 
     write_plugin_view(&record, agg.last_indexed_at.as_deref())?;
-    Ok(status)
+    Ok((status, unindexable_reason))
+}
+
+/// The read-only explanation printed above the action menu for an
+/// `Unindexable` plugin (issue #440). `reason` carries the manifest error's
+/// rendering when available (`PluginNotConverted`, a TOML parse failure, …);
+/// only its first line is used — some errors carry a multi-line `hint:`
+/// continuation that would break the one-line parenthetical.
+fn unindexable_notice(reason: Option<&str>) -> String {
+    match reason
+        .and_then(|r| r.lines().next())
+        .filter(|r| !r.trim().is_empty())
+    {
+        Some(r) => format!("(no indexable entries — this plugin cannot be enabled: {r})"),
+        None => "(no indexable entries — this plugin cannot be enabled)".to_owned(),
+    }
 }
 
 fn write_plugin_view(record: &PluginRecord, last_indexed: Option<&str>) -> Result<(), TomeError> {
@@ -569,5 +596,48 @@ fn prompt_select<T: fmt::Display>(message: &str, options: Vec<T>) -> Result<T, I
         Ok(v) => Ok(v),
         Err(TomeError::Interrupted) | Err(TomeError::NotATerminal) => Err(InteractiveExit::Quit),
         Err(e) => Err(InteractiveExit::Err(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #440: the Unindexable action menu stays Back-only — the notice
+    /// explains the absence of Enable; it does not add actions.
+    #[test]
+    fn unindexable_action_menu_is_back_only() {
+        let menu = build_action_menu(PluginStatus::Unindexable);
+        assert_eq!(menu.len(), 1);
+        assert!(matches!(menu[0], ActionChoice::Back));
+    }
+
+    /// Issue #440: the notice explains WHY Enable is missing, carrying the
+    /// specific manifest-error reason when one exists.
+    #[test]
+    fn unindexable_notice_explains_and_carries_reason() {
+        assert_eq!(
+            unindexable_notice(None),
+            "(no indexable entries — this plugin cannot be enabled)"
+        );
+        let with_reason = unindexable_notice(Some("plugin at /p is not converted"));
+        assert_eq!(
+            with_reason,
+            "(no indexable entries — this plugin cannot be enabled: plugin at /p is not converted)"
+        );
+    }
+
+    /// Multi-line error renderings (e.g. `PluginNotConverted` carries a
+    /// `hint:` continuation) are truncated to their first line, and an
+    /// empty/blank reason degrades to the generic form.
+    #[test]
+    fn unindexable_notice_is_single_line() {
+        let notice = unindexable_notice(Some("first line\nhint: run tome plugin convert"));
+        assert!(!notice.contains('\n'));
+        assert!(notice.ends_with("first line)"));
+        assert_eq!(
+            unindexable_notice(Some("")),
+            "(no indexable entries — this plugin cannot be enabled)"
+        );
     }
 }
