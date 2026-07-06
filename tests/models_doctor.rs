@@ -14,6 +14,8 @@ mod doctor;
 mod doctor_detected_uninstalled;
 #[path = "models_doctor/doctor_fix_p4.rs"]
 mod doctor_fix_p4;
+#[path = "models_doctor/doctor_hook_drift.rs"]
+mod doctor_hook_drift;
 #[path = "models_doctor/doctor_json.rs"]
 mod doctor_json;
 #[path = "models_doctor/doctor_mcp_states_p11.rs"]

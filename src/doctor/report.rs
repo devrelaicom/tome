@@ -267,6 +267,14 @@ pub enum Subsystem {
     /// `auto_fixable: false` — deleting persistent user data is never
     /// automatic.
     OrphanData,
+    /// Issue #431: a dispatcher harness whose plugin-hook dispatch surface
+    /// (native hook file entries and/or manifest) has drifted from the
+    /// currently-expected set. `auto_fixable: true` — `--fix` re-runs the
+    /// idempotent per-project harness sync (the same coalesced repair the
+    /// rules/MCP fixes dispatch), which re-registers the entries and rewrites
+    /// the manifest. The `String` is the harness name
+    /// (`harness-hooks:<name>` on the wire, mirroring `harness-mcp:<name>`).
+    HarnessHooks(String),
 }
 
 impl Subsystem {
@@ -286,6 +294,7 @@ impl Subsystem {
             Subsystem::BindingRulesCopy => "binding-rules-copy".to_owned(),
             Subsystem::HarnessRules(n) => format!("harness-rules:{n}"),
             Subsystem::HarnessMcp(n) => format!("harness-mcp:{n}"),
+            Subsystem::HarnessHooks(n) => format!("harness-hooks:{n}"),
             Subsystem::ModelRegistry => "model-registry".to_owned(),
             Subsystem::Config => "config".to_owned(),
             Subsystem::Onboarding => "onboarding".to_owned(),
@@ -317,6 +326,8 @@ impl Subsystem {
                     Subsystem::HarnessRules(name.to_owned())
                 } else if let Some(name) = other.strip_prefix("harness-mcp:") {
                     Subsystem::HarnessMcp(name.to_owned())
+                } else if let Some(name) = other.strip_prefix("harness-hooks:") {
+                    Subsystem::HarnessHooks(name.to_owned())
                 } else if let Some(name) = other.strip_prefix("provider:") {
                     Subsystem::Provider(name.to_owned())
                 } else {
@@ -686,6 +697,20 @@ pub struct HookHarnessStatus {
     /// `true` when a prompt-provider is configured → first execution of a
     /// `prompt` handler may surface a trust prompt.
     pub trust_prompt_note: bool,
+    /// Issue #431: the drift verdict for this harness's dispatch surface —
+    /// `ok` / `drift` / `missing` / `stale_manifest` — comparing the native
+    /// hook file's Tome-owned `run-hook` entries AND the manifest against the
+    /// currently-expected set (computed by the SAME sync-side helpers the
+    /// writer uses). `None` outside a project context: the native hook file is
+    /// per-project, so there is nothing to probe from global scope. Appended
+    /// LAST + `skip_serializing_if`-gated so pre-#431 wire pins are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Issue #431: the used events whose `run-hook` registration is missing
+    /// from the native hook file (empty unless `state` is `drift`/`missing`).
+    /// Appended LAST + omitted when empty, keeping the wire shape minimal.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_events: Vec<String>,
 }
 
 /// US11: the read-only plugin-hook translation surface for `tome doctor`.
