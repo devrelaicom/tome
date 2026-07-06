@@ -7,6 +7,7 @@ Welcome. Tome is open source and accepts contributions of any size.
 Read these once:
 
 - [`CONSTITUTION.md`](./CONSTITUTION.md) — the principles every change must honour. Of particular note: error-code stability (Principle II), strict schemas (IV), KISS/YAGNI (VI), CI-gated merges (X), and never logging secrets (XIII).
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — the module map and the load-bearing rules (sync boundary, closed error set, atomic writes, strictness boundary).
 - [`CHANGELOG.md`](./CHANGELOG.md) — what has shipped, and what is currently in flight under `[Unreleased]`.
 
 ## Local setup (10 minutes from clone to green PR)
