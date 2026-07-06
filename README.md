@@ -487,6 +487,7 @@ Tome makes **mechanical** safety guarantees but cannot vet catalog **content** â
 - **Full docs:** [tome-mcp.netlify.app](https://tome-mcp.netlify.app)
 - **Project principles:** [`CONSTITUTION.md`](https://github.com/devrelaicom/tome/blob/main/CONSTITUTION.md)
 - **Contributor on-ramp:** [`CONTRIBUTING.md`](https://github.com/devrelaicom/tome/blob/main/CONTRIBUTING.md)
+- **Codebase orientation (module map + invariants):** [`ARCHITECTURE.md`](https://github.com/devrelaicom/tome/blob/main/ARCHITECTURE.md)
 - **Security & trust model:** [`SECURITY.md`](https://github.com/devrelaicom/tome/blob/main/SECURITY.md)
 - **Telemetry (what's collected, opt-out):** [`TELEMETRY.md`](https://github.com/devrelaicom/tome/blob/main/TELEMETRY.md)
 
