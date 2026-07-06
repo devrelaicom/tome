@@ -1,0 +1,26 @@
+name: Feature request
+description: Something Tome should do that it doesn't.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does Tome stop short? A concrete workflow beats an abstract capability.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed behaviour
+      description: What should Tome do? If it's a CLI change, sketch the command and its output.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you use today, or other shapes the feature could take.
+    validations:
+      required: false
