@@ -349,6 +349,7 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         hook_translation: None,
         // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         unrepresented_hooks: None,
+        mcp_probe: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -575,6 +576,7 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
         hook_translation: None,
         // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         unrepresented_hooks: None,
+        mcp_probe: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -731,6 +733,7 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
         hook_translation: None,
         // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         unrepresented_hooks: None,
+        mcp_probe: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -880,6 +883,7 @@ fn doctor_json_unrepresented_agents_populated_wire_shape() {
         hook_translation: None,
         // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         unrepresented_hooks: None,
+        mcp_probe: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };

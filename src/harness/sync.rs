@@ -1324,16 +1324,7 @@ fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<
     // ownership marker (basename `tome` + `args[0] == "mcp"`) is preserved; an
     // existing entry without it re-stamps as `Updated` on the next sync
     // (idempotent thereafter).
-    let expected = mcp_config::TomeEntry::new(
-        crate::harness::launcher::tome_command(),
-        vec![
-            "mcp".to_string(),
-            "--workspace".to_string(),
-            deps.workspace_name.as_str().to_string(),
-            "--harness".to_string(),
-            snap.name.clone(),
-        ],
-    );
+    let expected = expected_tome_entry(deps.workspace_name, &snap.name);
 
     let classification = match existing.as_ref() {
         None => Action::Created,
@@ -1351,6 +1342,30 @@ fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<
         mcp_config::write_entry(&snap.mcp_path, &snap.mcp_dialect, &expected)?;
     }
     Ok(classification)
+}
+
+/// The `tome` MCP entry sync writes for `(workspace, harness)` — launcher
+/// command (`$TOME_BIN` → `current_exe` → bare `tome`, #337) plus the exact
+/// `mcp --workspace <ws> --harness <name>` argv.
+///
+/// THE single source for that argv: [`write_mcp_for_harness`] persists it into
+/// every harness's MCP config, and the `tome doctor --verify` end-to-end MCP
+/// probe (issue #434) spawns it — derived here, never hand-assembled, so the
+/// probe can never test a different command than the one sync registered.
+pub(crate) fn expected_tome_entry(
+    workspace_name: &WorkspaceName,
+    harness_name: &str,
+) -> mcp_config::TomeEntry {
+    mcp_config::TomeEntry::new(
+        crate::harness::launcher::tome_command(),
+        vec![
+            "mcp".to_string(),
+            "--workspace".to_string(),
+            workspace_name.as_str().to_string(),
+            "--harness".to_string(),
+            harness_name.to_string(),
+        ],
+    )
 }
 
 fn clean_mcp_for_harness(snap: &HarnessSnapshot, dry_run: bool) -> Result<Action, TomeError> {

@@ -1105,6 +1105,38 @@ fn build_sections(report: &DoctorReport, g: &Glyphs) -> Vec<Section> {
         sections.push(Section { state, body: s });
     }
 
+    // ---- MCP probe (issue #434, --verify / [doctor] verify_by_default) -------
+    // One line per (workspace, server) probed. A FAILED probe marks the
+    // section Fail so it renders ahead of the warnings and can never be
+    // collapsed away; an all-ok probe participates in the normal ok collapse
+    // (the JSON `mcp_probe` field still carries the detail).
+    if let Some(probe) = &report.mcp_probe {
+        let mut s = String::new();
+        let mut state = SectionState::Ok;
+        let _ = writeln!(s, "MCP probe (end-to-end, --verify):");
+        for p in probe {
+            if p.ok {
+                let tools = p.tools.map(|t| format!(" ({t} tools)")).unwrap_or_default();
+                let _ = writeln!(
+                    s,
+                    "  {ok} {} (workspace {}) — initialize + tools/list ok{tools}",
+                    p.harness, p.workspace,
+                );
+            } else {
+                state = SectionState::Fail;
+                let _ = writeln!(
+                    s,
+                    "  {fail} {} (workspace {}) — {}",
+                    p.harness,
+                    p.workspace,
+                    p.error.as_deref().unwrap_or("failed"),
+                );
+            }
+        }
+        let _ = writeln!(s);
+        sections.push(Section { state, body: s });
+    }
+
     // ---- Remote providers (Phase 12 / US4) ------------------------------------------
     if !report.providers.is_empty() {
         let mut s = String::new();
