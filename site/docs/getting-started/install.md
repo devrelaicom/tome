@@ -6,10 +6,12 @@ sidebar_position: 1
 # Install Tome
 
 Tome ships as a single self-contained executable. The semantic index, vector
-search, and reranker runtime are compiled in. The two search models — a 32 MB
-embedder and a 266 MB reranker — are downloaded the first time they're needed
-(or explicitly with `tome models download`) and kept under `~/.tome/`. No
-daemon, no account. Tome sends anonymous, opt-out usage telemetry (auto-disabled
+search, and reranker runtime are compiled in. The search models are downloaded
+the first time they're needed (or explicitly with `tome models download`) and
+kept under `~/.tome/`. The default `medium` profile fetches a ~110 MB embedder
+(`bge-base-en-v1.5`) and a ~563 MB reranker (`bge-reranker-large`); set
+`[models] profile` in `~/.tome/config.toml` to select `small`, `medium`, or
+`large`. No daemon, no account. Tome sends anonymous, opt-out usage telemetry (auto-disabled
 under CI); turn it off with `tome telemetry off`. See
 [`tome telemetry`](../reference/commands.md#tome-telemetry).
 
@@ -24,7 +26,7 @@ under CI); turn it off with `tome telemetry off`. See
 ## Homebrew (macOS)
 
 ```bash
-brew install aaronbassett/homebrew-tap/tome
+brew install aaronbassett/tap/tome
 ```
 
 ## Cargo

@@ -77,7 +77,7 @@ plugin enablement is recorded per workspace as the source of truth, rather than
 globally.
 
 A global `[workspace] default` overrides a project marker. When one is set, the
-default wins and the per-project binding goes inactive: harness sync,
+default wins and the per-project binding goes inactive: `tome sync`,
 `${TOME_PROJECT_DIR}`, and the status `harness_mcp` report stop tracking the
 project. Tome prints a one-line `note:` on stderr when this happens, so the
 shadowing is never silent. To restore the per-project binding, unset `[workspace]
