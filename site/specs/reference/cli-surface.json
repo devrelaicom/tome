@@ -265,16 +265,6 @@
         "preview": [
           "--plugin",
           "--verbose"
-        ],
-        "session-start": [
-          "--harness",
-          "--verbose"
-        ],
-        "run-hook": [
-          "--event",
-          "--explain",
-          "--harness",
-          "--verbose"
         ]
       },
       "flags": [
