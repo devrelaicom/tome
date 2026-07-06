@@ -197,6 +197,17 @@ fn rewrite_string_leaves(value: &mut JsonValue, plugin_root: &str, plugin_data: 
 /// Returns `true` when the file was changed on disk (so the caller can
 /// classify Created/Updated vs LeftAlone); `false` on an idempotent no-op.
 pub fn merge_into_settings(target: &Path, hooks: &RewrittenHooks) -> Result<bool, TomeError> {
+    merge_into_settings_with(target, hooks, false)
+}
+
+/// [`merge_into_settings`] with an explicit dry-run switch: the full merge and
+/// changed-classification run, but the write is skipped when `dry_run` is
+/// `true` (the return value still says whether a real run WOULD write).
+pub fn merge_into_settings_with(
+    target: &Path,
+    hooks: &RewrittenHooks,
+    dry_run: bool,
+) -> Result<bool, TomeError> {
     refuse_symlink_settings(target)?;
 
     let (mut doc, existed) = load_settings(target)?;
@@ -217,10 +228,12 @@ pub fn merge_into_settings(target: &Path, hooks: &RewrittenHooks) -> Result<bool
     // contract creates `{"hooks": {}}` (FR-002). But when the file already
     // exists and nothing changed, do not rewrite (idempotence).
     if !existed {
-        write_settings(target, &doc)?;
+        if !dry_run {
+            write_settings(target, &doc)?;
+        }
         return Ok(true);
     }
-    if changed {
+    if changed && !dry_run {
         write_settings(target, &doc)?;
     }
     Ok(changed)
@@ -235,6 +248,16 @@ pub fn merge_into_settings(target: &Path, hooks: &RewrittenHooks) -> Result<bool
 /// file itself are left in place (FR-006). Returns `true` when the file was
 /// changed on disk.
 pub fn remove_from_settings(target: &Path, hooks: &RewrittenHooks) -> Result<bool, TomeError> {
+    remove_from_settings_with(target, hooks, false)
+}
+
+/// [`remove_from_settings`] with an explicit dry-run switch: the structural
+/// match runs in full, but the write is skipped when `dry_run` is `true`.
+pub fn remove_from_settings_with(
+    target: &Path,
+    hooks: &RewrittenHooks,
+    dry_run: bool,
+) -> Result<bool, TomeError> {
     refuse_symlink_settings(target)?;
 
     let (mut doc, existed) = load_settings(target)?;
@@ -261,7 +284,7 @@ pub fn remove_from_settings(target: &Path, hooks: &RewrittenHooks) -> Result<boo
         }
     }
 
-    if changed {
+    if changed && !dry_run {
         write_settings(target, &doc)?;
     }
     Ok(changed)
@@ -442,6 +465,18 @@ pub fn merge_tome_owned_into_settings(
     hooks: &RewrittenHooks,
     expected_args_suffix: &str,
 ) -> Result<bool, TomeError> {
+    merge_tome_owned_into_settings_with(target, hooks, expected_args_suffix, false)
+}
+
+/// [`merge_tome_owned_into_settings`] with an explicit dry-run switch: the
+/// launcher-tolerant upsert classification runs in full, but the write is
+/// skipped when `dry_run` is `true`.
+pub fn merge_tome_owned_into_settings_with(
+    target: &Path,
+    hooks: &RewrittenHooks,
+    expected_args_suffix: &str,
+    dry_run: bool,
+) -> Result<bool, TomeError> {
     refuse_symlink_settings(target)?;
 
     let (mut doc, existed) = load_settings(target)?;
@@ -459,10 +494,12 @@ pub fn merge_tome_owned_into_settings(
     }
 
     if !existed {
-        write_settings(target, &doc)?;
+        if !dry_run {
+            write_settings(target, &doc)?;
+        }
         return Ok(true);
     }
-    if changed {
+    if changed && !dry_run {
         write_settings(target, &doc)?;
     }
     Ok(changed)
@@ -516,6 +553,18 @@ pub fn remove_tome_owned_from_settings(
     hooks: &RewrittenHooks,
     expected_args_suffix: &str,
 ) -> Result<bool, TomeError> {
+    remove_tome_owned_from_settings_with(target, hooks, expected_args_suffix, false)
+}
+
+/// [`remove_tome_owned_from_settings`] with an explicit dry-run switch: the
+/// launcher-tolerant match runs in full, but the write is skipped when
+/// `dry_run` is `true`.
+pub fn remove_tome_owned_from_settings_with(
+    target: &Path,
+    hooks: &RewrittenHooks,
+    expected_args_suffix: &str,
+    dry_run: bool,
+) -> Result<bool, TomeError> {
     refuse_symlink_settings(target)?;
 
     let (mut doc, existed) = load_settings(target)?;
@@ -546,7 +595,7 @@ pub fn remove_tome_owned_from_settings(
         }
     }
 
-    if changed {
+    if changed && !dry_run {
         write_settings(target, &doc)?;
     }
     Ok(changed)

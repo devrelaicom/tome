@@ -151,6 +151,21 @@ pub fn emit_tome_op(
 /// - [`TomeError::Io`] (exit 7) — a symlinked component on the bundle path, or a
 ///   generic removal failure. Symlink refusal fails closed (nothing removed).
 pub fn remove_tome_op(plugin_root: &Path) -> Result<RemoveOutcome, TomeError> {
+    match probe_tome_op_removal(plugin_root)? {
+        RemoveOutcome::Removed => {
+            std::fs::remove_dir_all(plugin_root).map_err(TomeError::Io)?;
+            Ok(RemoveOutcome::Removed)
+        }
+        other => Ok(other),
+    }
+}
+
+/// The read-only classification half of [`remove_tome_op`]: the symlink
+/// refusal + presence + structural-ownership checks, WITHOUT the deletion.
+/// `RemoveOutcome::Removed` here means "a real removal WOULD delete the
+/// bundle". Shared with the `tome sync --dry-run` preview so the dry-run and
+/// the real removal can never disagree about what is Tome's to remove.
+pub fn probe_tome_op_removal(plugin_root: &Path) -> Result<RemoveOutcome, TomeError> {
     crate::util::refuse_symlinked_component(plugin_root).map_err(TomeError::Io)?;
 
     if !plugin_root.exists() {
@@ -160,7 +175,6 @@ pub fn remove_tome_op(plugin_root: &Path) -> Result<RemoveOutcome, TomeError> {
         // Not our bundle — never mass-delete a directory we don't own.
         return Ok(RemoveOutcome::NotTomeOp);
     }
-    std::fs::remove_dir_all(plugin_root).map_err(TomeError::Io)?;
     Ok(RemoveOutcome::Removed)
 }
 

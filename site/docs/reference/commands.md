@@ -266,6 +266,7 @@ propagation `tome plugin enable/disable --sync` runs inline.
 | `--rules-only` | Only write `.tome/RULES.md`; skip the harness reconcile. Mutually exclusive with `--harness-only`. |
 | `--harness-only` | Only reconcile harness files; skip the `.tome/RULES.md` write. |
 | `--harness <name>` | Restrict the harness reconcile to one or more harnesses (repeatable: `--harness a --harness b`). Aliases resolve to their canonical module; unknown names exit `18`. Ignored with `--rules-only`. Empty (the default) reconciles the full effective set. |
+| `--dry-run` | Preview: compute and print exactly what this sync would change — the same per-harness classification a real run performs — write nothing, and exit `0`. Combines with every other flag. |
 
 **Where it acts.** `tome sync` targets projects, not the whole workspace at
 once. Its behaviour depends on where you run it:
@@ -286,8 +287,18 @@ once. Its behaviour depends on where you run it:
 The fan-out reuses the exact `--all` writer path, so every project it touches
 inherits the same safety: managed edits stay inside Tome's markers, symlinked
 sinks are refused, and writes are atomic. A per-project failure does not abort
-the run — every reachable project is attempted and the first error is returned,
-so the exit code reflects a genuine failure while partial progress still lands.
+the run — every reachable project is attempted, each failure is reported (one
+`FAILED` line per project in human mode; a trailing `failures` array in
+`--json`, present only when something failed), and the first error still sets
+the exit code while partial progress lands.
+
+**Output.** When a project's files changed, human mode enumerates the
+file-level actions per harness (`+` added, `~` updated, `-` removed; paths
+relative to the project where possible) instead of a bare change count; an
+unchanged project keeps the one-line summary. `--dry-run` prints the same
+enumeration under a leading banner without touching a single file — every sink
+computes its real classification (reads, merges, byte-compares) and skips only
+the final write, so the preview is exactly what the next real run will do.
 
 ## `tome meta`
 

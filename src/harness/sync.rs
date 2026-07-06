@@ -85,6 +85,13 @@ pub struct SyncDeps<'a> {
     /// effective set. Set by `tome sync --harness` (repeatable). The set holds
     /// alias-resolved canonical names, so membership is `set.contains(m.name())`.
     pub only_harness: Option<HashSet<String>>,
+    /// When `true` (`tome sync --dry-run`), every sink computes its full
+    /// classification — reads, merges, byte-compares — but the final
+    /// write/remove at each sink's mutation chokepoint is SKIPPED. The
+    /// [`SyncOutcome`] then reports exactly what a real run would do. Every
+    /// sink classifies BEFORE it writes, so the preview is the real
+    /// classification, not an approximation.
+    pub dry_run: bool,
 }
 
 /// Summary of one sync pass per FR-547. Serialised verbatim in the
@@ -442,7 +449,7 @@ fn reconcile_against_effective(
                 // inline is the safe LCD; an include-only group stays AtInclude.
                 let style = group_body_style(&live_sharers);
                 let body = compute_rules_body(style, &snap.rules_path, project_root)?;
-                let action = write_rules_for_path(snap, &body)?;
+                let action = write_rules_for_path(snap, &body, deps.dry_run)?;
                 record_action(
                     &mut outcome,
                     &snap.name,
@@ -452,7 +459,7 @@ fn reconcile_against_effective(
                 );
                 action
             } else {
-                let action = clean_rules_for_path(snap)?;
+                let action = clean_rules_for_path(snap, deps.dry_run)?;
                 record_action(
                     &mut outcome,
                     &snap.name,
@@ -504,7 +511,7 @@ fn reconcile_against_effective(
                     Err(other) => return Err(other),
                 }
             } else {
-                let action = clean_mcp_for_harness(snap)?;
+                let action = clean_mcp_for_harness(snap, deps.dry_run)?;
                 record_action(
                     &mut outcome,
                     &snap.name,
@@ -658,8 +665,13 @@ fn reconcile_against_effective(
     // byte-identical to before. The `first_error` is surfaced LAST in the fixed
     // precedence chain below.
     // -----------------------------------------------------------------
-    let (plugin_actions, plugin_error) =
-        reconcile_plugins(project_root, effective_names, &snapshots, &mut outcome);
+    let (plugin_actions, plugin_error) = reconcile_plugins(
+        project_root,
+        effective_names,
+        &snapshots,
+        deps.dry_run,
+        &mut outcome,
+    );
     for decision in &mut outcome.decisions {
         if let Some(action) = plugin_actions.get(&decision.harness) {
             decision.plugins_action = *action;
@@ -958,6 +970,7 @@ fn collect_all_harness_snapshots(
         workspace_name: deps.workspace_name,
         force: deps.force,
         only_harness: None,
+        dry_run: deps.dry_run,
     };
     snapshots.extend(collect_opt_in_snapshots(
         project_root,
@@ -1154,7 +1167,11 @@ fn compute_rules_body(
     }
 }
 
-fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, TomeError> {
+fn write_rules_for_path(
+    snap: &HarnessSnapshot,
+    body: &str,
+    dry_run: bool,
+) -> Result<Action, TomeError> {
     match snap.rules_strategy {
         RulesFileStrategy::BlockInExistingFile => {
             // Classify before write so we can distinguish Created vs
@@ -1173,7 +1190,9 @@ fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, To
             };
             let classification = classify_block(&prior_block, body);
 
-            rules_file::write_block(&snap.rules_path, body, snap.block_body_style)?;
+            if !dry_run {
+                rules_file::write_block(&snap.rules_path, body, snap.block_body_style)?;
+            }
             Ok(classification)
         }
         RulesFileStrategy::StandaloneFile => {
@@ -1202,18 +1221,20 @@ fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, To
                 Some(existing) if existing == desired => Action::LeftAlone,
                 Some(_) => Action::Updated,
             };
-            match snap.rules_frontmatter {
-                Some(fm) => {
-                    rules_file::write_standalone_with_frontmatter(&snap.rules_path, &fm, body)?
+            if !dry_run {
+                match snap.rules_frontmatter {
+                    Some(fm) => {
+                        rules_file::write_standalone_with_frontmatter(&snap.rules_path, &fm, body)?
+                    }
+                    None => rules_file::write_standalone(&snap.rules_path, body)?,
                 }
-                None => rules_file::write_standalone(&snap.rules_path, body)?,
             }
             Ok(classification)
         }
     }
 }
 
-fn clean_rules_for_path(snap: &HarnessSnapshot) -> Result<Action, TomeError> {
+fn clean_rules_for_path(snap: &HarnessSnapshot, dry_run: bool) -> Result<Action, TomeError> {
     match snap.rules_strategy {
         RulesFileStrategy::BlockInExistingFile => {
             let prior = match crate::util::bounded_read_to_string(
@@ -1231,7 +1252,9 @@ fn clean_rules_for_path(snap: &HarnessSnapshot) -> Result<Action, TomeError> {
                 None => false,
             };
             if had_block {
-                rules_file::remove_block(&snap.rules_path)?;
+                if !dry_run {
+                    rules_file::remove_block(&snap.rules_path)?;
+                }
                 Ok(Action::Removed)
             } else {
                 Ok(Action::LeftAlone)
@@ -1239,7 +1262,9 @@ fn clean_rules_for_path(snap: &HarnessSnapshot) -> Result<Action, TomeError> {
         }
         RulesFileStrategy::StandaloneFile => {
             if snap.rules_path.exists() {
-                rules_file::remove_standalone(&snap.rules_path)?;
+                if !dry_run {
+                    rules_file::remove_standalone(&snap.rules_path)?;
+                }
                 Ok(Action::Removed)
             } else {
                 Ok(Action::LeftAlone)
@@ -1322,17 +1347,21 @@ fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<
         Some(_) => Action::Updated,
     };
 
-    mcp_config::write_entry(&snap.mcp_path, &snap.mcp_dialect, &expected)?;
+    if !deps.dry_run {
+        mcp_config::write_entry(&snap.mcp_path, &snap.mcp_dialect, &expected)?;
+    }
     Ok(classification)
 }
 
-fn clean_mcp_for_harness(snap: &HarnessSnapshot) -> Result<Action, TomeError> {
+fn clean_mcp_for_harness(snap: &HarnessSnapshot, dry_run: bool) -> Result<Action, TomeError> {
     let existing = mcp_config::read_entry(&snap.mcp_path, &snap.mcp_dialect)?;
     let was_tome = matches!(existing.as_ref(), Some(e) if mcp_config::is_tome_owned(e));
     if !was_tome {
         return Ok(Action::LeftAlone);
     }
-    mcp_config::remove_entry(&snap.mcp_path, &snap.mcp_dialect)?;
+    if !dry_run {
+        mcp_config::remove_entry(&snap.mcp_path, &snap.mcp_dialect)?;
+    }
     Ok(Action::Removed)
 }
 
@@ -1408,6 +1437,7 @@ pub(crate) fn build_deps<'a>(
         workspace_name,
         force,
         only_harness: None,
+        dry_run: false,
     }
 }
 

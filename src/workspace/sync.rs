@@ -87,6 +87,18 @@ pub fn sync_rules_to_project(
     project_root: &std::path::Path,
     name: &WorkspaceName,
 ) -> Result<RulesSync, TomeError> {
+    sync_rules_to_project_with(source_bytes, project_root, name, false)
+}
+
+/// [`sync_rules_to_project`] with an explicit dry-run switch: the full
+/// classification (missing / unchanged / would-sync) runs, but the write is
+/// skipped when `dry_run` is `true`.
+pub fn sync_rules_to_project_with(
+    source_bytes: &[u8],
+    project_root: &std::path::Path,
+    name: &WorkspaceName,
+    dry_run: bool,
+) -> Result<RulesSync, TomeError> {
     if !project_root.is_dir() {
         tracing::debug!(
             workspace = name.as_str(),
@@ -114,7 +126,9 @@ pub fn sync_rules_to_project(
         return Ok(RulesSync::Unchanged);
     }
 
-    store::write_atomic(&dest, source_bytes)?;
+    if !dry_run {
+        store::write_atomic(&dest, source_bytes)?;
+    }
     Ok(RulesSync::Synced)
 }
 

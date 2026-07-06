@@ -313,6 +313,10 @@ pub struct SyncArgs {
     /// default) reconciles the full effective set.
     #[arg(long, value_name = "NAME", action = clap::ArgAction::Append)]
     pub harness: Vec<String>,
+    /// Preview: compute and print exactly what this sync would change, write
+    /// nothing, and exit 0. Combines with every other flag.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `tome tier <subcommand>` — manage per-workspace skill/command routing tiers.

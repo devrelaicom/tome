@@ -150,10 +150,18 @@ pub(crate) fn reconcile_guardrails(
 
         let result = match &snap.guardrails_target.placement {
             GuardrailsPlacement::InFileRegion { file } => {
-                crate::harness::guardrails::reconcile_in_file_region(file, &desired)
+                crate::harness::guardrails::reconcile_in_file_region_with(
+                    file,
+                    &desired,
+                    deps.dry_run,
+                )
             }
             GuardrailsPlacement::StandaloneSibling { file } => {
-                crate::harness::guardrails::reconcile_standalone_sibling(file, &desired)
+                crate::harness::guardrails::reconcile_standalone_sibling_with(
+                    file,
+                    &desired,
+                    deps.dry_run,
+                )
             }
         };
 

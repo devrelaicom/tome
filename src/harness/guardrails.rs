@@ -203,6 +203,18 @@ pub fn reconcile_in_file_region(
     target: &Path,
     desired: &BTreeMap<String, String>,
 ) -> Result<GuardrailsAction, TomeError> {
+    reconcile_in_file_region_with(target, desired, false)
+}
+
+/// [`reconcile_in_file_region`] with an explicit dry-run switch: the full
+/// compose + classification run, but the write is skipped when `dry_run` is
+/// `true` (the returned [`GuardrailsAction`] still says what a real run would
+/// do).
+pub fn reconcile_in_file_region_with(
+    target: &Path,
+    desired: &BTreeMap<String, String>,
+    dry_run: bool,
+) -> Result<GuardrailsAction, TomeError> {
     rules_file::refuse_symlink(target).map_err(|_| TomeError::GuardrailsWriteFailed {
         path: target.to_path_buf(),
     })?;
@@ -234,11 +246,13 @@ pub fn reconcile_in_file_region(
         return Ok(GuardrailsAction::LeftAlone);
     }
 
-    rules_file::atomic_write(target, new_contents.as_bytes()).map_err(|_| {
-        TomeError::GuardrailsWriteFailed {
-            path: target.to_path_buf(),
-        }
-    })?;
+    if !dry_run {
+        rules_file::atomic_write(target, new_contents.as_bytes()).map_err(|_| {
+            TomeError::GuardrailsWriteFailed {
+                path: target.to_path_buf(),
+            }
+        })?;
+    }
 
     Ok(classify(existing.is_some(), prior_had_regions, desired))
 }
@@ -251,6 +265,17 @@ pub fn reconcile_standalone_sibling(
     target: &Path,
     desired: &BTreeMap<String, String>,
 ) -> Result<GuardrailsAction, TomeError> {
+    reconcile_standalone_sibling_with(target, desired, false)
+}
+
+/// [`reconcile_standalone_sibling`] with an explicit dry-run switch: the full
+/// render + classification run, but the write/delete is skipped when `dry_run`
+/// is `true`.
+pub fn reconcile_standalone_sibling_with(
+    target: &Path,
+    desired: &BTreeMap<String, String>,
+    dry_run: bool,
+) -> Result<GuardrailsAction, TomeError> {
     rules_file::refuse_symlink(target).map_err(|_| TomeError::GuardrailsWriteFailed {
         path: target.to_path_buf(),
     })?;
@@ -260,9 +285,11 @@ pub fn reconcile_standalone_sibling(
     if desired.is_empty() {
         // Delete the sibling entirely when no plugin contributes.
         if existed {
-            std::fs::remove_file(target).map_err(|_| TomeError::GuardrailsWriteFailed {
-                path: target.to_path_buf(),
-            })?;
+            if !dry_run {
+                std::fs::remove_file(target).map_err(|_| TomeError::GuardrailsWriteFailed {
+                    path: target.to_path_buf(),
+                })?;
+            }
             return Ok(GuardrailsAction::Removed);
         }
         return Ok(GuardrailsAction::LeftAlone);
@@ -284,11 +311,13 @@ pub fn reconcile_standalone_sibling(
         return Ok(GuardrailsAction::LeftAlone);
     }
 
-    rules_file::atomic_write(target, out.as_bytes()).map_err(|_| {
-        TomeError::GuardrailsWriteFailed {
-            path: target.to_path_buf(),
-        }
-    })?;
+    if !dry_run {
+        rules_file::atomic_write(target, out.as_bytes()).map_err(|_| {
+            TomeError::GuardrailsWriteFailed {
+                path: target.to_path_buf(),
+            }
+        })?;
+    }
 
     Ok(if existed {
         GuardrailsAction::Updated

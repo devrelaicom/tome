@@ -75,6 +75,7 @@ impl Fixture {
             workspace_name: &self.workspace,
             force,
             only_harness: None,
+            dry_run: false,
         }
     }
 }
@@ -1282,6 +1283,7 @@ fn cmd_sync_harness_set_filters_to_named_two_through_command() {
         rules_only: false,
         harness_only: true,
         harness: vec!["cursor".to_string(), "claude-code".to_string()],
+        dry_run: false,
     };
     let outcome =
         tome::commands::sync::sync_one_project(&fx.workspace, &fx.project, &args, &fx.paths)
@@ -1338,6 +1340,7 @@ fn cmd_sync_single_harness_filters_through_command() {
         rules_only: false,
         harness_only: true,
         harness: vec!["cursor".to_string()],
+        dry_run: false,
     };
     tome::commands::sync::sync_one_project(&fx.workspace, &fx.project, &args, &fx.paths)
         .expect("single --harness through the command");

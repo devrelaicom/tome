@@ -63,12 +63,63 @@ pub struct ProjectOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules: Option<&'static str>,
     pub harness_changes: usize,
+    /// The per-file actions behind `harness_changes`, for the HUMAN renderer's
+    /// per-harness enumeration (issue #424). `serde(skip)`: the `--json` wire
+    /// shape stays exactly as before — the same data already rides
+    /// [`crate::harness::sync::SyncOutcome`] on the surfaces that emit it.
+    #[serde(skip)]
+    pub changes: Vec<ChangeLine>,
+}
+
+/// One enumerated file-level action for the human renderer: which harness,
+/// what happened (`+`/`~`/`-`), and the touched path. Never serialised.
+#[derive(Debug, Clone)]
+pub struct ChangeLine {
+    pub op: ChangeOp,
+    pub harness: String,
+    pub path: PathBuf,
+}
+
+/// What happened to one file: added (`+`), updated (`~`), or removed (`-`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeOp {
+    Add,
+    Update,
+    Remove,
+}
+
+impl ChangeOp {
+    fn glyph(self) -> char {
+        match self {
+            ChangeOp::Add => '+',
+            ChangeOp::Update => '~',
+            ChangeOp::Remove => '-',
+        }
+    }
+}
+
+/// One project the `--all` fan-out could not sync (issue #426). The error is
+/// its display string (already credential-scrubbed at the source boundary).
+#[derive(Debug, Serialize)]
+pub struct ProjectFailure {
+    pub project: PathBuf,
+    pub error: String,
 }
 
 /// Aggregate of every project this `tome sync` invocation touched.
 #[derive(Debug, Serialize)]
 pub struct SyncReport {
     pub projects: Vec<ProjectOutcome>,
+    /// Per-project failures from the `--all` fan-out (issue #426). Appended
+    /// LAST and omitted when empty, so the wire shape is byte-identical to
+    /// before unless a project actually failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<ProjectFailure>,
+    /// The first per-project error, preserved as the exit-code source (the
+    /// pre-existing first-error semantics). Never serialised — `failures`
+    /// carries the wire form.
+    #[serde(skip)]
+    pub first_error: Option<TomeError>,
 }
 
 /// Dispatcher invoked by `main.rs`. Validates flags, resolves the active
@@ -99,12 +150,14 @@ pub fn run(
 
     let ws = scope.scope.name().clone();
 
-    let report = if args.all {
+    let mut report = if args.all {
         sync_all(&ws, &args, paths)?
     } else if let Some(project_root) = scope.project_root.as_deref() {
         // In a project: sync exactly that project, unchanged.
         let mut report = SyncReport {
             projects: Vec::new(),
+            failures: Vec::new(),
+            first_error: None,
         };
         report
             .projects
@@ -121,7 +174,7 @@ pub fn run(
             // Fanned out to at least one bound project. Print a short human
             // note so the user isn't surprised `tome sync` acted outside CWD;
             // `--json` stays byte-identical to what `--all` already emits.
-            Ok(report) if !report.projects.is_empty() => {
+            Ok(report) if !report.projects.is_empty() || !report.failures.is_empty() => {
                 if mode == Mode::Human {
                     eprintln!(
                         "note: no project marker here; syncing every project bound to workspace `{}` (like --all)",
@@ -138,14 +191,21 @@ pub fn run(
             Ok(_) | Err(TomeError::WorkspaceNotFound { .. }) => {
                 return Err(TomeError::Usage(no_bindings_hint(&ws)));
             }
-            // A genuine per-project sync failure (e.g. a symlink refusal or a
-            // harness write error). Surface it so the exit code reflects the
-            // real failure.
+            // A pre-fan-out failure (unreadable central DB, …). Surface it so
+            // the exit code reflects the real failure.
             Err(e) => return Err(e),
         }
     };
 
-    emit(&report, mode)
+    // #426: emit the per-project report (successes AND failures) FIRST, then
+    // surface the first per-project error so the exit code is preserved
+    // exactly as before — partial progress is now visible instead of silent.
+    let first_error = report.first_error.take();
+    emit(&report, mode, args.dry_run)?;
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Detect-and-suggest message for a bare `tome sync` (no project marker,
@@ -178,17 +238,21 @@ pub fn sync_one_project(
         // treats source-absent as a no-op). `unwrap_or_default` collapses the
         // NotFound case to empty bytes.
         let source = std::fs::read(paths.workspace_rules_file(ws)).unwrap_or_default();
-        let classification =
-            match crate::workspace::sync::sync_rules_to_project(&source, project_root, ws)? {
-                RulesSync::Synced => "synced",
-                RulesSync::Unchanged => "unchanged",
-                RulesSync::MissingProjectDir => "missing",
-            };
+        let classification = match crate::workspace::sync::sync_rules_to_project_with(
+            &source,
+            project_root,
+            ws,
+            args.dry_run,
+        )? {
+            RulesSync::Synced => "synced",
+            RulesSync::Unchanged => "unchanged",
+            RulesSync::MissingProjectDir => "missing",
+        };
         Some(classification)
     };
 
-    let harness_changes = if args.rules_only {
-        0
+    let (harness_changes, changes) = if args.rules_only {
+        (0, Vec::new())
     } else {
         let home = crate::commands::harness::home_root()?;
         // `--force` is not exposed on `tome sync` (matching `tome harness
@@ -196,37 +260,67 @@ pub fn sync_one_project(
         // `tome workspace use --force`.
         let mut deps = crate::harness::sync::build_deps(paths, &home, ws, false);
         deps.only_harness = harness_filter_set(&args.harness);
+        deps.dry_run = args.dry_run;
         let outcome = crate::harness::sync::sync_project(project_root, &deps)?;
 
         // Telemetry parity with the removed `tome harness sync`: emit one
         // `tome.harness_action{Sync}` per DISTINCT harness that actually had a
         // change. Best-effort, success-path only; a fully-idempotent reconcile
         // (no changes) emits nothing. Unmapped harness names are SKIPped by
-        // `emit_harness_action`.
-        let mut seen: Vec<&str> = Vec::new();
-        for change in outcome
-            .added
-            .iter()
-            .chain(outcome.updated.iter())
-            .chain(outcome.removed.iter())
-        {
-            if !seen.contains(&change.harness.as_str()) {
-                seen.push(change.harness.as_str());
-                crate::commands::harness::emit_harness_action(
-                    &change.harness,
-                    crate::telemetry::event::HarnessAction::Sync,
-                );
+        // `emit_harness_action`. A dry run changed nothing — emit nothing.
+        if !args.dry_run {
+            let mut seen: Vec<&str> = Vec::new();
+            for change in outcome
+                .added
+                .iter()
+                .chain(outcome.updated.iter())
+                .chain(outcome.removed.iter())
+            {
+                if !seen.contains(&change.harness.as_str()) {
+                    seen.push(change.harness.as_str());
+                    crate::commands::harness::emit_harness_action(
+                        &change.harness,
+                        crate::telemetry::event::HarnessAction::Sync,
+                    );
+                }
             }
         }
 
-        outcome.added.len() + outcome.updated.len() + outcome.removed.len()
+        let count = outcome.added.len() + outcome.updated.len() + outcome.removed.len();
+        (count, change_lines(&outcome))
     };
 
     Ok(ProjectOutcome {
         project: project_root.to_path_buf(),
         rules,
         harness_changes,
+        changes,
     })
+}
+
+/// Flatten a [`crate::harness::sync::SyncOutcome`]'s added/updated/removed
+/// vectors into per-file [`ChangeLine`]s for the human renderer, grouped by
+/// harness (lexicographic) with each harness's adds, then updates, then
+/// removals in recorded order.
+fn change_lines(outcome: &crate::harness::sync::SyncOutcome) -> Vec<ChangeLine> {
+    let mut lines: Vec<ChangeLine> = Vec::new();
+    for (op, set) in [
+        (ChangeOp::Add, &outcome.added),
+        (ChangeOp::Update, &outcome.updated),
+        (ChangeOp::Remove, &outcome.removed),
+    ] {
+        for change in set {
+            lines.push(ChangeLine {
+                op,
+                harness: change.harness.clone(),
+                path: change.path.clone(),
+            });
+        }
+    }
+    // Group by harness for readability; the sort is stable, so within one
+    // harness the add → update → remove order above is preserved.
+    lines.sort_by(|a, b| a.harness.cmp(&b.harness));
+    lines
 }
 
 /// Build the canonical-name `SyncDeps.only_harness` filter SET from the
@@ -252,8 +346,9 @@ pub(crate) fn harness_filter_set(harness: &[String]) -> Option<std::collections:
 
 /// Fan out [`sync_one_project`] over every project bound to `ws` in
 /// `workspace_projects`. Forward-progress: a per-project failure is captured
-/// in `first_error` and the loop continues; the first error is returned after
-/// every project has been attempted.
+/// (on `failures` for the report, on `first_error` for the exit code) and the
+/// loop continues, so every reachable project is attempted. Only PRE-fan-out
+/// failures (unreadable central DB, missing workspace row) return `Err`.
 pub fn sync_all(
     ws: &WorkspaceName,
     args: &SyncArgs,
@@ -261,6 +356,8 @@ pub fn sync_all(
 ) -> Result<SyncReport, TomeError> {
     let mut report = SyncReport {
         projects: Vec::new(),
+        failures: Vec::new(),
+        first_error: None,
     };
 
     // No central DB → no bindings to walk. An empty report is the correct
@@ -279,30 +376,31 @@ pub fn sync_all(
     // walk, not a duplicated SELECT.
     let project_roots = crate::workspace::sync::bound_project_roots(&conn, workspace_id)?;
 
-    let mut first_error: Option<TomeError> = None;
     for project_root in project_roots {
         match sync_one_project(ws, &project_root, args, paths) {
             Ok(outcome) => report.projects.push(outcome),
             Err(e) => {
                 // Forward-progress: keep going so every reachable project is
-                // attempted; surface the first failure for the exit code.
+                // attempted; surface the first failure for the exit code and
+                // EVERY failure on the report (#426), not just the log.
                 tracing::warn!(
                     workspace = ws.as_str(),
                     project = %project_root.display(),
                     error = %e,
                     "sync: project failed; continuing",
                 );
-                if first_error.is_none() {
-                    first_error = Some(e);
+                report.failures.push(ProjectFailure {
+                    project: project_root,
+                    error: e.to_string(),
+                });
+                if report.first_error.is_none() {
+                    report.first_error = Some(e);
                 }
             }
         }
     }
 
-    match first_error {
-        Some(e) => Err(e),
-        None => Ok(report),
-    }
+    Ok(report)
 }
 
 /// Run the SAME propagation `tome sync --all` performs — RULES.md write +
@@ -344,39 +442,263 @@ pub fn sync_bound_projects(ws: &WorkspaceName, paths: &Paths) -> Result<SyncRepo
         rules_only: false,
         harness_only: false,
         harness: Vec::new(),
+        dry_run: false,
     };
-    sync_all(ws, &args, paths)
+    let mut report = sync_all(ws, &args, paths)?;
+    // Preserve the pre-#426 contract for the inline `--sync` callers: a
+    // per-project failure IS the call's failure (the enable/disable caller
+    // reports the state change as done and the sync as failed).
+    if let Some(e) = report.first_error.take() {
+        return Err(e);
+    }
+    Ok(report)
 }
 
-/// Emit the report per output mode. Human mode prints one line per project;
-/// `--json` emits the wire-stable [`SyncReport`].
-fn emit(report: &SyncReport, mode: Mode) -> Result<(), TomeError> {
+/// Emit the report per output mode. Human mode prints the per-project
+/// rendering from [`render_human`]; `--json` emits the wire-stable
+/// [`SyncReport`] (dry-run or not — the flag was explicit, the report shape
+/// is identical).
+fn emit(report: &SyncReport, mode: Mode, dry_run: bool) -> Result<(), TomeError> {
     match mode {
         Mode::Json => write_json(report),
         Mode::Human => {
             let mut out = std::io::stdout().lock();
-            if report.projects.is_empty() {
-                writeln!(out, "Sync: no bound projects")?;
-                return Ok(());
-            }
-            for p in &report.projects {
-                let rules = p.rules.unwrap_or("skipped");
-                writeln!(
-                    out,
-                    "{}: rules {}, {} harness change(s)",
-                    p.project.display(),
-                    rules,
-                    p.harness_changes,
-                )?;
-            }
+            out.write_all(render_human(report, dry_run).as_bytes())?;
             Ok(())
         }
     }
 }
 
+/// Render the human-mode report (issues #424 / #425 / #426).
+///
+/// Per project: when nothing changed, the pre-#424 one-liner
+/// (`<path>: rules synced, 0 harness change(s)`); when files changed, the
+/// count is replaced by a per-harness enumeration of file-level actions
+/// (`+` added / `~` updated / `-` removed, paths relative to the project
+/// where possible). A dry run gets a leading banner; failed projects (#426)
+/// each get a one-line `FAILED` entry after the successes.
+fn render_human(report: &SyncReport, dry_run: bool) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    if dry_run {
+        out.push_str("Dry run: no files written. Actions below are what `tome sync` would do.\n");
+    }
+    if report.projects.is_empty() && report.failures.is_empty() {
+        out.push_str("Sync: no bound projects\n");
+        return out;
+    }
+    for p in &report.projects {
+        let rules = p.rules.unwrap_or("skipped");
+        if p.changes.is_empty() {
+            // Nothing changed: collapse to the pre-#424 one-liner.
+            let _ = writeln!(
+                out,
+                "{}: rules {}, {} harness change(s)",
+                p.project.display(),
+                rules,
+                p.harness_changes,
+            );
+            continue;
+        }
+        let _ = writeln!(out, "{}: rules {}", p.project.display(), rules);
+        let width = p.changes.iter().map(|c| c.harness.len()).max().unwrap_or(0);
+        for c in &p.changes {
+            // Paths under the project render relative; home-based sinks (e.g.
+            // `~/.codex/config.toml`) keep their absolute form.
+            let path = c.path.strip_prefix(&p.project).unwrap_or(&c.path);
+            let _ = writeln!(
+                out,
+                "  {:<width$}  {} {}",
+                c.harness,
+                c.op.glyph(),
+                path.display(),
+            );
+        }
+    }
+    for f in &report.failures {
+        let _ = writeln!(out, "{}: FAILED — {}", f.project.display(), f.error);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::harness_filter_set;
+    use super::*;
+
+    fn outcome(
+        project: &str,
+        rules: Option<&'static str>,
+        changes: Vec<ChangeLine>,
+    ) -> ProjectOutcome {
+        ProjectOutcome {
+            project: PathBuf::from(project),
+            rules,
+            harness_changes: changes.len(),
+            changes,
+        }
+    }
+
+    fn line(op: ChangeOp, harness: &str, path: &str) -> ChangeLine {
+        ChangeLine {
+            op,
+            harness: harness.to_string(),
+            path: PathBuf::from(path),
+        }
+    }
+
+    /// #424: nothing changed → collapse to the pre-existing one-liner
+    /// (`rules synced, 0 harness change(s)`), byte-identical to before.
+    #[test]
+    fn render_unchanged_project_keeps_the_one_liner() {
+        let report = SyncReport {
+            projects: vec![outcome("/proj", Some("unchanged"), Vec::new())],
+            failures: Vec::new(),
+            first_error: None,
+        };
+        assert_eq!(
+            render_human(&report, false),
+            "/proj: rules unchanged, 0 harness change(s)\n",
+        );
+    }
+
+    /// #424: changed files are enumerated per harness with `+`/`~`/`-` ops,
+    /// project-relative paths where possible, absolute otherwise.
+    #[test]
+    fn render_changed_project_enumerates_per_harness() {
+        let report = SyncReport {
+            projects: vec![outcome(
+                "/proj",
+                Some("synced"),
+                vec![
+                    line(ChangeOp::Add, "cursor", "/proj/.cursor/mcp.json"),
+                    line(ChangeOp::Update, "cursor", "/proj/AGENTS.md"),
+                    line(ChangeOp::Remove, "codex", "/home/u/.codex/config.toml"),
+                ],
+            )],
+            failures: Vec::new(),
+            first_error: None,
+        };
+        let rendered = render_human(&report, false);
+        assert_eq!(
+            rendered,
+            "/proj: rules synced\n\
+             \x20 cursor  + .cursor/mcp.json\n\
+             \x20 cursor  ~ AGENTS.md\n\
+             \x20 codex   - /home/u/.codex/config.toml\n",
+        );
+        // The count phrasing is REPLACED by the enumeration when files changed.
+        assert!(!rendered.contains("harness change(s)"), "{rendered}");
+    }
+
+    /// #425: a dry run gets a leading banner; the body uses the SAME renderer.
+    #[test]
+    fn render_dry_run_prefixes_banner() {
+        let report = SyncReport {
+            projects: vec![outcome(
+                "/proj",
+                Some("synced"),
+                vec![line(ChangeOp::Add, "cursor", "/proj/.cursor/mcp.json")],
+            )],
+            failures: Vec::new(),
+            first_error: None,
+        };
+        let rendered = render_human(&report, true);
+        assert!(
+            rendered.starts_with("Dry run: no files written."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("  cursor  + .cursor/mcp.json\n"),
+            "{rendered}"
+        );
+    }
+
+    /// #426: failed projects each render one FAILED line after the successes.
+    #[test]
+    fn render_failures_one_line_per_project() {
+        let report = SyncReport {
+            projects: vec![outcome("/ok", Some("synced"), Vec::new())],
+            failures: vec![ProjectFailure {
+                project: PathBuf::from("/bad"),
+                error: "io: permission denied".to_string(),
+            }],
+            first_error: None,
+        };
+        let rendered = render_human(&report, false);
+        assert!(
+            rendered.contains("/ok: rules synced, 0 harness change(s)\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.ends_with("/bad: FAILED — io: permission denied\n"),
+            "{rendered}"
+        );
+    }
+
+    /// `change_lines` groups by harness (stable sort) while keeping each
+    /// harness's add → update → remove order.
+    #[test]
+    fn change_lines_groups_by_harness_keeping_op_order() {
+        use crate::harness::sync::{SyncChange, SyncOutcome, SyncSubsystem};
+        let mk = |harness: &str, path: &str| SyncChange {
+            harness: harness.to_string(),
+            subsystem: SyncSubsystem::Rules,
+            path: PathBuf::from(path),
+        };
+        let outcome = SyncOutcome {
+            added: vec![mk("cursor", "/p/a"), mk("codex", "/p/b")],
+            updated: vec![mk("cursor", "/p/c")],
+            removed: vec![mk("codex", "/p/d")],
+            leave_alones: 0,
+            decisions: Vec::new(),
+        };
+        let lines = change_lines(&outcome);
+        let flat: Vec<(String, ChangeOp)> =
+            lines.iter().map(|l| (l.harness.clone(), l.op)).collect();
+        assert_eq!(
+            flat,
+            vec![
+                ("codex".to_string(), ChangeOp::Add),
+                ("codex".to_string(), ChangeOp::Remove),
+                ("cursor".to_string(), ChangeOp::Add),
+                ("cursor".to_string(), ChangeOp::Update),
+            ],
+        );
+    }
+
+    /// #426 wire shape: `failures` is omitted when empty (byte-identical to
+    /// the pre-#426 report) and appended LAST when present; `changes` and
+    /// `first_error` never serialise.
+    #[test]
+    fn sync_report_json_failures_appended_last_and_omitted_when_empty() {
+        let clean = SyncReport {
+            projects: vec![outcome(
+                "/p",
+                Some("synced"),
+                vec![line(ChangeOp::Add, "h", "/p/x")],
+            )],
+            failures: Vec::new(),
+            first_error: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&clean).unwrap(),
+            r#"{"projects":[{"project":"/p","rules":"synced","harness_changes":1}]}"#,
+        );
+
+        let failed = SyncReport {
+            projects: Vec::new(),
+            failures: vec![ProjectFailure {
+                project: PathBuf::from("/bad"),
+                error: "boom".to_string(),
+            }],
+            first_error: Some(TomeError::Usage("boom".to_string())),
+        };
+        assert_eq!(
+            serde_json::to_string(&failed).unwrap(),
+            r#"{"projects":[],"failures":[{"project":"/bad","error":"boom"}]}"#,
+        );
+    }
 
     /// Empty `--harness` → `None` (no filter; reconcile the full effective set).
     #[test]

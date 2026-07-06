@@ -64,6 +64,7 @@ mod symlink_tests {
                 workspace_name: &self.workspace,
                 force: false,
                 only_harness: None,
+                dry_run: false,
             }
         }
     }

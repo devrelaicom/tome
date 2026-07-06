@@ -55,6 +55,7 @@ impl Fixture {
             workspace_name: &self.workspace,
             force: false,
             only_harness: None,
+            dry_run: false,
         }
     }
 }
