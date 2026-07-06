@@ -1,29 +1,45 @@
-//! Atomic, SIGINT-aware model artefact downloader.
+//! Atomic, SIGINT-aware, resumable model artefact downloader.
 //!
-//! Workflow (FR-020a, research §R5):
+//! Workflow (FR-020a, research §R5; resume added by #420):
 //!
-//! 1. Create a sibling `.partial/` directory next to the target model dir.
+//! 1. Create (or adopt) a sibling `.partial/` directory next to the target
+//!    model dir. A leftover `.partial/` from an interrupted run is kept ONLY
+//!    when its Tome-owned [`RESUME_MARKER`] pins the same registry identity
+//!    this run verifies against; otherwise the stale tree is wiped first.
 //! 2. Stream the HTTP body chunk-by-chunk through a `Sha256` while writing
-//!    to `<.partial>/<filename>`. After every chunk, peek the global
-//!    cancellation flag (FR-053); on cancel, abort and remove the
-//!    `.partial/` tree.
+//!    to `<.partial>/<filename>`. When a non-empty partial file already
+//!    exists, request `Range: bytes=<len>-` and APPEND on a 206 — the
+//!    already-staged prefix is folded into the streaming digest first, so
+//!    the final hash covers the whole file exactly as a fresh download
+//!    would. A 200 (or any server that ignores the range) truncates and
+//!    restarts; an oversized/corrupt partial restarts clean. After every
+//!    chunk, peek the global cancellation flag (FR-053); on cancel, abort
+//!    and RETAIN the `.partial/` tree so the next run resumes.
 //! 3. On EOF, hex-compare the streaming digest against the registry's
-//!    pinned hash. Mismatch → `ModelChecksumMismatch` (exit 32) and remove
-//!    `.partial/`.
+//!    pinned hash. A mismatch on a RESUMED file gets exactly one clean full
+//!    restart (the partial prefix was bad); a mismatch on a fresh download
+//!    → `ModelChecksumMismatch` (exit 32) and remove `.partial/`, exactly
+//!    as before resume existed.
 //! 4. Stream every non-primary file (`entry.files[1..]`, fetched from
 //!    `entry.aux_urls` positionally — e.g. `tokenizer.json` + the optional
-//!    fastembed config files) into the same `.partial/` directory. These are
-//!    not checksum-verified (the registry only pins the primary's size +
-//!    sha), consistent with `verify`'s design, so each aux stream is bounded
-//!    by [`AUX_FILE_MAX`] (64 MiB) to deny an unbounded sidecar from a
-//!    compromised pinned host (over-cap → [`TomeError::ModelCorrupt`]).
-//!    Doing this BEFORE the rename keeps the all-or-nothing landing: a
-//!    failed (or over-cap) aux fetch leaves the `.partial/` tree, which the
-//!    error arm removes.
-//! 5. `fsync` each file, then rename the `.partial/` directory to its final
-//!    name. The rename is the atomicity boundary — readers either see the
-//!    old directory (or none) or the new one, never a half-extracted state.
+//!    fastembed config files) into the same `.partial/` directory, with the
+//!    same Range-resume behaviour. These are not checksum-verified (the
+//!    registry only pins the primary's size + sha), consistent with
+//!    `verify`'s design, so each aux stream is bounded by [`AUX_FILE_MAX`]
+//!    (64 MiB) to deny an unbounded sidecar from a compromised pinned host
+//!    (over-cap → [`TomeError::ModelCorrupt`]). Doing this BEFORE the
+//!    rename keeps the all-or-nothing landing.
+//! 5. `fsync` each file, remove the resume marker, then rename the
+//!    `.partial/` directory to its final name. The rename is the atomicity
+//!    boundary — readers either see the old directory (or none) or the new
+//!    one, never a half-extracted state.
 //! 6. Write `manifest.toml` atomically via `tempfile::NamedTempFile`.
+//!
+//! On failure, the `.partial/` tree is retained ONLY for transport-class
+//! interruptions (`Io` / `Interrupted`) that left a non-empty primary
+//! partial — the resumable cases. Verification-class failures (checksum
+//! mismatch, aux over-cap, placeholder refusal) remove it, because those
+//! bytes can never become a valid install.
 //!
 //! Network and IO errors map to [`TomeError::Io`] (exit 7); checksum failures
 //! map to [`TomeError::ModelChecksumMismatch`] (exit 32); a placeholder
@@ -43,6 +59,23 @@ use crate::embedding::registry::{ModelEntry, ModelManifest};
 use crate::error::TomeError;
 
 const STREAM_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Tome-owned marker written inside a `.partial/` staging directory,
+/// recording the registry identity (`<version> <sha256>`) the staged bytes
+/// were fetched against.
+///
+/// Resume safety hinges on this: aux files are NOT checksum-verified, so
+/// appending to a partial staged under a DIFFERENT registry pin (e.g. after
+/// a Tome upgrade re-pinned the model) would silently splice two artefact
+/// versions into one corrupt sidecar. A missing or mismatched marker
+/// therefore wipes the whole staging tree before anything streams. The
+/// marker is removed just before the atomic rename so it never lands in the
+/// final model directory.
+const RESUME_MARKER: &str = ".tome-resume";
+
+/// Ceiling for reading an existing [`RESUME_MARKER`] back. The file is
+/// Tome-written and tiny; anything larger is not ours and reads as stale.
+const RESUME_MARKER_MAX: u64 = 512;
 
 /// Byte cap for an auxiliary model file (tokenizer/config sidecar).
 ///
@@ -150,19 +183,35 @@ pub fn download_model(
     let partial_dir = final_dir.with_extension("partial");
     let primary_filename = entry.files.first().copied().unwrap_or("model.onnx");
 
-    if partial_dir.exists() {
-        std::fs::remove_dir_all(&partial_dir).map_err(TomeError::Io)?;
-    }
-    std::fs::create_dir_all(&partial_dir).map_err(TomeError::Io)?;
+    prepare_partial_dir(entry, &partial_dir)?;
 
     // Run the full pipeline inside a single closure so a failure at any
-    // step (stream, verify, rename, manifest write) is followed by partial
-    // cleanup. Without this, a checksum mismatch — which is detected
-    // *after* `stream_to_partial` returns Ok — would leak the .partial dir.
+    // step (stream, verify, rename, manifest write) is followed by the
+    // retain-or-cleanup decision below. Without this, a checksum mismatch —
+    // which is detected *after* `stream_to_partial` returns Ok — would leak
+    // the .partial dir.
     let pipeline = || -> Result<ModelManifest, TomeError> {
-        let observed_hash =
-            stream_to_partial(entry, &partial_dir.join(primary_filename), byte_progress)?;
-        verify_checksum(entry, &observed_hash)?;
+        let primary_dest = partial_dir.join(primary_filename);
+        let (observed_hash, resumed) = stream_to_partial(entry, &primary_dest, byte_progress)?;
+        if let Err(err) = verify_checksum(entry, &observed_hash) {
+            if !resumed {
+                // Verification semantics are byte-identical to pre-resume for
+                // a fresh download: mismatch errors immediately (the outer
+                // arm removes the staging tree).
+                return Err(err);
+            }
+            // A resumed file failing its pinned SHA-256 means the staged
+            // prefix was bad (torn write, disk corruption): fall back to
+            // exactly ONE clean full restart, then error as a fresh download
+            // would if it fails again (#420).
+            tracing::warn!(
+                model = entry.name,
+                "resumed download failed checksum verification; restarting clean",
+            );
+            std::fs::remove_file(&primary_dest).map_err(TomeError::Io)?;
+            let (fresh_hash, _) = stream_to_partial(entry, &primary_dest, byte_progress)?;
+            verify_checksum(entry, &fresh_hash)?;
+        }
 
         // Fetch every non-primary file (tokenizer.json + optional fastembed
         // config files) BEFORE the rename, so the landed directory is
@@ -184,9 +233,12 @@ pub fn download_model(
             // pinned size to drive a bar against. Because they are unverified
             // and unsized, the stream is byte-capped (`AUX_FILE_MAX`) so a
             // compromised pinned host cannot serve an unbounded sidecar.
-            // Scrubbing is preserved — `stream_url_to_partial` runs the URL +
-            // reqwest error chain through the credential scrubber exactly as
-            // the primary fetch.
+            // Resuming an aux partial is safe ONLY because
+            // `prepare_partial_dir` wiped any tree staged under a different
+            // registry pin. Scrubbing is preserved — `stream_url_to_partial`
+            // runs the URL + reqwest error chain through the credential
+            // scrubber exactly as the primary fetch (resumed requests
+            // included; they share the one request/error path).
             stream_url_to_partial(
                 url,
                 &partial_dir.join(local_name),
@@ -200,6 +252,10 @@ pub fn download_model(
             )?;
         }
 
+        // The resume marker is Tome bookkeeping for the staging dir only —
+        // drop it before the rename so it never lands in the model dir.
+        std::fs::remove_file(partial_dir.join(RESUME_MARKER)).map_err(TomeError::Io)?;
+
         if final_dir.exists() {
             std::fs::remove_dir_all(&final_dir).map_err(TomeError::Io)?;
         }
@@ -210,25 +266,74 @@ pub fn download_model(
     match pipeline() {
         Ok(manifest) => Ok(manifest),
         Err(err) => {
-            // Best effort: the partial dir may already have been renamed
-            // (e.g. if `write_manifest` failed) — in that case the remove
-            // is a no-op and the user is left with a renamed dir + missing
-            // manifest, which `tome status` flags as Corrupt on next open.
-            let _ = std::fs::remove_dir_all(&partial_dir);
+            if should_retain_partial(&err, &partial_dir.join(primary_filename)) {
+                // Transport-class interruption (SIGINT / dropped connection)
+                // with real bytes staged: keep the tree so the next run
+                // resumes from the offset instead of paying the full
+                // download again (#420).
+            } else {
+                // Best effort: the partial dir may already have been renamed
+                // (e.g. if `write_manifest` failed) — in that case the remove
+                // is a no-op and the user is left with a renamed dir + missing
+                // manifest, which `tome status` flags as Corrupt on next open.
+                let _ = std::fs::remove_dir_all(&partial_dir);
+            }
             Err(err)
         }
     }
 }
 
+/// Prepare the `.partial/` staging directory for a (possibly resumed) run:
+/// wipe a leftover tree whose [`RESUME_MARKER`] is absent or pins a different
+/// registry identity, then (re)write the marker for this run. See the marker
+/// docs for why a cross-pin resume must never happen.
+fn prepare_partial_dir(entry: &ModelEntry, partial_dir: &Path) -> Result<(), TomeError> {
+    let marker = partial_dir.join(RESUME_MARKER);
+    if partial_dir.exists() {
+        let stale = match std::fs::metadata(&marker) {
+            Ok(meta) if meta.len() <= RESUME_MARKER_MAX => std::fs::read_to_string(&marker)
+                .map(|contents| contents != resume_marker_contents(entry))
+                .unwrap_or(true),
+            // Oversized (not ours) or unreadable/absent marker → stale.
+            _ => true,
+        };
+        if stale {
+            std::fs::remove_dir_all(partial_dir).map_err(TomeError::Io)?;
+        }
+    }
+    std::fs::create_dir_all(partial_dir).map_err(TomeError::Io)?;
+    std::fs::write(&marker, resume_marker_contents(entry)).map_err(TomeError::Io)?;
+    Ok(())
+}
+
+/// The registry identity a staged partial must match to be resumable.
+fn resume_marker_contents(entry: &ModelEntry) -> String {
+    format!("{} {}\n", entry.version, entry.sha256)
+}
+
+/// Whether a failed pipeline should RETAIN the `.partial/` staging tree for
+/// a later resume. True only for transport-class interruptions (`Io` — a
+/// dropped connection / HTTP error mid-run — or SIGINT's `Interrupted`)
+/// that left a non-empty primary partial behind. Verification-class
+/// failures (`ModelChecksumMismatch`, `ModelCorrupt`) mean the staged bytes
+/// can never verify, so retaining them would only re-fail the next run.
+fn should_retain_partial(err: &TomeError, primary_partial: &Path) -> bool {
+    matches!(err, TomeError::Io(_) | TomeError::Interrupted)
+        && std::fs::metadata(primary_partial)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+}
+
 /// Stream `entry.source_url` (the primary artefact) into `dest`, returning the
-/// streaming SHA-256 for `verify_checksum`. Thin wrapper over
+/// streaming SHA-256 for `verify_checksum` plus whether the transfer RESUMED
+/// an existing partial (a 206 append). Thin wrapper over
 /// [`stream_url_to_partial`] that supplies the primary's pinned size for the
 /// progress bar.
 fn stream_to_partial(
     entry: &ModelEntry,
     dest: &Path,
     byte_progress: Option<&dyn Fn(u64, u64)>,
-) -> Result<String, TomeError> {
+) -> Result<(String, bool), TomeError> {
     // No `AuxCap` for the primary: its pinned `size_bytes` + post-stream
     // SHA-256 verify already bound and authenticate the body.
     stream_url_to_partial(
@@ -250,19 +355,34 @@ struct AuxCap<'a> {
 }
 
 /// Stream an arbitrary `(url, dest)` pair through a `Sha256`, returning the
-/// streaming digest. Used for both the primary artefact (size known, progress
-/// driven, no `aux_cap`) and the non-primary aux files (size unknown, `None`
-/// progress, byte-capped via `aux_cap`).
+/// streaming digest plus whether the transfer RESUMED (appended to) an
+/// existing partial via a 206. Used for both the primary artefact (size
+/// known, progress driven, no `aux_cap`) and the non-primary aux files (size
+/// unknown, `None` progress, byte-capped via `aux_cap`).
+///
+/// Resume protocol (#420): when `dest` already holds a non-empty byte prefix
+/// that is still under its bound (the pinned size for the primary, the byte
+/// cap for an aux file), the request carries `Range: bytes=<len>-`.
+/// A 206 appends to the prefix — the prefix is hashed from disk first, so
+/// the returned digest covers the whole file exactly as a fresh stream
+/// would. A 200 (or any other success status — the server ignored or never
+/// honoured the range) truncates and restarts. A 416 (the offset is past
+/// the server's actual resource end, i.e. the partial is oversized relative
+/// to reality) also truncates and re-requests once without a range. An
+/// oversized-on-disk partial never sends a range at all.
 ///
 /// `total_for_progress` is the byte count reported to `byte_progress` as the
 /// second argument; the network's `Content-Length` is intentionally NOT
 /// consulted (it can disagree with the registry pin for redirected URLs and
 /// the pin is authoritative). When `None`, `byte_progress` is not invoked.
+/// On a resume the callback starts at the prefix offset, so a byte bar picks
+/// up where the interrupted run left off.
 ///
 /// `aux_cap`, when `Some`, bounds the streamed body: once cumulative bytes
-/// written would exceed `aux_cap.max_bytes`, the stream aborts with
-/// [`TomeError::ModelCorrupt`] (the partially written file is left in the
-/// `.partial/` dir for `download_model`'s error-cleanup closure to remove).
+/// written (prefix included) would exceed `aux_cap.max_bytes`, the stream
+/// aborts with [`TomeError::ModelCorrupt`] (the partially written file is
+/// left in the `.partial/` dir for `download_model`'s error arm to remove —
+/// over-cap is a verification-class failure, never retained).
 /// The primary path passes `None` because its `size_bytes` pin + SHA-256
 /// verify already bound and authenticate the body; the `Content-Length`
 /// remains untrusted on both paths.
@@ -270,30 +390,75 @@ struct AuxCap<'a> {
 /// CREDENTIAL SCRUBBING: `reqwest::Error::Display` and the status-line message
 /// reproduce the failing URL verbatim, which can include presigned-URL query
 /// parameters carrying credentials. Both are run through the credential
-/// scrubber before reaching `TomeError` — this MUST hold for aux fetches too.
+/// scrubber before reaching `TomeError` — this MUST hold for aux fetches AND
+/// resumed (ranged) requests too; all of them route through the single
+/// [`send_request`] / status-error path below.
 fn stream_url_to_partial(
     url: &str,
     dest: &Path,
     total_for_progress: Option<u64>,
     byte_progress: Option<&dyn Fn(u64, u64)>,
     aux_cap: Option<AuxCap<'_>>,
-) -> Result<String, TomeError> {
-    let mut response = reqwest::blocking::get(url).map_err(|e| {
-        TomeError::Io(std::io::Error::other(scrub_for_diag(&format!(
-            "HTTP get failed: {e}"
-        ))))
-    })?;
-
-    if !response.status().is_success() {
-        return Err(TomeError::Io(std::io::Error::other(scrub_for_diag(
-            &format!("HTTP {} fetching {}", response.status(), url),
-        ))));
+) -> Result<(String, bool), TomeError> {
+    // Resume offset: the staged prefix length, unless the file is absent,
+    // empty, or already at/over its bound — an oversized partial cannot be
+    // completed by appending, so it restarts clean exactly like a corrupted
+    // one (the marker check in `prepare_partial_dir` already wiped
+    // cross-pin leftovers).
+    let mut resume_from = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    let bound = match (&aux_cap, total_for_progress) {
+        (Some(cap), _) => Some(cap.max_bytes),
+        (None, Some(total)) => Some(total),
+        (None, None) => None,
+    };
+    if let Some(bound) = bound
+        && resume_from >= bound
+    {
+        resume_from = 0;
     }
 
-    let mut file = File::create(dest).map_err(TomeError::Io)?;
-    let mut hasher = Sha256::new();
+    let mut response = send_request(url, resume_from)?;
+    if resume_from > 0 && response.status().as_u16() == 416 {
+        // Range-not-satisfiable: our offset is past the end of the actual
+        // resource (the pin and reality disagree — verification will decide
+        // later). Restart clean with one un-ranged request.
+        resume_from = 0;
+        response = send_request(url, 0)?;
+    }
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(TomeError::Io(std::io::Error::other(scrub_for_diag(
+            &format!("HTTP {} fetching {}", status, url),
+        ))));
+    }
+    // Only an explicit 206 means the server honoured the range and is
+    // sending the tail; any other success (a plain 200, a proxy that
+    // stripped the header) is the FULL body → truncate-and-restart.
+    let resumed = resume_from > 0 && status.as_u16() == 206;
+
+    let mut hasher: Sha256;
+    let mut file: File;
+    let mut written: u64;
+    if resumed {
+        // Fold the already-staged prefix into the streaming digest so the
+        // final SHA-256 covers prefix + appended tail — verification
+        // semantics stay byte-identical to a fresh download.
+        hasher = hash_file_prefix(dest)?;
+        file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dest)
+            .map_err(TomeError::Io)?;
+        written = resume_from;
+        if let (Some(cb), Some(total)) = (byte_progress, total_for_progress) {
+            cb(written, total);
+        }
+    } else {
+        hasher = Sha256::new();
+        file = File::create(dest).map_err(TomeError::Io)?;
+        written = 0;
+    }
     let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
-    let mut written: u64 = 0;
 
     loop {
         if git::was_cancelled() {
@@ -307,9 +472,10 @@ fn stream_url_to_partial(
         // Enforce the aux byte cap BEFORE writing this chunk, so an
         // unbounded sidecar from a compromised pinned host can never grow
         // the on-disk partial past the cap (memory stays bounded by the
-        // fixed-size `buf` regardless). The over-cap error names the model
-        // + file and reuses the existing `ModelCorrupt` variant (exit 31) —
-        // no new error variant / exit code.
+        // fixed-size `buf` regardless). `written` includes any resumed
+        // prefix, so the cap bounds the TOTAL file, not just this stream.
+        // The over-cap error names the model + file and reuses the existing
+        // `ModelCorrupt` variant (exit 31) — no new error variant / exit code.
         if let Some(cap) = &aux_cap
             && written > cap.max_bytes
         {
@@ -327,7 +493,48 @@ fn stream_url_to_partial(
     }
 
     file.sync_all().map_err(TomeError::Io)?;
-    Ok(hex::encode(hasher.finalize()))
+    Ok((hex::encode(hasher.finalize()), resumed))
+}
+
+/// Issue one GET for `url`, carrying `Range: bytes=<offset>-` when `offset`
+/// is non-zero. The single request chokepoint for fresh, resumed, primary
+/// and aux fetches alike — so the credential-scrubbed error mapping cannot
+/// diverge between them.
+fn send_request(url: &str, offset: u64) -> Result<reqwest::blocking::Response, TomeError> {
+    let client = reqwest::blocking::Client::builder().build().map_err(|e| {
+        TomeError::Io(std::io::Error::other(scrub_for_diag(&format!(
+            "HTTP client init failed: {e}"
+        ))))
+    })?;
+    let mut request = client.get(url);
+    if offset > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+    }
+    request.send().map_err(|e| {
+        TomeError::Io(std::io::Error::other(scrub_for_diag(&format!(
+            "HTTP get failed: {e}"
+        ))))
+    })
+}
+
+/// Prime a `Sha256` with the existing on-disk bytes of `dest` (the staged
+/// prefix a 206 resume appends after). Chunked so a several-hundred-MB
+/// partial stays bounded in memory; observes SIGINT like the stream loop.
+fn hash_file_prefix(path: &Path) -> Result<Sha256, TomeError> {
+    let mut file = File::open(path).map_err(TomeError::Io)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+    loop {
+        if git::was_cancelled() {
+            return Err(TomeError::Interrupted);
+        }
+        let n = file.read(&mut buf).map_err(TomeError::Io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher)
 }
 
 fn verify_checksum(entry: &ModelEntry, observed_hex: &str) -> Result<(), TomeError> {
@@ -409,19 +616,28 @@ mod tests {
 
     /// Sequential one-shot HTTP server: serves `responses` in order, one per
     /// accepted connection (the downloader opens a fresh connection per
-    /// `reqwest::blocking::get`). Returns the bound base URL; callers append
-    /// the per-file path. Mirrors the hand-rolled server in
+    /// request). Returns the bound base URL plus a recorder capturing each
+    /// raw request head, so tests can assert on the presence/absence of the
+    /// `Range` header. Mirrors the hand-rolled server in
     /// `tests/model_download.rs` but serves more than one request so we can
     /// satisfy the primary fetch + the aux fetch.
-    fn spawn_sequential_server(responses: Vec<Vec<u8>>) -> String {
+    fn spawn_sequential_server(
+        responses: Vec<Vec<u8>>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
         let addr = listener.local_addr().expect("local_addr");
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&requests);
         thread::spawn(move || {
             for response in responses {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let mut sink = [0u8; 4096];
-                        let _ = stream.read(&mut sink);
+                        let n = stream.read(&mut sink).unwrap_or(0);
+                        recorder
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(String::from_utf8_lossy(&sink[..n]).into_owned());
                         let _ = stream.write_all(&response);
                         let _ = stream.flush();
                     }
@@ -429,7 +645,7 @@ mod tests {
                 }
             }
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), requests)
     }
 
     fn http_200(body: &[u8]) -> Vec<u8> {
@@ -483,7 +699,8 @@ mod tests {
         let oversized_aux = vec![0xCDu8; 3 * 1024 * 1024];
         // The downloader fetches the primary first, then the aux: serve in
         // that order.
-        let base = spawn_sequential_server(vec![http_200(primary), http_200(&oversized_aux)]);
+        let (base, _requests) =
+            spawn_sequential_server(vec![http_200(primary), http_200(&oversized_aux)]);
         let entry = two_file_entry(&base, sha256_hex(primary), primary.len() as u64);
         let root = TempDir::new().expect("tempdir");
 
@@ -529,7 +746,8 @@ mod tests {
 
         let primary = b"PRIMARY-ONNX-BYTES";
         let small_aux = vec![0xEFu8; 4096];
-        let base = spawn_sequential_server(vec![http_200(primary), http_200(&small_aux)]);
+        let (base, _requests) =
+            spawn_sequential_server(vec![http_200(primary), http_200(&small_aux)]);
         let entry = two_file_entry(&base, sha256_hex(primary), primary.len() as u64);
         let root = TempDir::new().expect("tempdir");
 
@@ -543,6 +761,130 @@ mod tests {
             .join("tokenizer.json");
         let written = std::fs::read(&aux_path).expect("aux file present after success");
         assert_eq!(written, small_aux);
+        // The staging bookkeeping must not leak into the landed model dir.
+        assert!(
+            !root
+                .path()
+                .join("test-aux-cap-model")
+                .join(RESUME_MARKER)
+                .exists(),
+            "resume marker must be removed before the atomic rename",
+        );
+    }
+
+    /// Single-file entry helper for the resume unit tests below (aux-less so
+    /// one response per run suffices).
+    fn one_file_entry(base: &str, sha256: String, size: u64) -> &'static ModelEntry {
+        let url = format!("{base}/model.onnx");
+        Box::leak(Box::new(ModelEntry {
+            name: "test-resume-model",
+            version: "1",
+            kind: crate::embedding::registry::ModelKind::Embedder,
+            source_url: Box::leak(url.into_boxed_str()),
+            sha256: Box::leak(sha256.into_boxed_str()),
+            size_bytes: size,
+            licence: "MIT",
+            embedding_dim: Some(384),
+            files: &["model.onnx"],
+            aux_urls: &[],
+        }))
+    }
+
+    /// An oversized partial (at/over the pinned size) cannot be completed by
+    /// appending: the downloader must restart clean — sending NO `Range`
+    /// header — and land the verified fresh bytes.
+    #[test]
+    fn oversized_partial_restarts_clean_without_range() {
+        let payload = b"FRESH-CORRECT-PAYLOAD";
+        let (base, requests) = spawn_sequential_server(vec![http_200(payload)]);
+        let entry = one_file_entry(&base, sha256_hex(payload), payload.len() as u64);
+        let root = TempDir::new().expect("tempdir");
+
+        // Craft a valid-marker partial whose primary is OVERSIZED (>= the
+        // pinned size). Only reachable through crafted state, hence a unit
+        // test with private access to the marker format.
+        let partial_dir = root.path().join("test-resume-model.partial");
+        std::fs::create_dir_all(&partial_dir).unwrap();
+        std::fs::write(
+            partial_dir.join(RESUME_MARKER),
+            resume_marker_contents(entry),
+        )
+        .unwrap();
+        std::fs::write(
+            partial_dir.join("model.onnx"),
+            vec![0xAA; payload.len() + 100],
+        )
+        .unwrap();
+
+        download_model(entry, root.path(), None).expect("oversized partial must restart clean");
+        let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            !reqs[0].contains("range:") && !reqs[0].contains("Range:"),
+            "oversized partial must not attempt a ranged resume; request was:\n{}",
+            reqs[0],
+        );
+        let landed = std::fs::read(root.path().join("test-resume-model/model.onnx")).unwrap();
+        assert_eq!(landed, payload);
+    }
+
+    /// A leftover partial with NO resume marker (or a marker from a different
+    /// registry pin) is untrusted state: the whole staging tree is wiped and
+    /// the download restarts from byte 0.
+    #[test]
+    fn markerless_partial_is_wiped_and_restarted() {
+        let payload = b"FRESH-CORRECT-PAYLOAD";
+        let (base, requests) = spawn_sequential_server(vec![http_200(payload)]);
+        let entry = one_file_entry(&base, sha256_hex(payload), payload.len() as u64);
+        let root = TempDir::new().expect("tempdir");
+
+        // A plausible-length prefix, but no marker recording which pin it
+        // was staged under — must NOT be resumed (an aux append under a
+        // different pin would splice two artefact versions).
+        let partial_dir = root.path().join("test-resume-model.partial");
+        std::fs::create_dir_all(&partial_dir).unwrap();
+        std::fs::write(partial_dir.join("model.onnx"), &payload[..4]).unwrap();
+
+        download_model(entry, root.path(), None).expect("markerless partial must restart clean");
+        let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            !reqs[0].contains("range:") && !reqs[0].contains("Range:"),
+            "markerless partial must not attempt a ranged resume; request was:\n{}",
+            reqs[0],
+        );
+        let landed = std::fs::read(root.path().join("test-resume-model/model.onnx")).unwrap();
+        assert_eq!(landed, payload);
+    }
+
+    /// A marker pinned to a DIFFERENT registry identity (version/sha changed
+    /// between runs, e.g. a Tome upgrade re-pinned the model) also wipes the
+    /// staging tree rather than resuming.
+    #[test]
+    fn cross_pin_partial_is_wiped_and_restarted() {
+        let payload = b"FRESH-CORRECT-PAYLOAD";
+        let (base, requests) = spawn_sequential_server(vec![http_200(payload)]);
+        let entry = one_file_entry(&base, sha256_hex(payload), payload.len() as u64);
+        let root = TempDir::new().expect("tempdir");
+
+        let partial_dir = root.path().join("test-resume-model.partial");
+        std::fs::create_dir_all(&partial_dir).unwrap();
+        std::fs::write(
+            partial_dir.join(RESUME_MARKER),
+            "0 someotherpinnedsha256value\n",
+        )
+        .unwrap();
+        std::fs::write(partial_dir.join("model.onnx"), &payload[..4]).unwrap();
+
+        download_model(entry, root.path(), None).expect("cross-pin partial must restart clean");
+        let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !reqs[0].contains("range:") && !reqs[0].contains("Range:"),
+            "cross-pin partial must not attempt a ranged resume; request was:\n{}",
+            reqs[0],
+        );
+        let landed = std::fs::read(root.path().join("test-resume-model/model.onnx")).unwrap();
+        assert_eq!(landed, payload);
     }
 
     /// The production cap is the documented, generous-but-bounded 64 MiB —

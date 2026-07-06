@@ -202,18 +202,18 @@ fn spawn_trickle_then_drop_server(prefix: Vec<u8>, claimed_total: usize) -> Stri
 }
 
 #[test]
-fn mid_stream_connection_drop_aborts_and_cleans_partial_dir() {
-    // Phase 10 / T196 — covers FR-020a / FR-053 partial-dir cleanup on a
-    // mid-stream failure. SIGINT cancellation runs through the same
-    // pipeline-error path (the `was_cancelled()` check at the top of
-    // each read loop returns `TomeError::Interrupted`, which propagates
-    // out of `stream_to_partial` and triggers the cleanup closure
-    // exactly as a `reqwest` connection-drop error does). The two
-    // cleanup paths are unified at `download_model`'s `pipeline`
-    // closure, so a mid-stream connection drop is a faithful proxy for
-    // the SIGINT case — and it doesn't need to flip the global
-    // `CANCELLED` static (which the test discipline keeps unmanipulated;
-    // see P3 retro).
+fn mid_stream_connection_drop_retains_partial_for_resume() {
+    // Phase 10 / T196 covered FR-020a / FR-053 partial-dir CLEANUP on a
+    // mid-stream failure; #420 (resumable downloads) deliberately inverts
+    // that for transport-class interruptions: the staged prefix is now
+    // RETAINED so the next run can resume with `Range: bytes=<len>-`
+    // instead of paying the full download again. SIGINT cancellation runs
+    // through the same pipeline-error path (`was_cancelled()` →
+    // `TomeError::Interrupted`), so a mid-stream connection drop remains a
+    // faithful proxy for the SIGINT case without flipping the global
+    // `CANCELLED` static (test discipline, P3 retro). Verification-class
+    // failures (checksum mismatch, over-cap aux) still clean up — see
+    // `checksum_mismatch_aborts_and_cleans_partial_dir`.
     let prefix = vec![0xAB; 1024]; // 1 KB of bytes sent…
     let url = spawn_trickle_then_drop_server(prefix, 8 * 1024); // …of 8 KB advertised.
     let entry = entry_for(
@@ -226,8 +226,9 @@ fn mid_stream_connection_drop_aborts_and_cleans_partial_dir() {
     let err = download_model(entry, root.path(), None).expect_err("mid-stream drop must abort");
     // The most likely error is `Io` (reqwest's connection-reset translation)
     // but a `ModelChecksumMismatch` is also acceptable IF the server's
-    // short body happens to pass the read loop before EOF: in either case
-    // the cleanup invariant is the only load-bearing assertion.
+    // short body happens to pass the read loop before EOF (a mismatch
+    // wipes the staging tree; an Io retains it — both are valid ends here,
+    // the load-bearing assertion is that the final dir never appears).
     assert!(
         matches!(
             err,
@@ -236,17 +237,295 @@ fn mid_stream_connection_drop_aborts_and_cleans_partial_dir() {
         "expected Io or ModelChecksumMismatch on mid-stream abort, got {err:?}",
     );
 
-    let partial = root.path().join("test-model.partial");
-    assert!(
-        !partial.exists(),
-        "partial dir leaked after mid-stream connection drop: {}",
-        partial.display(),
-    );
+    if matches!(err, TomeError::Io(_)) {
+        let partial_file = root.path().join("test-model.partial").join("model.onnx");
+        assert!(
+            partial_file.is_file()
+                && std::fs::metadata(&partial_file)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    > 0,
+            "transport-class abort must retain a non-empty partial for resume: {}",
+            partial_file.display(),
+        );
+    }
     let final_dir = root.path().join("test-model");
     assert!(
         !final_dir.exists(),
         "final dir created despite mid-stream abort: {}",
         final_dir.display(),
+    );
+}
+
+// ---- Resumable downloads (#420) --------------------------------------------
+//
+// Each scenario drives the REAL two-run flow: run 1 is interrupted
+// mid-stream by a trickle-then-drop response (leaving a retained partial),
+// run 2 hits the SAME URL again and the scripted server decides whether to
+// honour the `Range` header. The recorder captures every raw request head so
+// the tests can assert exactly what the client sent.
+
+/// One scripted response per accepted connection.
+enum Script {
+    /// Send a 200 header claiming `claimed_total` bytes, deliver only
+    /// `prefix`, then drop the connection (the run-1 interruption).
+    DropAfter {
+        prefix: Vec<u8>,
+        claimed_total: usize,
+    },
+    /// Honour `Range: bytes=N-` with a 206 slice of `full` (+
+    /// `Content-Range`); reply 200 with the whole body when no range came.
+    HonourRange { full: Vec<u8> },
+    /// Ignore any `Range` header and reply 200 with the whole body.
+    IgnoreRange { full: Vec<u8> },
+}
+
+/// Scripted sequential server: one `Script` per accepted connection, in
+/// order. Returns the URL plus a recorder of raw request heads.
+fn spawn_scripted_server(
+    scripts: Vec<Script>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let addr = listener.local_addr().expect("local_addr");
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorder = std::sync::Arc::clone(&requests);
+    thread::spawn(move || {
+        for script in scripts {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut sink = [0u8; 4096];
+            let n = stream.read(&mut sink).unwrap_or(0);
+            let head = String::from_utf8_lossy(&sink[..n]).into_owned();
+            let range_offset = parse_range_offset(&head);
+            recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(head);
+            match script {
+                Script::DropAfter {
+                    prefix,
+                    claimed_total,
+                } => {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {claimed_total}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(&prefix);
+                    let _ = stream.flush();
+                    // Drop WITHOUT the rest → the client errors mid-stream.
+                }
+                Script::HonourRange { full } => {
+                    let response = match range_offset {
+                        Some(offset) if (offset as usize) < full.len() => {
+                            let tail = &full[offset as usize..];
+                            let mut out = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                                tail.len(),
+                                offset,
+                                full.len() - 1,
+                                full.len(),
+                            )
+                            .into_bytes();
+                            out.extend_from_slice(tail);
+                            out
+                        }
+                        Some(_) => {
+                            b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                .to_vec()
+                        }
+                        None => http_200(&full),
+                    };
+                    let _ = stream.write_all(&response);
+                    let _ = stream.flush();
+                }
+                Script::IgnoreRange { full } => {
+                    let _ = stream.write_all(&http_200(&full));
+                    let _ = stream.flush();
+                }
+            }
+        }
+    });
+    (format!("http://{addr}/model.onnx"), requests)
+}
+
+/// Extract the offset of a `Range: bytes=N-` request header, if present.
+fn parse_range_offset(request_head: &str) -> Option<u64> {
+    request_head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("range") {
+            return None;
+        }
+        value
+            .trim()
+            .strip_prefix("bytes=")?
+            .strip_suffix('-')?
+            .parse()
+            .ok()
+    })
+}
+
+/// The deterministic full payload the resume scenarios reassemble.
+fn resume_payload() -> Vec<u8> {
+    (0u32..2048).flat_map(|i| i.to_le_bytes()).collect()
+}
+
+/// Killing a download mid-flight and re-running resumes from the partial
+/// offset: run 2 sends `Range: bytes=<len>-`, the server's 206 tail is
+/// appended, and the reassembled file passes the pinned SHA-256.
+#[test]
+fn interrupted_download_resumes_from_partial_offset_via_206() {
+    let full = resume_payload();
+    let (url, requests) = spawn_scripted_server(vec![
+        Script::DropAfter {
+            prefix: full[..1024].to_vec(),
+            claimed_total: full.len(),
+        },
+        Script::HonourRange { full: full.clone() },
+    ]);
+    let entry = entry_for(url, sha256_hex(&full), full.len() as u64);
+    let root = TempDir::new().expect("tempdir");
+
+    // Run 1: interrupted mid-stream; the partial is retained.
+    download_model(entry, root.path(), None).expect_err("run 1 must abort mid-stream");
+    let partial_file = root.path().join("test-model.partial").join("model.onnx");
+    let staged = std::fs::metadata(&partial_file)
+        .map(|m| m.len())
+        .expect("run 1 must retain a partial");
+    assert!(staged > 0, "retained partial must be non-empty");
+
+    // Run 2: resumes and completes.
+    let manifest = download_model(entry, root.path(), None).expect("run 2 must resume + succeed");
+    assert_eq!(manifest.name, "test-model");
+
+    let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(reqs.len(), 2, "exactly two requests expected");
+    assert_eq!(
+        parse_range_offset(&reqs[1]),
+        Some(staged),
+        "run 2 must request `Range: bytes=<staged len>-`; request was:\n{}",
+        reqs[1],
+    );
+
+    let landed = std::fs::read(root.path().join("test-model/model.onnx")).unwrap();
+    assert_eq!(
+        landed, full,
+        "reassembled bytes must equal the full payload"
+    );
+    assert!(
+        !root.path().join("test-model.partial").exists(),
+        "partial dir must be gone after a successful resume",
+    );
+}
+
+/// A server that ignores the range (plain 200 full body) makes run 2
+/// truncate-and-restart — and still land a correct, verified file.
+#[test]
+fn server_ignoring_range_falls_back_to_clean_restart() {
+    let full = resume_payload();
+    let (url, requests) = spawn_scripted_server(vec![
+        Script::DropAfter {
+            prefix: full[..1024].to_vec(),
+            claimed_total: full.len(),
+        },
+        Script::IgnoreRange { full: full.clone() },
+    ]);
+    let entry = entry_for(url, sha256_hex(&full), full.len() as u64);
+    let root = TempDir::new().expect("tempdir");
+
+    download_model(entry, root.path(), None).expect_err("run 1 must abort mid-stream");
+    download_model(entry, root.path(), None).expect("run 2 must succeed via truncate-and-restart");
+
+    let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        parse_range_offset(&reqs[1]).is_some(),
+        "run 2 should have ATTEMPTED a ranged resume; request was:\n{}",
+        reqs[1],
+    );
+    let landed = std::fs::read(root.path().join("test-model/model.onnx")).unwrap();
+    assert_eq!(
+        landed, full,
+        "a 200 response must overwrite the partial, not append to it",
+    );
+}
+
+/// A resumed file that fails its pinned SHA-256 (the staged prefix was bad)
+/// falls back to exactly ONE clean full restart — request 3 carries no
+/// `Range` — and succeeds when the fresh bytes verify.
+#[test]
+fn resumed_checksum_failure_falls_back_to_one_clean_restart() {
+    let full = resume_payload();
+    // Same length, different bytes: the 206 tail spliced onto the good
+    // prefix will NOT hash to the pin.
+    let corrupt: Vec<u8> = full.iter().map(|b| b ^ 0x5A).collect();
+    let (url, requests) = spawn_scripted_server(vec![
+        Script::DropAfter {
+            prefix: full[..1024].to_vec(),
+            claimed_total: full.len(),
+        },
+        Script::HonourRange { full: corrupt },
+        Script::HonourRange { full: full.clone() },
+    ]);
+    let entry = entry_for(url, sha256_hex(&full), full.len() as u64);
+    let root = TempDir::new().expect("tempdir");
+
+    download_model(entry, root.path(), None).expect_err("run 1 must abort mid-stream");
+    download_model(entry, root.path(), None).expect("run 2 must recover via the one clean restart");
+
+    let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(reqs.len(), 3, "resume + failed verify + clean restart");
+    assert!(
+        parse_range_offset(&reqs[1]).is_some(),
+        "request 2 must be the ranged resume",
+    );
+    assert_eq!(
+        parse_range_offset(&reqs[2]),
+        None,
+        "the post-mismatch restart must be a FRESH request (no Range); got:\n{}",
+        reqs[2],
+    );
+    let landed = std::fs::read(root.path().join("test-model/model.onnx")).unwrap();
+    assert_eq!(landed, full);
+}
+
+/// When the clean restart ALSO fails verification, the error surfaces as
+/// today's `ModelChecksumMismatch` and the staging tree is removed — the
+/// retry is one-shot, never a loop.
+#[test]
+fn resumed_checksum_failure_then_fresh_failure_errors_and_cleans() {
+    let full = resume_payload();
+    let corrupt: Vec<u8> = full.iter().map(|b| b ^ 0x5A).collect();
+    let (url, requests) = spawn_scripted_server(vec![
+        Script::DropAfter {
+            prefix: full[..1024].to_vec(),
+            claimed_total: full.len(),
+        },
+        Script::HonourRange {
+            full: corrupt.clone(),
+        },
+        // The clean restart is served corrupt bytes too.
+        Script::IgnoreRange { full: corrupt },
+    ]);
+    let entry = entry_for(url, sha256_hex(&full), full.len() as u64);
+    let root = TempDir::new().expect("tempdir");
+
+    download_model(entry, root.path(), None).expect_err("run 1 must abort mid-stream");
+    let err = download_model(entry, root.path(), None)
+        .expect_err("run 2 must fail after the one-shot retry");
+    assert!(
+        matches!(err, TomeError::ModelChecksumMismatch { .. }),
+        "expected ModelChecksumMismatch after the failed retry, got {err:?}",
+    );
+
+    let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(reqs.len(), 3, "resume + failed verify + ONE retry, no loop");
+    assert!(
+        !root.path().join("test-model.partial").exists(),
+        "a verification-class failure must remove the staging tree",
+    );
+    assert!(
+        !root.path().join("test-model").exists(),
+        "no model dir may land on double checksum failure",
     );
 }
 
