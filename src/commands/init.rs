@@ -37,7 +37,9 @@
 //!   an error. Declining the model download inside `plugin enable` (also
 //!   `Interrupted`) skips that step the same way.
 //! - **Ctrl-C outside a prompt** hits the global SIGINT handler (exit 8),
-//!   like every other command.
+//!   like every other command. *Inside* a prompt, inquire cannot
+//!   distinguish Ctrl-C from Esc — both surface as `Interrupted` — so an
+//!   in-prompt Ctrl-C deliberately skips the step rather than exiting.
 //! - **Step failures** follow the established forward-progress
 //!   `first_error` pattern (`harness use`, the reconcilers): warn, keep
 //!   going so later steps still land, surface the first failure's exit
@@ -153,7 +155,16 @@ fn snapshot(scope: &ResolvedScope, paths: &Paths) -> Result<InitState, TomeError
 
     let catalogs_enrolled = if paths.index_db.is_file() {
         let conn = crate::index::open_read_only(&paths.index_db)?;
-        workspace_catalogs::list_for_workspace(&conn, scope.scope.name().as_str())?.len()
+        // Mirror `check_index`'s tolerance: a missing workspace row or a
+        // pre-junction schema degrades to "no catalogs" (the wizard then
+        // offers the catalog step) instead of erroring where `status`
+        // would have stayed graceful.
+        match workspace_catalogs::list_for_workspace(&conn, scope.scope.name().as_str()) {
+            Ok(list) => list.len(),
+            Err(TomeError::WorkspaceNotFound { .. })
+            | Err(TomeError::IndexIntegrityCheckFailure(_)) => 0,
+            Err(e) => return Err(e),
+        }
     } else {
         0
     };
@@ -522,12 +533,20 @@ fn step_enable_plugins(scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Resu
         }
     }
 
+    const NO_CATALOGS_SKIP: &str = "No catalogs enrolled — skipping plugin enable. \
+         Add one with `tome catalog add <source>`, then `tome plugin enable`.";
+
     let workspace_name = scope.scope.name().as_str();
     let candidates: Vec<Pick> = {
+        // A missing DB is the no-catalogs case; skip before
+        // `open_index_for_read` can bootstrap `~/.tome` state from a read
+        // path (`snapshot` promises the wizard never does that).
+        if !paths.index_db.is_file() {
+            return say(NO_CATALOGS_SKIP);
+        }
         let conn = super::plugin::open_index_for_read(paths, &scope.scope)?;
         if workspace_catalogs::list_for_workspace(&conn, workspace_name)?.is_empty() {
-            return say("No catalogs enrolled — skipping plugin enable. \
-                 Add one with `tome catalog add <source>`, then `tome plugin enable`.");
+            return say(NO_CATALOGS_SKIP);
         }
         let mut out = Vec::new();
         for id in super::plugin::discoverable_plugin_ids(&conn, paths, workspace_name)? {
