@@ -476,10 +476,16 @@ pub enum HarnessCommand {
     /// Reconcile the project, then print the workspace's skill-routing directive
     /// to stdout, generated fresh from live state. Intended as a SessionStart
     /// hook target; not usually run by hand.
+    // #437: hidden from `tome harness --help` — this is an internal dispatch
+    // target the sync writes into harness hook files, not a user-facing verb.
+    // `hide` only removes it from the listing; it stays invocable by name.
+    #[command(hide = true)]
     SessionStart(HarnessSessionStartArgs),
     /// Translate a plugin hook event from the target harness's native format,
     /// run the enabled plugins' matching hooks, and emit the harness's wire
     /// decision. A hook-dispatch target; not run by hand. Fails open.
+    // #437: hidden for the same reason as `SessionStart` above.
+    #[command(hide = true)]
     RunHook(HarnessRunHookArgs),
 }
 
@@ -1563,6 +1569,65 @@ mod tests {
             panic!("expected Status");
         };
         assert_eq!(args.name.as_deref(), Some("pos"));
+    }
+
+    // ---- issue #437: hide internal harness dispatch targets ---------------
+
+    /// `session-start` and `run-hook` are internal dispatch targets (hook files
+    /// invoke them), so they must NOT appear in the `tome harness --help`
+    /// listing — but hiding must not break invocation by name.
+    #[test]
+    fn harness_plumbing_is_hidden_from_help_but_still_invocable() {
+        use clap::CommandFactory;
+
+        let mut cmd = Cli::command();
+        let harness = cmd
+            .find_subcommand_mut("harness")
+            .expect("harness subcommand");
+        let help = harness.render_long_help().to_string();
+        for hidden in ["session-start", "run-hook"] {
+            assert!(
+                !help.contains(hidden),
+                "`tome harness --help` must not list the `{hidden}` plumbing:\n{help}",
+            );
+        }
+
+        // Still invocable by name: `--help` on the hidden subcommand resolves
+        // to clap's DisplayHelp (what a real invocation prints), not an
+        // unknown-subcommand usage error.
+        for hidden in ["session-start", "run-hook"] {
+            let err = Cli::try_parse_from(["tome", "harness", hidden, "--help"])
+                .expect_err("--help short-circuits parsing");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp,
+                "`tome harness {hidden} --help` must resolve, not error",
+            );
+        }
+
+        // And a normal parse still lands on the right variant.
+        let cli = parse(&["tome", "harness", "session-start"]);
+        let Command::Harness(HarnessArgs {
+            command: Some(HarnessCommand::SessionStart(_)),
+        }) = cli.command
+        else {
+            panic!("expected `harness session-start` to parse");
+        };
+        let cli = parse(&[
+            "tome",
+            "harness",
+            "run-hook",
+            "--event",
+            "PreToolUse",
+            "--harness",
+            "codex",
+        ]);
+        let Command::Harness(HarnessArgs {
+            command: Some(HarnessCommand::RunHook(_)),
+        }) = cli.command
+        else {
+            panic!("expected `harness run-hook` to parse");
+        };
     }
 
     // ---- issue #324: authoring flag consistency --------------------------
