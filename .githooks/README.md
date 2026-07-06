@@ -15,11 +15,13 @@ After that the three hooks run automatically on every commit and push.
 |---|---|
 | `pre-commit` | `cargo fmt --check`, `typos`, `cargo clippy --all-targets --all-features -- -D warnings` |
 | `commit-msg` | `cog verify --file <commit-msg-file>` (Conventional Commits) |
-| `pre-push` | `cargo test --workspace` |
+| `pre-push` | Mirrors `pre-commit`: `cargo fmt --all -- --check`, `typos`, `cargo clippy --all-targets --all-features -- -D warnings` |
 
-These mirror the gates the constitution requires (§Lints, §IX, §X), and they
-mirror what CI runs on every PR. Locally they're a fast feedback loop;
-upstream CI remains the source of truth.
+These mirror the gates the constitution requires (§Lints, §IX, §X). No hook
+runs the test suite — duplicating it locally costs 30+ minutes for no signal
+CI doesn't already produce (see the `pre-push` header comment); the full
+suite + build matrix runs in CI on every PR. Locally the hooks are a fast
+feedback loop; upstream CI remains the source of truth.
 
 ## Why not lefthook?
 
