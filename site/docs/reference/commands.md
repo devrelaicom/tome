@@ -182,7 +182,7 @@ drift (run a bare `tome reindex` to switch embedders).
 Read-only pre-flight check across models, index, and drift. **Never takes the
 index lock.** Three distinct health verdicts drive the exit code: `0` when
 **healthy**, `10` when **degraded** (a non-fatal issue such as a missing
-reranker — queries still serve), and `1` when **unhealthy** (a broken index,
+reranker or summariser — queries still serve), and `1` when **unhealthy** (a broken index,
 embedder drift, or a malformed config). Both non-zero codes fail a plain "fail
 on any non-zero" CI gate; the distinct `10` lets a "fail on unhealthy only" gate
 branch (or read `--json`'s `.overall` field — `"ok"` / `"degraded"` /

@@ -263,25 +263,74 @@ fn binding_rules_copy_missing_classifies_degraded() {
 
 // ---- Summariser subsystem -------------------------------------------------
 
+/// Fabricate ONLY the default profile's embedder + reranker, leaving the
+/// summariser missing — the seeded state for the #429 severity + parity
+/// tests (with no models at all, the embedder rule would mask the
+/// summariser rule entirely).
+fn fabricate_all_but_summariser(paths: &tome::paths::Paths) {
+    use tome::embedding::profile::{Profile, embedder_for, reranker_for};
+    crate::common::fabricate_installed_models(
+        paths,
+        &[
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        ],
+    );
+}
+
 #[test]
-fn summariser_missing_classifies_unhealthy() {
+fn summariser_missing_classifies_degraded() {
     let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    // Don't fabricate models — summariser will read as `missing`.
+    // Embedder + reranker installed; the summariser alone reads `missing`.
+    fabricate_all_but_summariser(&paths);
     let home = empty_home();
 
     let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
     assert_eq!(report.summariser.state, "missing");
-    assert_eq!(report.overall, DoctorClassification::Unhealthy);
+    // #429: a broken summariser degrades workspace summaries, not search —
+    // Degraded, no longer the pre-#429 Unhealthy.
+    assert_eq!(report.overall, DoctorClassification::Degraded);
     assert!(
         report
             .suggested_fixes
             .iter()
             .any(|f| f.subsystem == Subsystem::Summariser && f.auto_fixable),
         "summariser missing must surface an auto-fixable suggestion",
+    );
+}
+
+/// #429 parity pin: for the SAME seeded summariser-broken state (embedder +
+/// reranker installed, summariser missing), `tome status` and `tome doctor`
+/// must produce the SAME verdict — Degraded. This is the regression test for
+/// the contradiction the issue reported (status: healthy / doctor:
+/// unhealthy on one install).
+#[test]
+fn summariser_broken_health_parity_between_status_and_doctor() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fabricate_all_but_summariser(&paths);
+    let home = empty_home();
+
+    let doctor_report =
+        doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    let status_report =
+        tome::commands::status::assemble_report(&paths, &Scope(WorkspaceName::global()), false)
+            .unwrap();
+
+    assert_eq!(doctor_report.summariser.state, "missing");
+    assert_eq!(status_report.summariser.state, "missing");
+    assert_eq!(doctor_report.overall, DoctorClassification::Degraded);
+    assert_eq!(
+        status_report.overall,
+        tome::commands::status::OverallHealth::Degraded,
+        "status must classify the broken summariser exactly as doctor does",
     );
 }
 
