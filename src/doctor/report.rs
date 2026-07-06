@@ -216,6 +216,7 @@ pub enum RulesCopyState {
 /// - `Config` ↔ `"config"`
 /// - `Onboarding` ↔ `"onboarding"`
 /// - `Provider(name)` ↔ `"provider:<name>"`
+/// - `OrphanData` ↔ `"orphan-data"`
 ///
 /// The two Phase 3 drift "subsystems" `embedder_drift`, `reranker_drift`,
 /// and the Phase 4 fold-in `summariser_drift` are not part of this enum:
@@ -259,6 +260,13 @@ pub enum Subsystem {
     /// never sets a user's env var. The `String` is the provider registry name
     /// (`provider:<name>` on the wire, mirroring `catalog:<name>`).
     Provider(String),
+    /// Issue #433: an orphan persistent-data directory — plugin-data whose
+    /// plugin is no longer enabled anywhere, or per-workspace plugin-data
+    /// no longer enrolled. Detected by `checks::detect_orphan_data_dirs`;
+    /// the finding carries the per-directory cleanup command.
+    /// `auto_fixable: false` — deleting persistent user data is never
+    /// automatic.
+    OrphanData,
 }
 
 impl Subsystem {
@@ -282,6 +290,7 @@ impl Subsystem {
             Subsystem::Config => "config".to_owned(),
             Subsystem::Onboarding => "onboarding".to_owned(),
             Subsystem::Provider(n) => format!("provider:{n}"),
+            Subsystem::OrphanData => "orphan-data".to_owned(),
         }
     }
 
@@ -300,6 +309,7 @@ impl Subsystem {
             "model-registry" => Subsystem::ModelRegistry,
             "config" => Subsystem::Config,
             "onboarding" => Subsystem::Onboarding,
+            "orphan-data" => Subsystem::OrphanData,
             other => {
                 if let Some(name) = other.strip_prefix("catalog:") {
                     Subsystem::Catalog(name.to_owned())

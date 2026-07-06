@@ -98,6 +98,13 @@ fn mcp_preflight_index_missing_exits_51() {
         out.status.code(),
         String::from_utf8_lossy(&out.stderr),
     );
+    // Issue #433: the preflight refusal lands on stderr inside a harness's
+    // MCP panel — it must point at the command that diagnoses this state.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("tome doctor"),
+        "preflight index-missing message must carry the `tome doctor` pointer; got:\n{stderr}",
+    );
 }
 
 #[test]

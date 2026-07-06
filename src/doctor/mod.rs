@@ -329,6 +329,12 @@ pub fn assemble_report(
     // unchanged for a clean system).
     apply_provider_credential_findings(&mut suggested_fixes, &mut overall, &cfg);
 
+    // Issue #433: per-directory cleanup pointers for the orphan data dirs the
+    // Phase 5 surface detects. Never escalates `overall` (orphans stay
+    // informational per contract). Not part of the 9-arg fixes SSOT, so
+    // `--fix`'s `re_assemble` re-applies it (see `commands::doctor`).
+    apply_orphan_data_findings(&mut suggested_fixes, orphan_data_dirs.as_ref());
+
     // Phase 13 (native-agent model-registry): read-only model-registry
     // subsystem report. Always present (baked at minimum). Read-only.
     let model_registry = checks::check_model_registry(paths);
@@ -552,6 +558,61 @@ pub(crate) fn apply_provider_credential_findings(
             // so `auto_fixable: false` keeps `--fix` from "fixing" it (and makes
             // it a genuine remaining-manual fix → exit 75 under `--fix`).
             command: format!("export {}=<your-api-key>", finding.env_var),
+            auto_fixable: false,
+        });
+    }
+}
+
+/// Issue #433: one non-auto-fixable `Subsystem::OrphanData` SuggestedFix per
+/// orphan persistent-data directory, carrying the exact cleanup command —
+/// previously the report LISTED the orphans but offered no next step.
+///
+/// The command is `rm -rf <dir>` for BOTH orphan classes, deliberately NOT
+/// `tome workspace remove <name>`: the check detects PLUGIN-grained leftovers
+/// (`plugin-data/<catalog>/<plugin>` no longer enabled anywhere, or
+/// `workspaces/<ws>/plugin-data/<catalog>/<plugin>` no longer enrolled in
+/// `<ws>`), and `workspace remove` would destroy the whole still-registered
+/// workspace to clear one stale plugin dir — while for a HALF-REMOVED
+/// workspace (the `RemoveOutcome.orphaned_paths` recovery case this doctor
+/// surface exists for) the name is already gone from the registry, so
+/// `workspace remove` exits 13 instead of cleaning anything.
+///
+/// GATE DECISION (#433): these fixes are `auto_fixable: false` AND deliberately
+/// NOT excluded from `fixes::is_blocking_manual_fix` — unlike the
+/// never-clearable Manual/Unverified MCP pointers (#427), an orphan IS
+/// user-clearable (running the printed command removes the directory and the
+/// finding with it), so `doctor --fix` correctly exits 75 while genuine manual
+/// work remains.
+///
+/// Never escalates `overall`: orphans are informational for classification
+/// per `contracts/doctor-extensions-p5.md` (they don't trip Degraded).
+pub(crate) fn apply_orphan_data_findings(
+    out: &mut Vec<SuggestedFix>,
+    orphans: Option<&OrphanDataDirReport>,
+) {
+    let Some(orphans) = orphans else {
+        return;
+    };
+    for dir in &orphans.plugin_data {
+        out.push(SuggestedFix {
+            subsystem: Subsystem::OrphanData,
+            diagnosis: format!(
+                "orphan plugin data at {} — the plugin is no longer enabled in any workspace",
+                dir.display(),
+            ),
+            command: format!("rm -rf {}", dir.display()),
+            auto_fixable: false,
+        });
+    }
+    for dir in &orphans.workspace_data {
+        out.push(SuggestedFix {
+            subsystem: Subsystem::OrphanData,
+            diagnosis: format!(
+                "orphan workspace plugin data at {} — the plugin is no longer enrolled in that \
+                 workspace",
+                dir.display(),
+            ),
+            command: format!("rm -rf {}", dir.display()),
             auto_fixable: false,
         });
     }

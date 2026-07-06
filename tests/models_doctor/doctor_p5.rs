@@ -150,6 +150,26 @@ fn orphan_plugin_data_detected() {
         orphan_dir.display(),
         orphan_report.plugin_data,
     );
+
+    // Issue #433: the orphan is no longer a dead end — a non-auto-fixable
+    // `orphan-data` SuggestedFix names the exact cleanup command.
+    let fix = report
+        .suggested_fixes
+        .iter()
+        .find(|f| {
+            f.subsystem == tome::doctor::Subsystem::OrphanData
+                && f.command.contains(&orphan_dir.display().to_string())
+        })
+        .expect("orphan plugin-data dir must surface a SuggestedFix");
+    assert!(
+        !fix.auto_fixable,
+        "deleting persistent data must never be automatic",
+    );
+    assert!(
+        fix.command.starts_with("rm -rf "),
+        "cleanup command must be runnable as printed; got: {}",
+        fix.command,
+    );
 }
 
 #[test]
@@ -213,6 +233,24 @@ fn orphan_workspace_data_detected() {
         "expected {} in workspace_data orphans; got {:?}",
         orphan_dir.display(),
         orphan_report.workspace_data,
+    );
+
+    // Issue #433: the workspace-data orphan class carries its own cleanup
+    // pointer too, targeting the plugin-grained leftover dir (deliberately
+    // NOT `tome workspace remove` — see `apply_orphan_data_findings`).
+    let fix = report
+        .suggested_fixes
+        .iter()
+        .find(|f| {
+            f.subsystem == tome::doctor::Subsystem::OrphanData
+                && f.command.contains(&orphan_dir.display().to_string())
+        })
+        .expect("orphan workspace-data dir must surface a SuggestedFix");
+    assert!(!fix.auto_fixable);
+    assert!(
+        fix.command.starts_with("rm -rf "),
+        "cleanup command must be runnable as printed; got: {}",
+        fix.command,
     );
 }
 

@@ -187,6 +187,12 @@ fn info_human_stdout_contains_paste_heading_and_snippet() {
         s.contains("\"env\": {}"),
         "snippet carries env:{{}}; got:\n{s}"
     );
+    // Issue #433: the MCP-related output names the server's log file so an
+    // MCP problem in this harness has an in-product first stop.
+    assert!(
+        s.contains("MCP log:") && s.contains("mcp.log"),
+        "info must name the MCP server log; got:\n{s}",
+    );
 }
 
 // --- #327: no-name `tome harness info` — one section/entry per effective harness

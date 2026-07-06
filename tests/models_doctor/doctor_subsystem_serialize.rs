@@ -37,6 +37,8 @@ fn every_variant_round_trips_via_documented_wire_string() {
         (Subsystem::ModelRegistry, "\"model-registry\""),
         // Issue #287 (malformed `~/.tome/config.toml`):
         (Subsystem::Config, "\"config\""),
+        // Issue #433 (orphan persistent-data cleanup pointer):
+        (Subsystem::OrphanData, "\"orphan-data\""),
     ];
     for (variant, wire) in cases {
         let serialised = serde_json::to_string(&variant).unwrap();

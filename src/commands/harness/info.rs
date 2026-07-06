@@ -158,7 +158,7 @@ pub fn run(
         Some(name) => {
             let outcome = build_info(name, scope, paths)?;
             match mode {
-                Mode::Human => emit_human(&outcome),
+                Mode::Human => emit_human(&outcome, paths),
                 Mode::Json => write_json(&outcome),
             }
         }
@@ -178,7 +178,7 @@ pub fn run(
 fn run_effective(scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
     let outcomes = build_effective_outcomes(scope, paths)?;
     match mode {
-        Mode::Human => emit_human_sections(&outcomes),
+        Mode::Human => emit_human_sections(&outcomes, paths),
         Mode::Json => write_json(&outcomes),
     }
 }
@@ -545,7 +545,7 @@ fn collect_references(
     }
 }
 
-fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
+fn emit_human(outcome: &HarnessInfoOutcome, paths: &Paths) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
     writeln!(out, "Harness: {}", outcome.name)?;
     writeln!(out, "  Description:     {}", outcome.description)?;
@@ -574,6 +574,20 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
         (Some(false), _) => writeln!(out, "  MCP entry:       absent")?,
         _ => {}
     }
+    // Issue #433: when the Tome MCP server misbehaves inside this harness,
+    // its diagnostics land in this file — name it next to the MCP surface it
+    // explains. Resolved through the same `TOME_MCP_LOG` policy the server
+    // applies. Human-only: the `--json` outcome is a byte-stable pin.
+    let mcp_log = match crate::mcp::log::resolve_sink(
+        &paths.mcp_log,
+        std::env::var(crate::mcp::log::LOG_ENV).ok().as_deref(),
+    ) {
+        crate::mcp::log::LogSink::Off => {
+            format!("disabled ({}=off)", crate::mcp::log::LOG_ENV)
+        }
+        crate::mcp::log::LogSink::File(path) => path.display().to_string(),
+    };
+    writeln!(out, "  MCP log:         {mcp_log}")?;
     if outcome.references.is_empty() {
         writeln!(out, "  References:      (none)")?;
     } else {
@@ -641,7 +655,7 @@ fn hook_debug_hint(notice: &str, harness: &str) -> Option<String> {
 /// `tome harness info` form, separated by a blank line. An empty set prints a
 /// helpful one-liner (never an error) — the effective list is empty when no
 /// harness is configured for this scope.
-fn emit_human_sections(outcomes: &[HarnessInfoOutcome]) -> Result<(), TomeError> {
+fn emit_human_sections(outcomes: &[HarnessInfoOutcome], paths: &Paths) -> Result<(), TomeError> {
     if outcomes.is_empty() {
         let mut out = std::io::stdout().lock();
         writeln!(
@@ -661,7 +675,7 @@ fn emit_human_sections(outcomes: &[HarnessInfoOutcome]) -> Result<(), TomeError>
         if i > 0 {
             writeln!(std::io::stdout().lock())?;
         }
-        emit_human(outcome)?;
+        emit_human(outcome, paths)?;
     }
     Ok(())
 }

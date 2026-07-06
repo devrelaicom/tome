@@ -576,6 +576,18 @@ fn cli_doctor_with_healthy_state_exits_0() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("healthy"), "{stdout}");
+    // Issue #433: doctor names the MCP server's log file — the first stop
+    // for "MCP tools aren't appearing". Human output only; the isolated
+    // env's home root anchors the expected default path.
+    assert!(
+        stdout.contains("MCP server log:"),
+        "doctor human output must name the MCP log; got:\n{stdout}",
+    );
+    assert!(
+        stdout.contains(&paths.mcp_log.display().to_string()),
+        "doctor must print the resolved mcp.log path ({}); got:\n{stdout}",
+        paths.mcp_log.display(),
+    );
 }
 
 #[test]
