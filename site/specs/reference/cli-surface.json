@@ -235,6 +235,7 @@
     "doctor": {
       "subcommands": {},
       "flags": [
+        "--dry-run",
         "--fix",
         "--force",
         "--verbose",

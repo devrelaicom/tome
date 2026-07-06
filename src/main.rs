@@ -211,7 +211,7 @@ fn main() {
         Command::Workspace(args) => {
             commands::workspace::run(args.command, cli.scope.workspace.as_deref(), &scope, mode)
         }
-        Command::Doctor(args) => commands::doctor::run(args, &scope, mode),
+        Command::Doctor(args) => commands::doctor::run(args, &scope, mode, cli.verbose > 0),
         Command::Harness(args) => commands::harness::run(args, &scope, mode),
         Command::Skill(cmd) => commands::skill::run(cmd, &scope, mode),
         Command::Meta(cmd) => commands::meta::run(cmd, &scope, mode),

@@ -733,6 +733,11 @@ pub struct DoctorArgs {
     /// corruption.
     #[arg(long)]
     pub verify: bool,
+    /// With --fix: list the automatic repairs `--fix` would apply and exit
+    /// without applying anything (the run behaves like the read-only report
+    /// on disk). An error without --fix.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, clap::Args)]

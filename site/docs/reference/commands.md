@@ -204,6 +204,11 @@ inactive, exactly as with `--workspace <name>`. See
 Comprehensive diagnostic across every subsystem (workspace, models, index,
 drift, catalog caches, harnesses, meta skills). **Read-only by default.**
 
+Human output leads with a one-line verdict (`unhealthy — 1 failing, 2 warnings,
+22 ok`), renders failing sections first, then warnings, and collapses the
+all-ok subsystems into a single line; the global `--verbose` flag restores the
+full section listing. `--json` output is unaffected by this structure.
+
 Exit codes match `tome status`: `0` healthy, `10` degraded, `1` unhealthy — read
 `--json`'s `.overall` field to gate in scripts. When `--fix` runs but un-fixable
 issues remain, `doctor` exits `75` (`doctor_fix_unsafe`) instead of the health
@@ -214,6 +219,7 @@ code, signalling "the repair did something, but manual work remains".
 | `--fix` | Apply the safe automatic repairs: re-download missing/corrupt models, re-clone broken catalog caches, forward-migrate the index schema, re-copy project rules, re-run the sync for drifted harnesses. Destructive repairs are never automatic. |
 | `--force` | Override the safe-by-default repair gates (currently: rewrite developer-authored harness MCP `tome` entries on `--fix`). |
 | `--verify` | Rehash installed models against their pinned SHA-256. |
+| `--dry-run` | With `--fix`: list the automatic repairs `--fix` would apply, apply nothing, and exit with the read-only health code. An error (exit `2`) without `--fix`. |
 
 ## `tome workspace`
 
