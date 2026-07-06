@@ -4,6 +4,7 @@ pub mod config;
 pub mod convert;
 pub mod create;
 pub mod doctor;
+pub mod exit_codes;
 pub mod harness;
 pub mod init;
 pub mod lint;

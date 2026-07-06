@@ -236,11 +236,25 @@ pub enum Command {
     /// Both are read-only. Setting values (`config set`) is a fast-follow.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Print the exit-code reference: every code with its `--json` error
+    /// `category` and a one-line meaning, or one code's row
+    /// (`tome exit-codes 50`). A pure static lookup over the closed error
+    /// set — it needs no HOME, index, config, or lock. Honours the global
+    /// `--json` flag.
+    ExitCodes(ExitCodesArgs),
     /// Generate a shell completion script (bash/zsh/fish/powershell/elvish) on
     /// stdout. This is a pure static operation over the command tree — it needs
     /// no HOME, index, or config, so it works during shell setup before Tome is
     /// configured. Example: `tome completions zsh > ~/.zfunc/_tome`.
     Completions(CompletionsArgs),
+}
+
+/// `tome exit-codes [<code>]` — the exit-code reference table.
+#[derive(Debug, clap::Args)]
+pub struct ExitCodesArgs {
+    /// Show only this code's row. An unknown code is a usage error (exit 2)
+    /// pointing at the full table.
+    pub code: Option<i32>,
 }
 
 /// `tome init` — the guided setup wizard. Deliberately flag-free: state

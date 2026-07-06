@@ -35,6 +35,400 @@ pub const EXIT_HEALTH_DEGRADED: i32 = 10;
 /// value (`1`) to minimise churn — see [`EXIT_HEALTH_DEGRADED`] for the scheme.
 pub const EXIT_HEALTH_UNHEALTHY: i32 = 1;
 
+/// One row of the exit-code reference table ([`EXIT_CODES`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ExitCodeInfo {
+    /// The process exit code.
+    pub code: i32,
+    /// The `--json` error-envelope `category` slug (exactly what
+    /// [`ErrorCategory::as_str`] emits for the [`TomeError`] variant(s) behind
+    /// this code). Two special non-error rows: `None` for success (`0`) and
+    /// `"health_degraded"` for the status/doctor health verdict (`10`, which is
+    /// not a `TomeError` — see [`EXIT_HEALTH_DEGRADED`]).
+    pub category: Option<&'static str>,
+    /// One-line human meaning.
+    pub meaning: &'static str,
+}
+
+/// #436: the single static source `tome exit-codes` renders — every exit code
+/// with its category slug and a one-line meaning, ascending.
+///
+/// THE DRIFT GUARD IS THE POINT. This table is pinned in both directions by
+/// `tests/index_query_misc/exit_codes.rs`:
+///
+/// * every code [`TomeError::exit_code`] can return must appear here with
+///   exactly its [`TomeError::category`] slug (driven off the same exhaustive
+///   variant enumeration that pins the code mapping itself), and
+/// * the docs page `site/docs/reference/exit-codes.md` must list the identical
+///   `(code, category)` rows in the same order.
+///
+/// Codes `71`/`72` are reserved-but-unused (deleted in Phase 4 / F10, never
+/// reassigned) and deliberately absent: `exit_code()` cannot return them and
+/// the docs page does not list them. Codes `90`/`91` are vestigial — retained
+/// for the closed-set contract, not constructed today — and say so.
+pub static EXIT_CODES: &[ExitCodeInfo] = &[
+    ExitCodeInfo {
+        code: 0,
+        category: None,
+        meaning: "Success.",
+    },
+    ExitCodeInfo {
+        code: 1,
+        category: Some("internal"),
+        meaning: "Internal error.",
+    },
+    ExitCodeInfo {
+        code: 2,
+        category: Some("usage"),
+        meaning: "Invalid usage / arguments.",
+    },
+    ExitCodeInfo {
+        code: 3,
+        category: Some("catalog_not_found"),
+        meaning: "Catalog not found.",
+    },
+    ExitCodeInfo {
+        code: 4,
+        category: Some("catalog_already_exists"),
+        meaning: "Catalog already exists.",
+    },
+    ExitCodeInfo {
+        code: 5,
+        category: Some("manifest_invalid"),
+        meaning: "Catalog manifest (tome-catalog.toml) invalid.",
+    },
+    ExitCodeInfo {
+        code: 6,
+        category: Some("git_failed"),
+        meaning: "A git operation failed.",
+    },
+    ExitCodeInfo {
+        code: 7,
+        category: Some("io"),
+        meaning: "I/O error.",
+    },
+    ExitCodeInfo {
+        code: 8,
+        category: Some("interrupted"),
+        meaning: "Interrupted (SIGINT / Ctrl-C).",
+    },
+    ExitCodeInfo {
+        code: 9,
+        category: Some("plugin_data_dir_write_failed"),
+        meaning: "Failed to write a plugin's data directory.",
+    },
+    ExitCodeInfo {
+        code: 10,
+        category: Some("health_degraded"),
+        meaning: "tome status / tome doctor health verdict: degraded (a non-fatal issue — queries still serve).",
+    },
+    ExitCodeInfo {
+        code: 12,
+        category: Some("workspace_not_bound"),
+        meaning: "No workspace is bound to the current directory (tome workspace current).",
+    },
+    ExitCodeInfo {
+        code: 13,
+        category: Some("workspace_not_found"),
+        meaning: "Workspace not found.",
+    },
+    ExitCodeInfo {
+        code: 14,
+        category: Some("workspace_already_exists"),
+        meaning: "Workspace already exists.",
+    },
+    ExitCodeInfo {
+        code: 15,
+        category: Some("workspace_name_invalid"),
+        meaning: "Invalid workspace name.",
+    },
+    ExitCodeInfo {
+        code: 16,
+        category: Some("workspace_has_bound_projects"),
+        meaning: "Workspace still has bound projects.",
+    },
+    ExitCodeInfo {
+        code: 17,
+        category: Some("composition_error"),
+        meaning: "Workspace composition error.",
+    },
+    ExitCodeInfo {
+        code: 18,
+        category: Some("harness_not_supported"),
+        meaning: "Unsupported harness.",
+    },
+    ExitCodeInfo {
+        code: 19,
+        category: Some("harness_clash"),
+        meaning: "Harness configuration clash.",
+    },
+    ExitCodeInfo {
+        code: 20,
+        category: Some("plugin_not_found"),
+        meaning: "Plugin not found.",
+    },
+    ExitCodeInfo {
+        code: 21,
+        category: Some("plugin_already_in_state"),
+        meaning: "Plugin already in the requested state.",
+    },
+    ExitCodeInfo {
+        code: 22,
+        category: Some("plugin_manifest_parse_error"),
+        meaning: "Plugin manifest (tome-plugin.toml) parse error.",
+    },
+    ExitCodeInfo {
+        code: 23,
+        category: Some("skill_frontmatter_parse_error"),
+        meaning: "SKILL.md frontmatter parse error.",
+    },
+    ExitCodeInfo {
+        code: 24,
+        category: Some("summariser_failure"),
+        meaning: "Summariser failure.",
+    },
+    ExitCodeInfo {
+        code: 25,
+        category: Some("workspace_data_dir_write_failed"),
+        meaning: "Failed to write a workspace's data directory.",
+    },
+    ExitCodeInfo {
+        code: 26,
+        category: Some("prompt_argument_mismatch"),
+        meaning: "MCP prompt argument mismatch.",
+    },
+    ExitCodeInfo {
+        code: 27,
+        category: Some("entry_not_found"),
+        meaning: "Entry not found.",
+    },
+    ExitCodeInfo {
+        code: 28,
+        category: Some("substitution_failed"),
+        meaning: "Variable substitution failed.",
+    },
+    ExitCodeInfo {
+        code: 29,
+        category: Some("invalid_argument_frontmatter"),
+        meaning: "Invalid argument frontmatter.",
+    },
+    ExitCodeInfo {
+        code: 30,
+        category: Some("model_missing"),
+        meaning: "A required model is missing.",
+    },
+    ExitCodeInfo {
+        code: 31,
+        category: Some("model_corrupt"),
+        meaning: "A model file is corrupt.",
+    },
+    ExitCodeInfo {
+        code: 32,
+        category: Some("model_checksum_mismatch"),
+        meaning: "Model checksum mismatch.",
+    },
+    ExitCodeInfo {
+        code: 33,
+        category: Some("model_registration_parse_error"),
+        meaning: "Model registration parse error.",
+    },
+    ExitCodeInfo {
+        code: 34,
+        category: Some("inference_runtime_init_failure"),
+        meaning: "Inference runtime failed to initialise.",
+    },
+    ExitCodeInfo {
+        code: 35,
+        category: Some("vector_extension_init_failure"),
+        meaning: "Vector extension failed to initialise.",
+    },
+    ExitCodeInfo {
+        code: 36,
+        category: Some("embedding_generation_failure"),
+        meaning: "Embedding generation failed.",
+    },
+    ExitCodeInfo {
+        code: 37,
+        category: Some("reranking_failure"),
+        meaning: "Reranking failed.",
+    },
+    ExitCodeInfo {
+        code: 40,
+        category: Some("query_no_results_strict"),
+        meaning: "--strict query returned no results.",
+    },
+    ExitCodeInfo {
+        code: 41,
+        category: Some("embedder_name_drift"),
+        meaning: "Embedder name drift (index vs. configured model).",
+    },
+    ExitCodeInfo {
+        code: 42,
+        category: Some("embedder_version_drift"),
+        meaning: "Embedder version drift.",
+    },
+    ExitCodeInfo {
+        code: 43,
+        category: Some("hook_spec_parse_error"),
+        meaning: "Hook spec parse error.",
+    },
+    ExitCodeInfo {
+        code: 44,
+        category: Some("hook_settings_write_failed"),
+        meaning: "Failed to write hook settings.",
+    },
+    ExitCodeInfo {
+        code: 45,
+        category: Some("agent_translation_failed"),
+        meaning: "Agent translation failed.",
+    },
+    ExitCodeInfo {
+        code: 46,
+        category: Some("guardrails_write_failed"),
+        meaning: "Failed to write the guardrails file.",
+    },
+    ExitCodeInfo {
+        code: 47,
+        category: Some("reindex_scoped_embedder_change"),
+        meaning: "A scoped reindex was refused because the embedder changed — run a full tome reindex.",
+    },
+    ExitCodeInfo {
+        code: 50,
+        category: Some("index_busy"),
+        meaning: "The index is locked by another process.",
+    },
+    ExitCodeInfo {
+        code: 51,
+        category: Some("index_integrity_check_failure"),
+        meaning: "Index integrity check failed.",
+    },
+    ExitCodeInfo {
+        code: 52,
+        category: Some("schema_too_new"),
+        meaning: "Index schema is newer than this binary supports.",
+    },
+    ExitCodeInfo {
+        code: 53,
+        category: Some("catalog_has_enabled_plugins"),
+        meaning: "Catalog still has enabled plugins (use --force).",
+    },
+    ExitCodeInfo {
+        code: 54,
+        category: Some("not_a_terminal"),
+        meaning: "An interactive command was run without a terminal.",
+    },
+    ExitCodeInfo {
+        code: 60,
+        category: Some("mcp_startup"),
+        meaning: "MCP server failed to start.",
+    },
+    ExitCodeInfo {
+        code: 61,
+        category: Some("mcp_io"),
+        meaning: "MCP protocol I/O error.",
+    },
+    ExitCodeInfo {
+        code: 70,
+        category: Some("workspace_malformed"),
+        meaning: "Workspace data on disk is malformed.",
+    },
+    ExitCodeInfo {
+        code: 73,
+        category: Some("schema_too_new"),
+        meaning: "Workspace schema version too new.",
+    },
+    ExitCodeInfo {
+        code: 74,
+        category: Some("schema_migration"),
+        meaning: "Schema migration failed.",
+    },
+    ExitCodeInfo {
+        code: 75,
+        category: Some("doctor_fix_unsafe"),
+        meaning: "A doctor --fix repair was not safe to apply.",
+    },
+    ExitCodeInfo {
+        code: 80,
+        category: Some("plugin_not_converted"),
+        meaning: "Plugin not converted: legacy .claude-plugin/plugin.json exists but no tome-plugin.toml.",
+    },
+    ExitCodeInfo {
+        code: 81,
+        category: Some("output_exists"),
+        meaning: "Refusing to overwrite existing output (pass --force).",
+    },
+    ExitCodeInfo {
+        code: 82,
+        category: Some("template_invalid"),
+        meaning: "Template unusable (missing file, malformed template, render error).",
+    },
+    ExitCodeInfo {
+        code: 83,
+        category: Some("source_format_unrecognized"),
+        meaning: "Could not auto-detect source format (pass --from <harness>).",
+    },
+    ExitCodeInfo {
+        code: 84,
+        category: Some("conversion_unsupported_strict"),
+        meaning: "convert --strict hit an unsupported feature.",
+    },
+    ExitCodeInfo {
+        code: 85,
+        category: Some("validation_found_errors"),
+        meaning: "lint found at least one error.",
+    },
+    ExitCodeInfo {
+        code: 86,
+        category: Some("validation_strict_warnings"),
+        meaning: "lint --strict found warnings (and no errors).",
+    },
+    ExitCodeInfo {
+        code: 87,
+        category: Some("meta_skill_not_found"),
+        meaning: "Unknown bundled meta skill id.",
+    },
+    ExitCodeInfo {
+        code: 88,
+        category: Some("meta_install_failed"),
+        meaning: "Failed to install a meta skill.",
+    },
+    ExitCodeInfo {
+        code: 89,
+        category: Some("no_harness_detected"),
+        meaning: "No supported harness detected (use --harness or install one).",
+    },
+    ExitCodeInfo {
+        code: 90,
+        category: Some("telemetry_endpoint_unreachable"),
+        meaning: "Telemetry endpoint unreachable (vestigial — retained for the closed-set contract; not constructed today).",
+    },
+    ExitCodeInfo {
+        code: 91,
+        category: Some("telemetry_config_invalid"),
+        meaning: "Telemetry config invalid (vestigial — retained for the closed-set contract; not constructed today).",
+    },
+    ExitCodeInfo {
+        code: 92,
+        category: Some("telemetry_queue_corrupt"),
+        meaning: "Telemetry queue corrupt: unparsable lines were dropped (tome telemetry inspect).",
+    },
+    ExitCodeInfo {
+        code: 93,
+        category: Some("provider_config_invalid"),
+        meaning: "Provider config invalid: an undefined provider reference, a kind illegal for the capability, a provider set without a model, or no resolvable credential.",
+    },
+    ExitCodeInfo {
+        code: 94,
+        category: Some("provider_request_failed"),
+        meaning: "A remote provider request failed (auth, rate-limit, timeout, unreachable, malformed response).",
+    },
+    ExitCodeInfo {
+        code: 95,
+        category: Some("remote_embedding_invalid"),
+        meaning: "A remote embedding failed content validation (empty / non-finite / wrong dimension).",
+    },
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum TomeError {
     // -----------------------------------------------------------------------
@@ -1491,6 +1885,37 @@ pub enum ManifestInvalid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #436: structural invariants of the [`EXIT_CODES`] reference table —
+    /// codes strictly ascending (⇒ unique ⇒ unique `(code, category)` pairs),
+    /// the two special non-error rows present with their special categories,
+    /// and non-empty meanings throughout. Coverage against every
+    /// `TomeError::exit_code()` value and the docs page lives in
+    /// `tests/index_query_misc/exit_codes.rs` beside the existing exhaustive
+    /// variant enumeration.
+    #[test]
+    fn exit_codes_table_is_sorted_unique_and_carries_the_special_rows() {
+        assert!(
+            EXIT_CODES.windows(2).all(|w| w[0].code < w[1].code),
+            "EXIT_CODES must be strictly ascending by code",
+        );
+        for row in EXIT_CODES {
+            assert!(
+                !row.meaning.is_empty(),
+                "code {} has an empty meaning",
+                row.code
+            );
+        }
+        let lookup = |code: i32| EXIT_CODES.iter().find(|r| r.code == code);
+        // Success has no category; the health verdict carries the non-error
+        // `health_degraded` label and matches the constant.
+        assert!(matches!(lookup(0), Some(r) if r.category.is_none()));
+        assert!(
+            matches!(lookup(EXIT_HEALTH_DEGRADED), Some(r) if r.category == Some("health_degraded")),
+        );
+        // Reserved-but-unused codes stay absent.
+        assert!(lookup(71).is_none() && lookup(72).is_none());
+    }
 
     #[test]
     fn workspace_not_found_hints_at_init() {

@@ -39,6 +39,19 @@ fn main() {
         std::process::exit(0);
     }
 
+    // `tome exit-codes [<code>]` is intercepted here for the same reason as
+    // `completions` above: a pure static lookup over the closed error set
+    // (`error::EXIT_CODES`) that needs no HOME, index, config, or lock — it
+    // must work on a completely unconfigured machine. Unlike `completions` it
+    // honours the global `--json` flag (the table IS data).
+    if let Command::ExitCodes(args) = &cli.command {
+        if let Err(err) = commands::exit_codes::run(args, cli.mode()) {
+            output::write_error(cli.mode(), &err);
+            std::process::exit(err.exit_code());
+        }
+        std::process::exit(0);
+    }
+
     // Skip the stderr-based CLI tracing subscriber on the MCP path —
     // `mcp::run` installs its own file-backed JSON subscriber, and the
     // global `tracing` registry only accepts one. Also skip the
@@ -206,9 +219,10 @@ fn main() {
         Command::Tier(cmd) => commands::tier::run(cmd, &scope, mode),
         Command::Sync(args) => commands::sync::run(args, &scope, &paths, mode),
         Command::Config(cmd) => commands::config::run(cmd, &scope, mode),
-        // Intercepted pre-dispatch above (before `Paths::resolve`); that arm
-        // exits the process, so this is unreachable. Kept for exhaustiveness.
+        // Intercepted pre-dispatch above (before `Paths::resolve`); those arms
+        // exit the process, so these are unreachable. Kept for exhaustiveness.
         Command::Completions(_) => unreachable!("completions is handled pre-dispatch"),
+        Command::ExitCodes(_) => unreachable!("exit-codes is handled pre-dispatch"),
     };
 
     // Single exit-path teardown (FR-047b). `teardown_at_exit` is THE one call
