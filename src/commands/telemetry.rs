@@ -319,9 +319,19 @@ fn off(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
 
 fn reset(paths: &Paths, args: TelemetryResetArgs, mode: Mode) -> Result<(), TomeError> {
     if !args.yes && !prompt::non_interactive() {
-        // Confirm-or-refuse. `prompt::confirm` refuses up front on a non-TTY with
-        // `NotATerminal` (exit 54), so a scripted reset MUST pass `--yes` (or the
-        // global `--non-interactive` / `TOME_NONINTERACTIVE`).
+        // #435: name the non-interactive alternative BEFORE the generic
+        // `NotATerminal` refusal `prompt::confirm` would raise, mirroring the
+        // `plugin disable` / `models remove` pointer discipline: a scripted
+        // reset MUST pass `--yes` (or the global `--non-interactive` /
+        // `TOME_NONINTERACTIVE`).
+        if !(crate::output::stdin_is_tty() && crate::output::stdout_is_tty()) {
+            let mut err = std::io::stderr().lock();
+            let _ = writeln!(
+                err,
+                "Reset requires confirmation. Re-run with --yes to skip the prompt."
+            );
+            return Err(TomeError::NotATerminal);
+        }
         let proceed = prompt::confirm(
             "This severs telemetry continuity (new install UUID, queue cleared). Continue?",
             false,

@@ -133,9 +133,21 @@ fn pick_workspace(paths: &Paths) -> Result<WorkspaceName, TomeError> {
             "no workspaces to pick from; create one with `tome workspace init <name>`".to_owned(),
         ));
     }
+    // #435: name the non-interactive alternative BEFORE the generic
+    // `NotATerminal` refusal, mirroring the `plugin disable` / `models remove`
+    // pointer discipline (the bare exit-54 message can't know which command
+    // form replaces the picker).
+    if !(crate::output::stdin_is_tty() && crate::output::stdout_is_tty()) {
+        use std::io::Write;
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
+            "Picking a workspace needs a terminal. Run `tome workspace use <name>` to bind one non-interactively."
+        );
+        return Err(TomeError::NotATerminal);
+    }
     let choices: Vec<WorkspaceChoice> = names.into_iter().map(WorkspaceChoice).collect();
-    // `prompt::select` refuses up front on a non-terminal → NotATerminal
-    // (exit 54); it maps Esc/Ctrl-C to Interrupted (exit 8).
+    // `prompt::select` maps Esc/Ctrl-C to Interrupted (exit 8).
     let picked = prompt::select("Pick a workspace to bind", choices)?;
     Ok(picked.0)
 }

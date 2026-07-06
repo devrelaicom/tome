@@ -54,7 +54,9 @@ pub enum TomeError {
     #[error("manifest invalid: {0}")]
     ManifestInvalid(#[from] ManifestInvalid),
 
-    #[error("git failed for `{catalog}`: {detail}")]
+    #[error(
+        "git failed for `{catalog}`: {detail}\nhint: check network connectivity and your SSH/HTTPS access to the remote; `tome doctor` reports catalog cache health"
+    )]
     GitFailed { catalog: String, detail: String },
 
     /// Generic filesystem error. Phase 4 widens the semantic scope of this
@@ -120,7 +122,14 @@ pub enum TomeError {
     #[error("harness composition error: {kind}")]
     CompositionError { kind: CompositionErrorKind },
 
-    #[error("harness `{name}` is not supported")]
+    // #435: the trailing format arg calls into the harness registry so the
+    // message enumerates the real supported set (the `MetaSkillNotFound`
+    // `available:` precedent) — no hardcoded name list to rot when a harness
+    // module is added.
+    #[error(
+        "harness `{name}` is not supported\navailable: {}",
+        crate::harness::supported_names_joined()
+    )]
     HarnessNotSupported { name: String },
 
     #[error(
@@ -274,7 +283,9 @@ pub enum TomeError {
     // -----------------------------------------------------------------------
     // Phase 2 — inference + vector engine init (codes 34–37).
     // -----------------------------------------------------------------------
-    #[error("inference runtime failed to initialise: {0}")]
+    #[error(
+        "inference runtime failed to initialise: {0}\nhint: the most common cause is corrupt or incomplete model files — run `tome models download --force` to re-download them"
+    )]
     InferenceRuntimeInitFailure(String),
 
     #[error("vector-search engine failed to initialise: {0}")]
@@ -326,7 +337,9 @@ pub enum TomeError {
     // -----------------------------------------------------------------------
     // Phase 2 — index + catalog interaction (codes 50–54).
     // -----------------------------------------------------------------------
-    #[error("another tome process is updating the index; retry once it has finished")]
+    #[error(
+        "another tome process is updating the index; retry once it has finished\nhint: the advisory lock is held by a live process and self-heals when that process exits — there is no lock file to delete; retry shortly"
+    )]
     IndexBusy,
 
     #[error("index database integrity check failed: {0}")]
@@ -572,13 +585,17 @@ pub enum TomeError {
     /// usable connection: undefined provider name, a kind not legal for the
     /// capability, or a `provider` set without a `model`. `detail` names the
     /// offending provider/capability.
-    #[error("provider config invalid: {detail}")]
+    #[error(
+        "provider config invalid: {detail}\nhint: run `tome doctor` — it names the exact missing provider setting or credential env var per capability"
+    )]
     ProviderConfigInvalid { detail: String },
 
     /// A remote provider call failed (auth, rate-limit, timeout, unreachable,
     /// malformed response, …). `detail` is the redacted, structured
     /// `ProviderError` summary (Phase 2); credentials never reach this field.
-    #[error("provider request failed: {detail}")]
+    #[error(
+        "provider request failed: {detail}\nhint: run `tome doctor` to check the provider's configuration and credential resolution"
+    )]
     ProviderRequestFailed { detail: String },
 
     /// A remote embedding failed content validation. `detail` states which
@@ -1125,11 +1142,13 @@ impl ErrorCategory {
             | Self::IndexIntegrityCheckFailure => Some("tome reindex --force"),
 
             // A model is absent → download it; corrupt/checksum-mismatch → force
-            // a re-download.
+            // a re-download. #435: an inference-runtime init failure joins the
+            // force-re-download arm — corrupt or incomplete model files are its
+            // most common cause.
             Self::ModelMissing => Some("tome models download"),
-            Self::ModelCorrupt | Self::ModelChecksumMismatch => {
-                Some("tome models download --force")
-            }
+            Self::ModelCorrupt
+            | Self::ModelChecksumMismatch
+            | Self::InferenceRuntimeInitFailure => Some("tome models download --force"),
 
             // A legacy plugin needs the native-format cutover.
             Self::PluginNotConverted => Some("tome plugin convert"),
@@ -1184,7 +1203,6 @@ impl ErrorCategory {
             | Self::PluginManifestParseError
             | Self::SkillFrontmatterParseError
             | Self::ModelRegistrationParseError
-            | Self::InferenceRuntimeInitFailure
             | Self::VectorExtensionInitFailure
             | Self::EmbeddingGenerationFailure
             | Self::RerankingFailure
@@ -1484,6 +1502,69 @@ mod tests {
             msg.contains("hint: create it with `tome workspace init myws`"),
             "{msg}"
         );
+    }
+
+    /// #435: `HarnessNotSupported` enumerates the valid harness names straight
+    /// from the registry (supported + opt-in targets), so the message stays
+    /// truthful as modules are added without a hand-maintained list.
+    #[test]
+    fn harness_not_supported_lists_registry_names() {
+        let e = TomeError::HarnessNotSupported {
+            name: "made-up-harness".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("available:"), "{msg}");
+        // A detectable module, another detectable module, and an opt-in target.
+        for known in ["claude-code", "cursor", "generic"] {
+            assert!(msg.contains(known), "must list `{known}`: {msg}");
+        }
+    }
+
+    /// #435: an inference-runtime init failure hints at the force re-download
+    /// (corrupt/incomplete model files are the most common cause) on BOTH the
+    /// human message and the structured `remediation` field.
+    #[test]
+    fn inference_init_failure_hints_at_force_download() {
+        let e = TomeError::InferenceRuntimeInitFailure("ort: bad model".into());
+        assert!(
+            e.to_string().contains("tome models download --force"),
+            "{e}"
+        );
+        assert_eq!(
+            e.category().remediation(),
+            Some("tome models download --force"),
+        );
+        assert!(!e.category().retryable());
+    }
+
+    /// #435: `IndexBusy` explains the advisory lock self-heals (no lock file to
+    /// delete); `GitFailed` and the provider failures point at connectivity /
+    /// `tome doctor`. All message-level hints — their `remediation` stays
+    /// `None` (retry / diagnosis, not a single fix command).
+    #[test]
+    fn transient_failures_carry_message_hints() {
+        let busy = TomeError::IndexBusy;
+        let busy_msg = busy.to_string();
+        assert!(busy_msg.contains("self-heals"), "{busy_msg}");
+        assert!(busy_msg.contains("no lock file to delete"), "{busy_msg}");
+
+        let git = TomeError::GitFailed {
+            catalog: "cat".into(),
+            detail: "fatal: …".into(),
+        };
+        let git_msg = git.to_string();
+        assert!(git_msg.contains("network"), "{git_msg}");
+        assert!(git_msg.contains("tome doctor"), "{git_msg}");
+        assert_eq!(git.category().remediation(), None);
+
+        for provider in [
+            TomeError::ProviderConfigInvalid { detail: "x".into() },
+            TomeError::ProviderRequestFailed { detail: "y".into() },
+        ] {
+            let msg = provider.to_string();
+            assert!(msg.contains("tome doctor"), "{msg}");
+            assert_eq!(provider.category().remediation(), None);
+        }
     }
 
     /// T-L1 — exhaustive `ErrorCategory::as_str()` wire-token table.

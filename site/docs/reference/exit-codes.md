@@ -22,7 +22,7 @@ stdout):
   "error": {
     "category": "index_busy",
     "exit_code": 50,
-    "message": "another tome process is updating the index; retry once it has finished",
+    "message": "another tome process is updating the index; retry once it has finished\nhint: the advisory lock is held by a live process and self-heals when that process exits — there is no lock file to delete; retry shortly",
     "retryable": true
   }
 }
