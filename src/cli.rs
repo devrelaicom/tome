@@ -729,8 +729,10 @@ pub struct DoctorArgs {
     #[arg(long)]
     pub force: bool,
     /// Rehash each installed model's primary file against its pinned
-    /// SHA-256. Slower than the default but catches silent on-disk
-    /// corruption.
+    /// SHA-256, and probe each effective harness's registered `tome mcp`
+    /// server end-to-end (initialize + tools/list over stdio, bounded by a
+    /// timeout). Slower than the default; still network-free. Also enabled
+    /// by `[doctor] verify_by_default` in `~/.tome/config.toml`.
     #[arg(long)]
     pub verify: bool,
     /// With --fix: list the automatic repairs `--fix` would apply and exit

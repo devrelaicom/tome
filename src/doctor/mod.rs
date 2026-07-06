@@ -16,6 +16,7 @@ pub mod cutover;
 pub mod fixes;
 pub mod harness_detect;
 pub mod harness_integration;
+pub mod mcp_probe;
 pub mod meta_drift;
 pub mod orphan_cleanup;
 pub mod report;
@@ -394,6 +395,21 @@ pub fn assemble_report(
     // with `telemetry: None`) unchanged.
     let telemetry = Some(telemetry::assemble(paths));
 
+    // Issue #434: the end-to-end MCP probe, ONLY under `--verify` (spawns one
+    // real `tome mcp` subprocess per scope-effective harness). The argv comes
+    // from the sync-side SSOT (`harness::sync::expected_tome_entry`) so the
+    // probe tests exactly the command sync registered. Empty effective list →
+    // `None` (key omitted; the minimal-report pin is unchanged).
+    let mcp_probe = if verify {
+        let rows = mcp_probe::probe_effective_harnesses(
+            scope.scope.name(),
+            effective_harness_list.as_ref(),
+        );
+        if rows.is_empty() { None } else { Some(rows) }
+    } else {
+        None
+    };
+
     Ok(DoctorReport {
         tome_version,
         workspace,
@@ -429,6 +445,7 @@ pub fn assemble_report(
         unrepresented_hooks,
         overall,
         suggested_fixes,
+        mcp_probe,
     })
 }
 
@@ -2021,6 +2038,7 @@ mod tests {
             },
             hook_translation: None,
             unrepresented_hooks: None,
+            mcp_probe: None,
             overall: DoctorClassification::Ok,
             suggested_fixes: Vec::new(),
         }

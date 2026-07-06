@@ -1084,4 +1084,31 @@ pub struct DoctorReport {
     /// leaves every earlier field's position untouched.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unrepresented_hooks: Option<UnrepresentedHooksReport>,
+    /// Issue #434: the end-to-end MCP server probe, populated ONLY when
+    /// verification is enabled (`--verify` or `[doctor] verify_by_default`) —
+    /// one row per scope-effective harness, spawning the exact `tome mcp`
+    /// argv sync registers and driving an `initialize` + `tools/list`
+    /// round-trip. `None` on every non-verify run → key omitted
+    /// (`skip_serializing_if`), so the byte-stable minimal-report pin stays
+    /// unchanged.
+    ///
+    /// Field is LAST so it is truly "trailing" per the byte-stable-pin
+    /// discipline: appended after `unrepresented_hooks` (the prior last
+    /// field), it leaves every earlier field's position untouched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_probe: Option<Vec<McpProbeEntry>>,
+}
+
+/// Issue #434: one `tome doctor --verify` MCP probe result. `tools` is the
+/// advertised `tools/list` count on success; `error` carries the failure
+/// reason plus a credential-scrubbed stderr tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct McpProbeEntry {
+    pub harness: String,
+    pub workspace: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
