@@ -207,17 +207,17 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     };
     if args.fix && remaining_manual {
         return Err(TomeError::DoctorFixNotSafe {
-            // Issue #283: mirror `has_remaining_manual_fixes`'s exclusion of
-            // `Subsystem::Onboarding` exactly. Onboarding nudges sort BEFORE the
-            // genuine subsystem fixes (e.g. Config), so a bare `.find(|f|
-            // !f.auto_fixable)` would label the error with the one subsystem
-            // that is explicitly not supposed to block. The two scans must use
-            // the SAME predicate so the label names the fix that actually
-            // triggered the exit-75 gate.
+            // Issue #283: this scan and `has_remaining_manual_fixes` share the
+            // one `is_blocking_manual_fix` predicate. Excluded fixes (onboarding
+            // nudges, manual/unverified MCP pointers) sort arbitrarily among the
+            // genuine ones, so a bare `.find(|f| !f.auto_fixable)` could label
+            // the error with a subsystem that is explicitly not supposed to
+            // block. Sharing the predicate keeps the label pointing at the fix
+            // that actually triggered the exit-75 gate.
             subsystem: report
                 .suggested_fixes
                 .iter()
-                .find(|f| !f.auto_fixable && f.subsystem != doctor::Subsystem::Onboarding)
+                .find(|f| doctor::fixes::is_blocking_manual_fix(&report, f))
                 .map(|f| f.subsystem.to_wire_string())
                 .unwrap_or_else(|| "unknown".to_owned()),
         });
