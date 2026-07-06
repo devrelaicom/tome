@@ -159,6 +159,12 @@ quickstart. All of these are human-only; `--json` is untouched.
 - **A harness's config drifted** — run `tome sync`, or
   `tome doctor --fix` to reconcile rules, MCP wiring, agents, and hooks from
   current state.
+- **A translated plugin hook doesn't seem to fire** — translated hooks fail
+  open by design, so a misconfigured hook is silent rather than blocking. Run
+  `tome harness run-hook --explain --event <event> --harness <name>` for a
+  dry-run of what would fire, or set `TOME_HOOK_DEBUG=1` to trace a live
+  dispatch. `tome harness info <name>` and `tome doctor` print the same
+  pointer under their hook-translation sections.
 - **Search returns nothing or stale results** — reindex the affected scope.
   `tome reindex` alone rebuilds everything; positional scopes are variadic and
   accept `*` globs (`tome reindex "<catalog>/*"`, `tome reindex "compact-*"`),
