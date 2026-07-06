@@ -499,16 +499,37 @@ fn enable_locked(
 
     let embedder = deps.embedder;
     let workspace_name = deps.workspace_name();
-    let summary = enable_plugin_atomic(&mut conn, workspace_name, &pending, |text| {
-        // Cancellation is observed inside the embed loop too (handover
-        // gotcha #3): each embed call peeks the SIGINT flag. The closure
-        // returns `Err(TomeError::Interrupted)` which `enable_plugin_atomic`
-        // propagates and the surrounding transaction rolls back.
-        if was_cancelled() {
-            return Err(TomeError::Interrupted);
-        }
-        embedder.embed(text)
-    })?;
+    // #421: determinate per-entry progress for the embedding phase — the
+    // entry count is known before the loop starts, so the 30–120 s of
+    // large-plugin embedding no longer runs silent. The bar renders on
+    // stderr only (TTY + `[output] progress` gated inside `progress::bar`),
+    // so stdout — including `--json` records — stays byte-identical, and it
+    // is cleared BEFORE this function returns so the success lines and the
+    // summariser step never interleave with a live bar.
+    let progress_bar = crate::presentation::progress::bar(
+        pending.len() as u64,
+        format!("embedding {}/{}", id.catalog, id.plugin),
+    );
+    let result = enable_plugin_atomic(
+        &mut conn,
+        workspace_name,
+        &pending,
+        |text| {
+            // Cancellation is observed inside the embed loop too (handover
+            // gotcha #3): each embed call peeks the SIGINT flag. The closure
+            // returns `Err(TomeError::Interrupted)` which `enable_plugin_atomic`
+            // propagates and the surrounding transaction rolls back.
+            if was_cancelled() {
+                return Err(TomeError::Interrupted);
+            }
+            embedder.embed(text)
+        },
+        || progress_bar.inc(1),
+    );
+    // Clear on the error path too — a dropped-but-unfinished bar would leave
+    // a stale line above the error message.
+    progress_bar.finish_and_clear();
+    let summary = result?;
 
     info!(
         plugin = %id,
@@ -598,7 +619,15 @@ fn reindex_locked(
 
     let embedder = deps.embedder;
     let workspace_name = deps.workspace_name();
-    let summary = reindex_plugin_atomic(
+    // #421: same determinate per-entry bar as `enable_locked` — `tome
+    // reindex` (and `catalog update`'s reindex) visit every on-disk entry,
+    // so the total is `pending.len()`. stderr-only + cleared before return,
+    // keeping stdout and `--json` byte-identical.
+    let progress_bar = crate::presentation::progress::bar(
+        pending.len() as u64,
+        format!("embedding {}/{}", id.catalog, id.plugin),
+    );
+    let result = reindex_plugin_atomic(
         &mut conn,
         workspace_name,
         &id.catalog,
@@ -611,7 +640,10 @@ fn reindex_locked(
             }
             embedder.embed(text)
         },
-    )?;
+        || progress_bar.inc(1),
+    );
+    progress_bar.finish_and_clear();
+    let summary = result?;
 
     Ok((summary, warnings))
 }

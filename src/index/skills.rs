@@ -801,14 +801,22 @@ fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
 /// `embed` is a closure rather than a trait so this slice can land without
 /// pulling in the embedding crate that arrives in slice 5. A trait wrapper
 /// is a thin adapter over this signature.
-pub fn enable_plugin_atomic<F>(
+///
+/// `on_entry` fires once per `pending` entry, AFTER it is fully processed
+/// (embedded-or-refreshed + enrolled). It exists to drive a determinate
+/// progress bar from the caller (#421) without this module knowing about
+/// presentation; keep it side-effect-light — it runs inside the enable
+/// transaction.
+pub fn enable_plugin_atomic<F, P>(
     conn: &mut Connection,
     workspace_name: &str,
     pending: &[PendingSkill],
     mut embed: F,
+    mut on_entry: P,
 ) -> Result<EnableSummary, TomeError>
 where
     F: FnMut(&str) -> Result<Vec<f32>, TomeError>,
+    P: FnMut(),
 {
     let tx = conn
         .transaction()
@@ -897,6 +905,9 @@ where
         // (entry-schema-p6.md), so enabling enrols skills+commands+agents
         // and disabling removes them all.
         upsert_workspace_skill(&tx, workspace_name, skill_id, now_unix)?;
+        // Per-entry progress tick (#421): fires for cheap re-enables too, so
+        // a bar sized to `pending.len()` always completes.
+        on_entry();
     }
 
     tx.commit()
@@ -934,7 +945,12 @@ where
 /// `workspace_skills(workspace_name, id)` row for every
 /// Added/Modified/Unchanged skill (a no-op when the enrolment already
 /// exists; the PK keeps idempotency).
-pub fn reindex_plugin_atomic<F>(
+/// `on_entry` fires once per `pending` entry after it is fully processed —
+/// the reindex analogue of `enable_plugin_atomic`'s progress tick (#421).
+/// The Removed pass does not tick: a bar sized to `pending.len()` covers
+/// exactly the visited-on-disk set, and row deletion is microseconds.
+#[allow(clippy::too_many_arguments)] // the #421 progress tick pushed this to 8; the sole caller is lifecycle.rs
+pub fn reindex_plugin_atomic<F, P>(
     conn: &mut Connection,
     workspace_name: &str,
     catalog: &str,
@@ -942,9 +958,11 @@ pub fn reindex_plugin_atomic<F>(
     pending: &[PendingSkill],
     force: bool,
     mut embed: F,
+    mut on_entry: P,
 ) -> Result<ReindexSummary, TomeError>
 where
     F: FnMut(&str) -> Result<Vec<f32>, TomeError>,
+    P: FnMut(),
 {
     let tx = conn
         .transaction()
@@ -1052,6 +1070,9 @@ where
         // Re-assert the resolved-workspace enrolment for every visited
         // skill (idempotent — PK keyed on (workspace_id, skill_id)).
         upsert_workspace_skill(&tx, workspace_name, skill_id, now_unix)?;
+        // Per-entry progress tick (#421): fires for Unchanged rows too, so
+        // a bar sized to `pending.len()` always completes.
+        on_entry();
     }
 
     // Pass 2 — Removed: anything still left in `existing` is on-index but
@@ -1437,6 +1458,105 @@ mod tests {
             !clashes.contains("ghost"),
             "disabled (non-enrolled) agents do not contribute to the clash set",
         );
+    }
+
+    // ---- per-entry progress ticks (#421) --------------------------------
+
+    /// A minimal skill-kind [`PendingSkill`] for the tick-count tests.
+    fn pending_skill(name: &str) -> PendingSkill {
+        PendingSkill {
+            catalog: "cat".into(),
+            plugin: "plug".into(),
+            name: name.into(),
+            kind: EntryKind::Skill,
+            description: "desc".into(),
+            plugin_version: "0.0.0".into(),
+            path: format!("skills/{name}/SKILL.md"),
+            when_to_use: None,
+            searchable: true,
+            user_invocable: true,
+        }
+    }
+
+    /// `enable_plugin_atomic` fires `on_entry` exactly once per pending
+    /// entry — including cheap re-enables that skip the embedder — so a
+    /// progress bar sized to `pending.len()` always completes (#421).
+    #[test]
+    fn enable_ticks_on_entry_once_per_pending_entry() {
+        let dir = TempDir::new().unwrap();
+        let mut conn = open_db(&dir);
+        let pending: Vec<PendingSkill> = ["a", "b", "c"].iter().map(|n| pending_skill(n)).collect();
+
+        let embeds = std::cell::Cell::new(0u32);
+        let ticks = std::cell::Cell::new(0u32);
+        enable_plugin_atomic(
+            &mut conn,
+            "global",
+            &pending,
+            |_| {
+                embeds.set(embeds.get() + 1);
+                Ok(vec![0.1f32; 384])
+            },
+            || ticks.set(ticks.get() + 1),
+        )
+        .expect("enable");
+        assert_eq!(embeds.get(), 3, "fresh enable embeds every entry");
+        assert_eq!(ticks.get(), 3, "one tick per entry");
+
+        // Cheap re-enable: no embedder calls, but the ticks still cover the
+        // full pending set — the bar must not stall at 0/N on a no-op run.
+        embeds.set(0);
+        ticks.set(0);
+        enable_plugin_atomic(
+            &mut conn,
+            "global",
+            &pending,
+            |_| {
+                embeds.set(embeds.get() + 1);
+                Ok(vec![0.1f32; 384])
+            },
+            || ticks.set(ticks.get() + 1),
+        )
+        .expect("re-enable");
+        assert_eq!(embeds.get(), 0, "unchanged entries skip the embedder");
+        assert_eq!(ticks.get(), 3, "ticks still cover every entry");
+    }
+
+    /// `reindex_plugin_atomic` ticks once per visited entry, embedder-skips
+    /// included (Unchanged rows), mirroring the enable path (#421).
+    #[test]
+    fn reindex_ticks_on_entry_once_per_pending_entry() {
+        let dir = TempDir::new().unwrap();
+        let mut conn = open_db(&dir);
+        let pending: Vec<PendingSkill> = ["a", "b", "c"].iter().map(|n| pending_skill(n)).collect();
+        enable_plugin_atomic(
+            &mut conn,
+            "global",
+            &pending,
+            |_| Ok(vec![0.1f32; 384]),
+            || {},
+        )
+        .expect("seed enable");
+
+        let embeds = std::cell::Cell::new(0u32);
+        let ticks = std::cell::Cell::new(0u32);
+        let summary = reindex_plugin_atomic(
+            &mut conn,
+            "global",
+            "cat",
+            "plug",
+            &pending,
+            false,
+            |_| {
+                embeds.set(embeds.get() + 1);
+                Ok(vec![0.1f32; 384])
+            },
+            || ticks.set(ticks.get() + 1),
+        )
+        .expect("reindex");
+        assert_eq!(summary.unchanged, 3);
+        assert_eq!(embeds.get(), 0, "unchanged rows skip the embedder");
+        assert_eq!(ticks.get(), 3, "ticks still cover every visited entry");
     }
 
     /// Insert a skill or command row and enrol it in `global` with the default
