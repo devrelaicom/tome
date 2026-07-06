@@ -72,9 +72,9 @@
         ],
         "disable": [
           "--catalog",
-          "--force",
           "--sync",
-          "--verbose"
+          "--verbose",
+          "--yes"
         ],
         "list": [
           "--catalog",
@@ -133,8 +133,8 @@
         ],
         "remove": [
           "--all",
-          "--force",
-          "--verbose"
+          "--verbose",
+          "--yes"
         ],
         "profile": [
           "--force",
@@ -363,11 +363,9 @@
       "subcommands": {
         "set": [
           "--catalog",
-          "--force",
           "--kind",
           "--plugin",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "list": [
           "--verbose"

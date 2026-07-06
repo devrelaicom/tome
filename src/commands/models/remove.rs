@@ -8,7 +8,7 @@
 //!
 //! `--all` + names is a clap conflict.
 //!
-//! Destructive-op safety: the confirmation gate (`--force` / non-TTY refusal,
+//! Destructive-op safety: the confirmation gate (`--yes` / non-TTY refusal,
 //! FR-021 / #305) fires ONCE for the WHOLE batch, naming the set. Forward-
 //! progress (`first_error`): each model is removed in turn; a per-model failure
 //! is recorded and the loop CONTINUES, surfacing the first error's exit code.
@@ -47,14 +47,14 @@ pub fn run(args: ModelsRemoveArgs, mode: Mode) -> Result<(), TomeError> {
     }
 
     // 2. Destructive-op gate — ONCE for the whole batch (do NOT prompt N times).
-    if !args.force && !prompt::non_interactive() {
-        // Non-TTY without --force → exit 54 with the documented pointer. Same
+    if !args.yes && !prompt::non_interactive() {
+        // Non-TTY without --yes (#438) → exit 54 with the documented pointer. Same
         // pattern as `plugin disable`.
         if !(output::stdin_is_tty() && output::stdout_is_tty()) {
             let mut err = std::io::stderr().lock();
             let _ = writeln!(
                 err,
-                "Removal requires confirmation. Re-run with --force to skip the prompt."
+                "Removal requires confirmation. Re-run with --yes to skip the prompt."
             );
             return Err(TomeError::NotATerminal);
         }

@@ -526,10 +526,11 @@ fn run_enable_action(scope: &ResolvedScope, id: &PluginId) -> Result<(), TomeErr
     )
 }
 
-/// Prompt for confirmation, then call `lifecycle::disable` (force-equivalent
+/// Prompt for confirmation, then call `lifecycle::disable` (skip-equivalent
 /// per the contract: "On Disable: prompt to confirm, then run `plugin
-/// disable --force` equivalent"). Errors from disable propagate per
-/// contract — same exit codes as the (future) non-interactive form.
+/// disable --yes` equivalent" — `--yes` since #438, formerly `--force`).
+/// Errors from disable propagate per contract — same exit codes as the
+/// (future) non-interactive form.
 fn run_disable_action(paths: &Paths, scope: &ResolvedScope, id: &PluginId) -> LoopFlow {
     let confirmed = match prompt::confirm(&format!("Disable {id}?"), false) {
         Ok(v) => v,

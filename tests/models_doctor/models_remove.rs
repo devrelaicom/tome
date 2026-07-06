@@ -99,8 +99,8 @@ fn remove_without_force_in_non_tty_exits_54_with_pointer_message() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--force"),
-        "stderr must point the user at --force, got: {stderr}",
+        stderr.contains("--yes"),
+        "stderr must point the user at --yes (#438), got: {stderr}",
     );
 
     // State must NOT have changed.
