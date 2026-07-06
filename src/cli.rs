@@ -58,6 +58,47 @@ pub(crate) const SETUP_STEPS: [SetupStep; 4] = [
     },
 ];
 
+/// Issue #423: select the OUTSTANDING steps of [`SETUP_STEPS`] for a
+/// partially-set-up install. Lives beside the step list so step selection and
+/// step content share one home (the #422 lesson: two surfaces hand-listing
+/// steps drift). `tome status`'s "Getting started" panel renders exactly this
+/// subset; `tome --help`'s quickstart always renders the full list.
+///
+/// Semantics — a step is outstanding when its precondition is unmet:
+///
+/// * `catalog add` — no catalog enrolled;
+/// * `plugin enable` — nothing enabled (with or without catalogs: it is the
+///   next thing on the path either way);
+/// * `harness use` — no harness configured in the resolved scope;
+/// * `query` — nothing enabled yet, so a search cannot return results (once
+///   plugins are enabled the user can already query; nudging it again would
+///   be noise).
+///
+/// Deliberately NOT `init::plan` (detection-based `ConfigureHarnesses` gate +
+/// no query step) nor doctor's `push_onboarding_fixes` (else-if semantics +
+/// prose nudges, not steps): both encode their own surface's needs; this one
+/// encodes the panel's. All three read the same three signals.
+pub(crate) fn outstanding_setup_steps(
+    catalogs_enrolled: u32,
+    plugins_enabled: u32,
+    harness_configured: bool,
+) -> Vec<&'static SetupStep> {
+    let mut out = Vec::new();
+    if catalogs_enrolled == 0 {
+        out.push(&SETUP_STEPS[0]);
+    }
+    if plugins_enabled == 0 {
+        out.push(&SETUP_STEPS[1]);
+    }
+    if !harness_configured {
+        out.push(&SETUP_STEPS[2]);
+    }
+    if plugins_enabled == 0 {
+        out.push(&SETUP_STEPS[3]);
+    }
+    out
+}
+
 /// #293: the concise getting-started block appended to clap's help text. The
 /// flat command list is a dead end for a first-time user; the [`SETUP_STEPS`]
 /// are the actual happy path (add a catalog → enable a plugin → wire a
@@ -1533,6 +1574,43 @@ mod tests {
     use super::*;
     use crate::output::Mode;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Issue #423: the outstanding-step selector over the three setup signals.
+    /// Each partial state selects exactly its outstanding steps; a fully-set-up
+    /// install selects nothing.
+    #[test]
+    fn outstanding_setup_steps_selects_per_state() {
+        let commands = |steps: Vec<&'static SetupStep>| -> Vec<&'static str> {
+            steps.into_iter().map(|s| s.command).collect()
+        };
+
+        // Fresh install: every step, in SETUP_STEPS order.
+        assert_eq!(
+            commands(outstanding_setup_steps(0, 0, false)),
+            SETUP_STEPS.iter().map(|s| s.command).collect::<Vec<_>>(),
+        );
+        // Catalogs enrolled, nothing enabled, no harness: enable → harness → query.
+        assert_eq!(
+            commands(outstanding_setup_steps(2, 0, false)),
+            vec![
+                SETUP_STEPS[1].command,
+                SETUP_STEPS[2].command,
+                SETUP_STEPS[3].command,
+            ],
+        );
+        // Everything but the harness: exactly `harness use` (query already works).
+        assert_eq!(
+            commands(outstanding_setup_steps(2, 3, false)),
+            vec![SETUP_STEPS[2].command],
+        );
+        // Harness configured, nothing enabled: enable → query.
+        assert_eq!(
+            commands(outstanding_setup_steps(1, 0, true)),
+            vec![SETUP_STEPS[1].command, SETUP_STEPS[3].command],
+        );
+        // Fully set up: nothing.
+        assert!(outstanding_setup_steps(1, 1, true).is_empty());
+    }
 
     // Env is process-global. `mode()` reads `TOME_JSON`, so any test that sets
     // it must serialise against every other env-mutating test in this binary.

@@ -775,3 +775,48 @@ fn status_positional_unknown_workspace_exits_13() {
         .unwrap();
     assert_eq!(out_flag.status.code(), Some(13));
 }
+
+/// Issue #423 (review follow-up): the configured-harness signal must NOT be
+/// project-gated. In GLOBAL scope (no project marker anywhere above cwd) with
+/// a harness configured at global scope (what `tome harness use --scope
+/// global` writes into config.toml `[harness] enabled`), the onboarding panel
+/// must OMIT the `harness use` step. This drives the REAL signal path — the
+/// spawned binary's `fill_harness_configured` over the resolved effective
+/// list — not a hand-set report field: `fill_harness_mcp` early-returns
+/// without a project root, so the old `harness_mcp`-derived signal was
+/// permanently empty here (the exact blind spot). The catalog step still
+/// renders (fresh env), proving the block is present while the harness step
+/// is correctly absent.
+#[test]
+fn status_global_scope_configured_harness_omits_harness_step() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    std::fs::write(
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"cursor\"]\n",
+    )
+    .unwrap();
+
+    // Run from the isolated $HOME — no `.tome/` marker anywhere above, so the
+    // scope resolves with NO project root.
+    let out = env
+        .cmd()
+        .current_dir(env.home_path())
+        .args(["status"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Getting started"),
+        "fresh env still onboards: {stdout}",
+    );
+    assert!(stdout.contains("tome catalog add"), "{stdout}");
+    assert!(
+        !stdout.contains("tome harness use"),
+        "a global-scope harness must count as configured from any cwd: {stdout}",
+    );
+}

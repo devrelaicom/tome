@@ -154,6 +154,18 @@ pub struct StatusReport {
     /// populates it via [`fill_harness_mcp`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harness_mcp: Vec<HarnessMcpStatus>,
+    /// Issue #423 (review follow-up): the onboarding panel's
+    /// configured-harness signal, resolved from the scope's effective harness
+    /// list INDEPENDENT of `project_root` — `harness_mcp` above is
+    /// project-gated (its integration check needs a project root), so a
+    /// `--scope global` configuration would otherwise read as "no harness"
+    /// from any non-project cwd and pin a stale `harness use` step (and
+    /// diverge from doctor's onboarding nudge, which reads the un-gated
+    /// effective list). `serde(skip)`: human-renderer input only, the `--json`
+    /// wire shape is untouched. `assemble_report` leaves it `false`; `run`
+    /// populates it via [`fill_harness_configured`].
+    #[serde(skip)]
+    pub harness_configured: bool,
     /// Phase 2 (native-agent expansion) / Task 14: the number of enabled
     /// agents that have no native representation on any rules-only harness in
     /// the current effective harness list. `0` when there are no rules-only
@@ -204,6 +216,10 @@ pub(crate) fn full_report(
     // Phase 11 / US5 (T065): augment with per-harness MCP integration state
     // (needs the ResolvedScope's project root, which `assemble_report` lacks).
     fill_harness_mcp(&mut report, scope, paths);
+    // Issue #423: the onboarding panel's configured-harness signal — the same
+    // effective-list resolution `fill_harness_mcp` consumes, but NOT gated on
+    // a project root (a `--scope global` configuration counts from any cwd).
+    fill_harness_configured(&mut report, scope, paths);
     // Phase 2 / Task 14: populate the unrepresented-agents count (needs the
     // effective harness list and DB — read-only, best-effort).
     fill_unrepresented_agents(&mut report, scope, paths);
@@ -290,6 +306,9 @@ pub fn assemble_report(
         // `run` fills this via `fill_harness_mcp` (needs the project root /
         // effective list, which `Scope` alone doesn't carry).
         harness_mcp: Vec::new(),
+        // `run` fills this via `fill_harness_configured` (issue #423): the
+        // un-gated effective-list signal for the onboarding panel.
+        harness_configured: false,
         // `run` fills this via `fill_unrepresented_agents` (read-only).
         unrepresented_agents: 0,
         // `run` fills this via `fill_hook_translation_harnesses` (read-only).
@@ -332,6 +351,18 @@ fn fill_harness_mcp(report: &mut StatusReport, scope: &ResolvedScope, paths: &Pa
             state: m.health.as_str().to_owned(),
         })
         .collect();
+}
+
+/// Issue #423 (review follow-up): populate the onboarding panel's
+/// configured-harness signal from the scope's resolved effective harness list,
+/// independent of `project_root`. Mirrors doctor's onboarding nudge (whose
+/// `harness_configured` reads the un-gated effective list), so status and
+/// doctor cannot diverge on "is a harness configured". Read-only, best-effort:
+/// an unresolvable effective list reads as not-configured (the nudge renders —
+/// the conservative direction for an onboarding hint).
+fn fill_harness_configured(report: &mut StatusReport, scope: &ResolvedScope, paths: &Paths) {
+    report.harness_configured =
+        resolve_effective_for_status(scope, paths).is_some_and(|l| !l.harnesses.is_empty());
 }
 
 /// Phase 2 / Task 14: populate `report.unrepresented_agents` with the count of
@@ -865,21 +896,36 @@ fn render_panel(report: &StatusReport) -> Vec<String> {
         lines.push(format!("{} ~/.tome/config.toml", key("")));
     }
 
-    // Issue #283: fresh-install onboarding. When no catalog is enrolled, a first
-    // run reads as either a bare `[fail]` (models not downloaded → Unhealthy) or
-    // a silent "healthy with zeros". Render a distinct, friendly "Getting
-    // started" block pointing at the real first-run flow so the install reads
-    // as "here's how to begin". The steps come from `cli::SETUP_STEPS` — the
-    // same source `tome --help`'s quickstart renders — so the two surfaces
-    // cannot drift again (#422). HUMAN-mode only — `render_panel` feeds the
-    // human emitter; `--json` goes through `write_json` and is unaffected (the
-    // machine fields `catalogs_enrolled` / `entries` already carry this state
-    // for scripting).
-    if report.catalogs_enrolled == 0 {
+    // Issue #283 + #423: onboarding for EVERY partial-setup state, not only
+    // "no catalogs". The outstanding steps come from
+    // `cli::outstanding_setup_steps`, which selects from the same
+    // `cli::SETUP_STEPS` list `tome --help`'s quickstart renders — so the two
+    // surfaces cannot drift again (#422) and a partially-set-up install sees
+    // ONLY what's left (no catalogs / nothing enabled / no harness
+    // configured). `harness_configured` is the panel's configured-harness
+    // signal — resolved from the effective list WITHOUT the project-root gate
+    // `harness_mcp` carries (review follow-up: a `--scope global` harness
+    // counts from any cwd). HUMAN-mode only — `render_panel` feeds the human
+    // emitter; `--json` goes through `write_json` and is unaffected (the
+    // machine fields `catalogs_enrolled` / `entries` / `harness_mcp` already
+    // carry this state for scripting).
+    let outstanding = crate::cli::outstanding_setup_steps(
+        report.catalogs_enrolled,
+        report.index.plugins_enabled,
+        report.harness_configured,
+    );
+    if !outstanding.is_empty() {
         lines.push(String::new());
         lines.push(colour::dim("Getting started"));
-        lines.push(colour::bold("Not set up yet — start with:"));
-        for (i, step) in crate::cli::SETUP_STEPS.iter().enumerate() {
+        // A truly fresh install keeps the historical call-to-action; a
+        // partially-set-up one is honest about being mid-path.
+        let heading = if outstanding.len() == crate::cli::SETUP_STEPS.len() {
+            "Not set up yet — start with:"
+        } else {
+            "Setup incomplete — next steps:"
+        };
+        lines.push(colour::bold(heading));
+        for (i, step) in outstanding.iter().enumerate() {
             lines.push(format!("  {}. {}", i + 1, colour::label(step.command)));
         }
     }
@@ -1159,6 +1205,7 @@ mod harness_mcp_status_tests {
             reindexed_at: None,
             models_on_disk_bytes: 0,
             harness_mcp,
+            harness_configured: false,
             unrepresented_agents: 0,
             hook_translation_harnesses: 0,
             unrepresented_hooks: 0,
@@ -1325,19 +1372,74 @@ mod harness_mcp_status_tests {
         }
     }
 
-    /// Issue #283: a set-up install (>=1 catalog enrolled) does NOT render the
-    /// onboarding block — the nudge is scoped to the not-set-up state only.
+    /// Issue #423: catalogs enrolled but nothing enabled and no harness
+    /// configured → the block shows ONLY the outstanding steps (enable /
+    /// harness / query), never `catalog add`, under the mid-path heading.
     #[test]
-    fn panel_omits_onboarding_when_catalogs_present() {
+    fn panel_partial_state_shows_only_outstanding_steps() {
         let mut report = base_report(Vec::new());
+        report.catalogs_enrolled = 2; // step 1 done
+        let panel = render_panel(&report).join("\n");
+        assert!(panel.contains("Getting started"), "{panel}");
+        assert!(
+            panel.contains("Setup incomplete — next steps:"),
+            "mid-path heading expected: {panel}",
+        );
+        assert!(
+            !panel.contains("tome catalog add"),
+            "a done step must not render: {panel}",
+        );
+        let steps = ["tome plugin enable", "tome harness use", "tome query"];
+        let mut cursor = 0;
+        for (i, step) in steps.iter().enumerate() {
+            let at = panel[cursor..].find(step).unwrap_or_else(|| {
+                panic!("step {} (`{step}`) missing or out of order: {panel}", i + 1)
+            });
+            cursor += at + step.len();
+        }
+        // Renumbered over the subset: the first outstanding step is "1.".
+        assert!(
+            panel.contains("1. tome plugin enable"),
+            "steps renumber over the subset: {panel}",
+        );
+    }
+
+    /// Issue #423: plugins enabled + catalogs enrolled, but NO configured
+    /// harness → exactly the `harness use` step (query already works).
+    #[test]
+    fn panel_harness_only_state_shows_exactly_harness_step() {
+        let mut report = base_report(Vec::new()); // harness_configured: false
+        report.catalogs_enrolled = 1;
+        report.index.plugins_enabled = 3;
+        let panel = render_panel(&report).join("\n");
+        assert!(panel.contains("Getting started"), "{panel}");
+        assert!(panel.contains("1. tome harness use"), "{panel}");
+        for done in ["tome catalog add", "tome plugin enable", "tome query"] {
+            assert!(
+                !panel.contains(done),
+                "done step `{done}` must not render: {panel}",
+            );
+        }
+    }
+
+    /// Issue #423: a fully-set-up install (catalogs + enabled plugins + a
+    /// configured harness) renders NO onboarding block at all.
+    #[test]
+    fn panel_omits_onboarding_when_fully_set_up() {
+        let mut report = base_report(vec![HarnessMcpStatus {
+            harness: "cursor".to_string(),
+            state: "ok".to_string(),
+        }]);
+        report.harness_configured = true;
         report.catalogs_enrolled = 2;
+        report.index.plugins_enabled = 1;
         let panel = render_panel(&report).join("\n");
         assert!(
             !panel.contains("Getting started"),
             "onboarding block must be absent once set up: {panel}",
         );
         assert!(
-            !panel.contains("Not set up yet"),
+            !panel.contains("Not set up yet") && !panel.contains("Setup incomplete"),
             "onboarding call-to-action must be absent once set up: {panel}",
         );
     }
