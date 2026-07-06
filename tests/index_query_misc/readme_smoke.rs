@@ -318,13 +318,23 @@ fn getting_started_workspace_and_harness_flow_resolves() {
     assert_ok("sync", &sync);
 }
 
-/// Assert the three quickstart steps appear somewhere in `text`.
+/// Assert the four quickstart steps (#422: catalog add → plugin enable →
+/// harness use → query, plus the model-download caveat) appear in `text`.
 fn assert_quickstart_present(surface: &str, text: &str) {
     assert!(
         text.contains("Getting started:"),
         "expected a getting-started block on {surface}, got:\n{text}",
     );
-    for needle in ["tome catalog add", "tome plugin enable", "tome query"] {
+    for needle in [
+        "tome catalog add",
+        "tome plugin enable",
+        "tome harness use",
+        "tome query",
+        // The step-2 caveat: the first enable triggers a model download whose
+        // size depends on the configured profile.
+        "model download",
+        "[models] profile",
+    ] {
         assert!(
             text.contains(needle),
             "quickstart on {surface} must mention `{needle}`, got:\n{text}",
@@ -335,8 +345,8 @@ fn assert_quickstart_present(surface: &str, text: &str) {
 #[test]
 fn tome_help_flag_shows_getting_started_quickstart_on_stdout() {
     // #293: `tome --help` prints help to STDOUT and exits 0 (clap convention),
-    // and the help must carry the 3-step getting-started block so a first-time
-    // user has an order to follow, not just a flat command list.
+    // and the help must carry the four-step getting-started block so a
+    // first-time user has an order to follow, not just a flat command list.
     let env = ToolEnv::new();
     let out = env.cmd().args(["--help"]).output().expect("spawn --help");
     assert_ok("--help", &out);

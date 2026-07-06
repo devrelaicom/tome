@@ -15,30 +15,90 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// #293: a concise getting-started block appended to clap's help text. The
-/// flat command list is a dead end for a first-time user; these three steps are
-/// the actual happy path (add a catalog → enable a plugin → query).
+/// One step of the canonical first-run path (see [`SETUP_STEPS`]).
+pub(crate) struct SetupStep {
+    /// The command the user runs, with placeholder arguments.
+    pub(crate) command: &'static str,
+    /// One-line summary rendered beside the command in `--help`.
+    pub(crate) summary: &'static str,
+    /// Optional caveat rendered as an indented continuation line in `--help`
+    /// (`tome status`'s panel renders commands only and skips it).
+    pub(crate) note: Option<&'static str>,
+}
+
+/// #293 / #422: the canonical four-step first-run path. This is the SINGLE
+/// source that both `tome --help`'s getting-started block ([`quickstart`],
+/// below) and `tome status`'s "Getting started" panel render — the two
+/// hand-maintained copies drifted once already (#422: help stopped at `query`
+/// with no `harness use` step and no model-download warning, while status
+/// stopped at `harness use` with no `query`), so the step list now lives in
+/// exactly one place.
+pub(crate) const SETUP_STEPS: [SetupStep; 4] = [
+    SetupStep {
+        command: "tome catalog add <source>",
+        summary: "Register a catalog (a git URL or local path)",
+        note: None,
+    },
+    SetupStep {
+        command: "tome plugin enable <catalog>/<plugin>",
+        summary: "Enable a plugin and index its skills",
+        note: Some(
+            "(the first enable offers a model download; size depends on `[models] profile`)",
+        ),
+    },
+    SetupStep {
+        command: "tome harness use <name>",
+        summary: "Wire Tome into a detected coding harness",
+        note: None,
+    },
+    SetupStep {
+        command: "tome query \"<what you need>\"",
+        summary: "Search enabled skills by intent",
+        note: None,
+    },
+];
+
+/// #293: the concise getting-started block appended to clap's help text. The
+/// flat command list is a dead end for a first-time user; the [`SETUP_STEPS`]
+/// are the actual happy path (add a catalog → enable a plugin → wire a
+/// harness → query).
 ///
 /// clap renders this on BOTH surfaces that show help, but they differ in the
 /// clap convention this respects: `tome --help` prints help to STDOUT and exits
 /// 0, while bare `tome` (missing the required subcommand) prints help to STDERR
 /// and exits 2 (a usage error, per constitution principle II). Either way the
 /// user sees the quickstart.
-const QUICKSTART: &str = "\
-Getting started:
-  1. tome catalog add <source>              Register a catalog (a git URL or local path)
-  2. tome plugin enable <catalog>/<plugin>  Enable a plugin and index its skills
-  3. tome query \"<what you need>\"            Search enabled skills by intent
-
-Or run `tome init` for a guided, step-by-step setup of the same flow.
-Run `tome <command> --help` for details on any command.";
+fn quickstart() -> String {
+    let width = SETUP_STEPS
+        .iter()
+        .map(|s| s.command.len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::from("Getting started:\n");
+    for (i, step) in SETUP_STEPS.iter().enumerate() {
+        out.push_str(&format!(
+            "  {}. {:<width$}  {}\n",
+            i + 1,
+            step.command,
+            step.summary,
+        ));
+        if let Some(note) = step.note {
+            out.push_str(&format!("     {:<width$}  {}\n", "", note));
+        }
+    }
+    out.push_str(
+        "\nOr run `tome init` for a guided, step-by-step setup of the same flow.\n\
+         Run `tome <command> --help` for details on any command.",
+    );
+    out
+}
 
 #[derive(Debug, Parser)]
 #[command(
     name = "tome",
     about,
     long_about = None,
-    after_help = QUICKSTART,
+    after_help = quickstart(),
     // `--version` is intercepted by a pre-parse hook in `main.rs` so the
     // output can include embedder + reranker identities and honour
     // `--json`. clap's auto handler can't do either, hence the override.

@@ -632,6 +632,8 @@ fn status_human_shows_onboarding_when_no_catalogs() {
         "step 2 missing; got:\n{s}"
     );
     assert!(s.contains("tome harness use"), "step 3 missing; got:\n{s}");
+    // #422: the panel renders the same four-step flow as `tome --help`.
+    assert!(s.contains("tome query"), "step 4 missing; got:\n{s}");
 }
 
 /// Issue #283: the onboarding line is HUMAN-only. `--json status` on the same

@@ -857,24 +857,20 @@ fn render_panel(report: &StatusReport) -> Vec<String> {
     // Issue #283: fresh-install onboarding. When no catalog is enrolled, a first
     // run reads as either a bare `[fail]` (models not downloaded → Unhealthy) or
     // a silent "healthy with zeros". Render a distinct, friendly "Getting
-    // started" block pointing at the real first-run flow (`tome catalog add` →
-    // `tome plugin enable` → `tome harness use`) so the install reads as "here's
-    // how to begin". HUMAN-mode only — `render_panel` feeds the human emitter;
-    // `--json` goes through `write_json` and is unaffected (the machine fields
-    // `catalogs_enrolled` / `entries` already carry this state for scripting).
+    // started" block pointing at the real first-run flow so the install reads
+    // as "here's how to begin". The steps come from `cli::SETUP_STEPS` — the
+    // same source `tome --help`'s quickstart renders — so the two surfaces
+    // cannot drift again (#422). HUMAN-mode only — `render_panel` feeds the
+    // human emitter; `--json` goes through `write_json` and is unaffected (the
+    // machine fields `catalogs_enrolled` / `entries` already carry this state
+    // for scripting).
     if report.catalogs_enrolled == 0 {
         lines.push(String::new());
         lines.push(colour::dim("Getting started"));
         lines.push(colour::bold("Not set up yet — start with:"));
-        lines.push(format!(
-            "  1. {}",
-            colour::label("tome catalog add <source>")
-        ));
-        lines.push(format!(
-            "  2. {}",
-            colour::label("tome plugin enable <catalog>/<plugin>")
-        ));
-        lines.push(format!("  3. {}", colour::label("tome harness use <name>")));
+        for (i, step) in crate::cli::SETUP_STEPS.iter().enumerate() {
+            lines.push(format!("  {}. {}", i + 1, colour::label(step.command)));
+        }
     }
 
     lines.push(String::new());
@@ -1301,19 +1297,21 @@ mod harness_mcp_status_tests {
             panel.contains("Not set up yet"),
             "onboarding call-to-action missing: {panel}",
         );
-        // The three real first-run steps, in order.
-        assert!(
-            panel.contains("tome catalog add"),
-            "step 1 missing: {panel}",
-        );
-        assert!(
-            panel.contains("tome plugin enable"),
-            "step 2 missing: {panel}",
-        );
-        assert!(
-            panel.contains("tome harness use"),
-            "step 3 missing: {panel}",
-        );
+        // The four real first-run steps — the shared `cli::SETUP_STEPS` source
+        // — rendered in order (#422: the same list `tome --help` shows).
+        let steps = [
+            "tome catalog add",
+            "tome plugin enable",
+            "tome harness use",
+            "tome query",
+        ];
+        let mut cursor = 0;
+        for (i, step) in steps.iter().enumerate() {
+            let at = panel[cursor..].find(step).unwrap_or_else(|| {
+                panic!("step {} (`{step}`) missing or out of order: {panel}", i + 1)
+            });
+            cursor += at + step.len();
+        }
     }
 
     /// Issue #283: a set-up install (>=1 catalog enrolled) does NOT render the
