@@ -934,6 +934,7 @@ fn emit_json(
             // explicitly. The `~` shorthand is human-mode only.
             path: &s.candidate.path,
             scoring,
+            name: &s.candidate.name,
         })
         .collect();
 
@@ -955,6 +956,14 @@ struct JsonEnvelope<'a> {
     reranker_drift: Option<&'a str>,
 }
 
+/// One `--json` result row.
+///
+/// #441: `skill` and `name` are ALIASES carrying the identical entry name.
+/// The human table header says `Name` (the row can be a skill, command, or
+/// agent — see the `Type` column, #304), so `name` is the canonical field;
+/// `skill` predates the rename and is kept for back-compat. `name` is
+/// serialised LAST so the pre-#441 byte-stable output only gains a trailing
+/// field (field order here IS the wire order).
 #[derive(Serialize)]
 struct JsonResult<'a> {
     catalog: &'a str,
@@ -964,6 +973,7 @@ struct JsonResult<'a> {
     score: f32,
     path: &'a str,
     scoring: &'a str,
+    name: &'a str,
 }
 
 /// Format a score with four decimals. Reranker logits can be negative or
@@ -1182,6 +1192,26 @@ mod tests {
                 "`Type` column must render `{kind}`, got:\n{rendered}",
             );
         }
+    }
+
+    /// #441: byte-stable wire pin for one `--json` result row. `skill`
+    /// (legacy) and `name` (canonical — it matches the human table's `Name`
+    /// header) both carry the entry name; `name` rides LAST so pre-#441
+    /// consumers observe a purely additive change.
+    #[test]
+    fn json_result_row_wire_shape_is_pinned() {
+        let row = JsonResult {
+            catalog: "acme",
+            plugin: "plug",
+            skill: "reset-counter",
+            plugin_version: "1.0.0",
+            score: 0.5,
+            path: "/abs/SKILL.md",
+            scoring: "reranked",
+            name: "reset-counter",
+        };
+        let expected = r#"{"catalog":"acme","plugin":"plug","skill":"reset-counter","plugin_version":"1.0.0","score":0.5,"path":"/abs/SKILL.md","scoring":"reranked","name":"reset-counter"}"#;
+        assert_eq!(serde_json::to_string(&row).unwrap(), expected);
     }
 
     #[test]
