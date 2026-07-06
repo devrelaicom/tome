@@ -160,6 +160,18 @@ fn drive_round_trip(child: &mut Child, deadline: Instant) -> Result<u32, String>
         }
     });
 
+    // Issue #478: a stdin-write failure is NOT immediately fatal. A
+    // fast-exiting server can close its stdin before our writes land (EPIPE)
+    // while its EXIT is the real story — bailing on the write raced the
+    // child's death and made the reported class flap between "write to server
+    // stdin failed" and "exited before responding". Record the first write
+    // failure and fall through to the response/exit detection: a dead child
+    // classifies via the reader channel's disconnect ("server exited before
+    // responding…"), a still-running server that merely closed stdin via the
+    // timeout — one deterministic classification either way, with the write
+    // failure appended as context.
+    let mut write_failure: Option<String> = None;
+
     let init = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -170,8 +182,9 @@ fn drive_round_trip(child: &mut Child, deadline: Instant) -> Result<u32, String>
             "clientInfo": {"name": "tome-doctor", "version": env!("CARGO_PKG_VERSION")},
         },
     });
-    write_line(&mut stdin, &init)?;
-    let init_response = await_response(&rx, 1, deadline)?;
+    send_line(&mut stdin, &init, &mut write_failure);
+    let init_response =
+        await_response(&rx, 1, deadline).map_err(|e| with_write_context(e, &write_failure))?;
     if init_response.get("result").is_none() {
         return Err(format!(
             "initialize returned an error: {}",
@@ -186,15 +199,16 @@ fn drive_round_trip(child: &mut Child, deadline: Instant) -> Result<u32, String>
         "jsonrpc": "2.0",
         "method": "notifications/initialized",
     });
-    write_line(&mut stdin, &initialized)?;
+    send_line(&mut stdin, &initialized, &mut write_failure);
     let tools_list = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/list",
     });
-    write_line(&mut stdin, &tools_list)?;
+    send_line(&mut stdin, &tools_list, &mut write_failure);
 
-    let tools_response = await_response(&rx, 2, deadline)?;
+    let tools_response =
+        await_response(&rx, 2, deadline).map_err(|e| with_write_context(e, &write_failure))?;
     let tools = tools_response
         .get("result")
         .and_then(|r| r.get("tools"))
@@ -209,6 +223,31 @@ fn drive_round_trip(child: &mut Child, deadline: Instant) -> Result<u32, String>
             )
         })?;
     Ok(u32::try_from(tools.len()).unwrap_or(u32::MAX))
+}
+
+/// [`write_line`] with issue-#478 fall-through semantics: the FIRST stdin
+/// write failure is recorded, never propagated — classification stays with
+/// the response/exit-detection machinery.
+fn send_line(
+    stdin: &mut impl Write,
+    message: &serde_json::Value,
+    write_failure: &mut Option<String>,
+) {
+    if let Err(e) = write_line(stdin, message)
+        && write_failure.is_none()
+    {
+        *write_failure = Some(e);
+    }
+}
+
+/// Append the recorded stdin-write failure (if any) to an await-side failure
+/// reason, so the EPIPE context still surfaces without owning the
+/// classification (issue #478).
+fn with_write_context(reason: String, write_failure: &Option<String>) -> String {
+    match write_failure {
+        Some(w) => format!("{reason} ({w})"),
+        None => reason,
+    }
 }
 
 fn write_line(stdin: &mut impl Write, message: &serde_json::Value) -> Result<(), String> {
