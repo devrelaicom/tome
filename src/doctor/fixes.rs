@@ -588,19 +588,48 @@ fn repair_schema(paths: &Paths, _scope: &Scope) -> Result<(), TomeError> {
     Ok(())
 }
 
-/// `true` when the report still has `auto_fixable: false` suggestions
-/// after `--fix` ran. Drives the exit-75 path.
+/// The single predicate deciding whether a suggested fix counts as
+/// "remaining manual work" for the exit-75 gate. Shared by
+/// [`has_remaining_manual_fixes`] and the command layer's error-label scan
+/// (issue #283: the two scans MUST agree, or the exit-75 error names a fix
+/// that was explicitly not supposed to block).
 ///
-/// Issue #283: `Subsystem::Onboarding` nudges (no catalog / no plugins / no
-/// harness on a fresh install) are excluded — they are informational
-/// setup guidance, not "broken" state, so they must never flip a pristine
-/// install into a spurious `DoctorFixNotSafe` (exit 75). Every genuine
-/// non-auto-fixable subsystem still counts.
+/// Excluded classes:
+/// - Issue #283: `Subsystem::Onboarding` nudges (no catalog / no plugins /
+///   no harness on a fresh install) — informational setup guidance, not
+///   "broken" state, so they must never flip a pristine install into a
+///   spurious `DoctorFixNotSafe` (exit 75).
+/// - Issue #427: `HarnessMcp` fixes for a `Manual`/`Unverified` harness —
+///   those states can never clear (a manual-only harness has no file for
+///   doctor to observe; an adapter harness is unverifiable by design), so
+///   counting them would make `--fix` exit 75 forever on a healthy install.
+pub fn is_blocking_manual_fix(report: &DoctorReport, fix: &crate::doctor::SuggestedFix) -> bool {
+    use crate::doctor::{Subsystem, SubsystemHealth};
+    if fix.auto_fixable || fix.subsystem == Subsystem::Onboarding {
+        return false;
+    }
+    if let Subsystem::HarnessMcp(name) = &fix.subsystem
+        && report.harness_mcp.iter().any(|h| {
+            h.harness == *name
+                && matches!(
+                    h.health,
+                    SubsystemHealth::Manual | SubsystemHealth::Unverified
+                )
+        })
+    {
+        return false;
+    }
+    true
+}
+
+/// `true` when the report still has `auto_fixable: false` suggestions
+/// after `--fix` ran. Drives the exit-75 path. See
+/// [`is_blocking_manual_fix`] for the exclusions.
 pub fn has_remaining_manual_fixes(report: &DoctorReport) -> bool {
     report
         .suggested_fixes
         .iter()
-        .any(|f| !f.auto_fixable && f.subsystem != crate::doctor::Subsystem::Onboarding)
+        .any(|f| is_blocking_manual_fix(report, f))
 }
 
 /// Re-derive the suggested-fix list + classification after `--fix` has

@@ -157,11 +157,13 @@ fn manual_and_unverified_wire_strings() {
     assert_eq!(SubsystemHealth::Unverified.as_str(), "unverified");
 }
 
-/// MINOR (US5 closeout): the `Manual`/`Unverified` states flow all the way
-/// through `doctor::assemble_report` — they appear in `report.harness_mcp`,
-/// they contribute NO `suggested_fixes` entry (they are not failures), and
-/// `report.overall` is NOT degraded by them. Mirrors `doctor_mcp_states_p11`'s
-/// SSOT-level pins at the assembled-report level.
+/// MINOR (US5 closeout) + issue #427: the `Manual`/`Unverified` states flow
+/// all the way through `doctor::assemble_report` — they appear in
+/// `report.harness_mcp`, they each contribute an INFORMATIONAL
+/// `suggested_fixes` pointer at `tome harness info <name>` (non-auto-fixable,
+/// excluded from the exit-75 gate), and `report.overall` is NOT degraded by
+/// them. Mirrors `doctor_mcp_states_p11`'s SSOT-level pins at the
+/// assembled-report level.
 #[test]
 fn assemble_report_surfaces_manual_and_unverified_without_degrading() {
     let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
@@ -226,13 +228,40 @@ fn assemble_report_surfaces_manual_and_unverified_without_degrading() {
     assert_eq!(find("pi"), SubsystemHealth::Unverified);
     assert_eq!(find("jetbrains-ai"), SubsystemHealth::Manual);
 
-    // No suggested fix targets either harness's MCP subsystem.
+    // Issue #427: each harness's MCP subsystem gets exactly one INFORMATIONAL
+    // suggested fix — non-auto-fixable, pointing at `tome harness info <name>`.
     for name in ["pi", "jetbrains-ai"] {
         let wire = format!("harness-mcp:{name}");
-        assert!(
-            !report.suggested_fixes.iter().any(|f| f.subsystem == wire),
-            "{name} manual/unverified must yield NO suggested fix; got {:?}",
+        let fixes: Vec<_> = report
+            .suggested_fixes
+            .iter()
+            .filter(|f| f.subsystem.to_wire_string() == wire)
+            .collect();
+        assert_eq!(
+            fixes.len(),
+            1,
+            "{name} manual/unverified must yield exactly ONE pointer fix; got {:?}",
             report.suggested_fixes,
+        );
+        assert!(!fixes[0].auto_fixable, "{name}: nothing --fix can run");
+        assert!(
+            fixes[0]
+                .command
+                .contains(&format!("tome harness info {name}")),
+            "{name}: the pointer names the recovery command; got {:?}",
+            fixes[0].command,
+        );
+    }
+    // The pointers are informational — they must never flip a `--fix` run
+    // into exit 75 (mirrors the issue #283 onboarding exclusion).
+    for fix in report
+        .suggested_fixes
+        .iter()
+        .filter(|f| f.subsystem.to_wire_string().starts_with("harness-mcp:"))
+    {
+        assert!(
+            !tome::doctor::fixes::is_blocking_manual_fix(&report, fix),
+            "manual/unverified pointer must not count as remaining manual work: {fix:?}",
         );
     }
 
@@ -251,14 +280,16 @@ fn assemble_report_surfaces_manual_and_unverified_without_degrading() {
         "no harness_mcp entry is in the degrading set; got {:?}",
         report.harness_mcp,
     );
-    // Every suggested fix that DOES exist is non-MCP (rules / binding), never an
-    // MCP fix — manual/unverified are never the cause of any remediation.
+    // Every MCP fix that DOES exist is one of the informational pointers —
+    // manual/unverified never produce a runnable remediation (`tome sync` /
+    // `--fix --force`), only the `harness info` pointer.
     assert!(
         report
             .suggested_fixes
             .iter()
-            .all(|f| !f.subsystem.to_wire_string().starts_with("harness-mcp:")),
-        "manual/unverified must never produce an MCP fix; got {:?}",
+            .filter(|f| f.subsystem.to_wire_string().starts_with("harness-mcp:"))
+            .all(|f| !f.auto_fixable && f.command.contains("tome harness info")),
+        "manual/unverified must only produce the info pointer; got {:?}",
         report.suggested_fixes,
     );
 }

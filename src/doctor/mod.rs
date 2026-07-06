@@ -1284,11 +1284,44 @@ fn build_suggested_fixes(
                     auto_fixable: false,
                 });
             }
-            // Phase 11 / US5: Manual (jetbrains-ai, no file written) and
+            // Issue #427: Manual (jetbrains-ai, no file Tome can write) and
             // Unverified (pi, adapter-dependent) are informational, NOT
-            // failures — no suggested fix; the recovery artifact is
-            // `tome harness info <name>` / `tome harness use <name>`.
-            SubsystemHealth::Manual | SubsystemHealth::Unverified => {}
+            // failures — but the user still deserves a next action, and it
+            // exists: `tome harness info <name>` prints the paste-able MCP
+            // snippet / the manual-registration notice. Both entries are
+            // `auto_fixable: false` (there is nothing `--fix` can run), and
+            // both are excluded from the exit-75 gate because the states can
+            // never clear (see `fixes::is_blocking_manual_fix`).
+            SubsystemHealth::Manual => {
+                out.push(SuggestedFix {
+                    subsystem: Subsystem::HarnessMcp(hm.harness.clone()),
+                    diagnosis: format!(
+                        "Tome cannot write `{}`'s MCP config; the server must be \
+                         registered manually",
+                        hm.harness,
+                    ),
+                    command: format!(
+                        "tome harness info {}  # prints the paste-able MCP snippet",
+                        hm.harness,
+                    ),
+                    auto_fixable: false,
+                });
+            }
+            SubsystemHealth::Unverified => {
+                out.push(SuggestedFix {
+                    subsystem: Subsystem::HarnessMcp(hm.harness.clone()),
+                    diagnosis: format!(
+                        "Tome wrote `{}`'s MCP config but cannot confirm the \
+                         harness loaded it",
+                        hm.harness,
+                    ),
+                    command: format!(
+                        "tome harness info {}  # verify the entry inside the harness",
+                        hm.harness,
+                    ),
+                    auto_fixable: false,
+                });
+            }
         }
     }
     out
@@ -1547,6 +1580,78 @@ mod tests {
         assert!(
             has_remaining_manual_fixes(&report),
             "a genuine non-auto-fixable fix must still count",
+        );
+    }
+
+    /// Issue #427: a `Manual`-state harness (jetbrains-ai — Tome cannot write
+    /// its MCP config) emits a non-auto-fixable suggested fix pointing at
+    /// `tome harness info <name>`; an `Unverified` one (pi) likewise. Neither
+    /// counts as remaining manual work for the exit-75 gate — the states can
+    /// never clear, so counting them would fail `--fix` forever.
+    #[test]
+    fn manual_and_unverified_mcp_states_emit_info_pointer_fixes() {
+        use crate::doctor::fixes::has_remaining_manual_fixes;
+
+        let harness_mcp = vec![
+            HarnessSubsystemReport {
+                harness: "jetbrains-ai".to_owned(),
+                health: SubsystemHealth::Manual,
+            },
+            HarnessSubsystemReport {
+                harness: "pi".to_owned(),
+                health: SubsystemHealth::Unverified,
+            },
+        ];
+        let fixes = build_suggested_fixes(
+            &ok_model(),
+            &ok_model(),
+            &ok_model(),
+            &healthy_index(true),
+            &DriftStatus::None,
+            &[],
+            None,
+            &[],
+            &harness_mcp,
+        );
+
+        let manual = fixes
+            .iter()
+            .find(|f| f.subsystem == Subsystem::HarnessMcp("jetbrains-ai".to_owned()))
+            .expect("Manual state must emit a suggested fix");
+        assert!(!manual.auto_fixable, "nothing --fix can run for Manual");
+        assert!(manual.command.contains("tome harness info jetbrains-ai"));
+        assert!(manual.diagnosis.contains("registered manually"));
+
+        let unverified = fixes
+            .iter()
+            .find(|f| f.subsystem == Subsystem::HarnessMcp("pi".to_owned()))
+            .expect("Unverified state must emit a suggested fix");
+        assert!(!unverified.auto_fixable);
+        assert!(unverified.command.contains("tome harness info pi"));
+        assert!(unverified.diagnosis.contains("cannot confirm"));
+
+        // The pointers are informational — they must not flip `--fix` into
+        // exit 75 (mirrors the issue #283 onboarding exclusion).
+        let mut report = minimal_report();
+        report.harness_mcp = harness_mcp;
+        report.suggested_fixes = fixes;
+        assert!(
+            !has_remaining_manual_fixes(&report),
+            "manual/unverified pointers must not count as remaining manual work",
+        );
+
+        // A Drift-state harness's fix (same subsystem shape, different health)
+        // is untouched by the exclusion: auto-fixable, so still not "manual",
+        // but a genuine non-auto-fixable subsystem alongside still counts.
+        report.suggested_fixes.push(SuggestedFix {
+            subsystem: Subsystem::Drift,
+            diagnosis: "drift".to_owned(),
+            command: "tome reindex --force".to_owned(),
+            auto_fixable: false,
+        });
+        assert!(
+            has_remaining_manual_fixes(&report),
+            "a genuine non-auto-fixable fix must still trip the gate",
         );
     }
 
