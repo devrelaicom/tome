@@ -39,6 +39,7 @@ Not set up yet — start with:
   1. tome catalog add <source>
   2. tome plugin enable <catalog>/<plugin>
   3. tome harness use <name>
+  4. tome query "<what you need>"
 ```
 
 This is guidance, not a failure — the health verdict and exit code are
@@ -151,7 +152,7 @@ Empty results carry the same nudge. `tome query` distinguishes an empty corpus
 no-match ("No match — try rephrasing …"), so you know whether to index or to
 rephrase. `tome plugin list` is catalog-aware: it tells you to add a catalog
 when none are enrolled, and to enable a plugin when catalogs exist but none are
-enabled. A bare `tome` or `tome --help` ends with a three-step "Getting started"
+enabled. A bare `tome` or `tome --help` ends with a four-step "Getting started"
 quickstart. All of these are human-only; `--json` is untouched.
 
 ## Common issues
