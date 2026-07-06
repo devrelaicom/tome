@@ -218,7 +218,7 @@ code, signalling "the repair did something, but manual work remains".
 | --- | --- |
 | `--fix` | Apply the safe automatic repairs: re-download missing/corrupt models, re-clone broken catalog caches, forward-migrate the index schema, re-copy project rules, re-run the sync for drifted harnesses. Destructive repairs are never automatic. |
 | `--force` | Override the safe-by-default repair gates (currently: rewrite developer-authored harness MCP `tome` entries on `--fix`). |
-| `--verify` | Rehash installed models against their pinned SHA-256. |
+| `--verify` | Rehash installed models against their pinned SHA-256, and probe each effective harness's registered `tome mcp` server end-to-end (a real `initialize` + `tools/list` round-trip over stdio, bounded by a timeout; failures report the reason and a stderr tail). Network-free but slower. Also enabled by `[doctor] verify_by_default` in `~/.tome/config.toml`. |
 | `--dry-run` | With `--fix`: list the automatic repairs `--fix` would apply, apply nothing, and exit with the read-only health code. An error (exit `2`) without `--fix`. |
 
 ## `tome workspace`

@@ -16,6 +16,7 @@ pub mod cutover;
 pub mod fixes;
 pub mod harness_detect;
 pub mod harness_integration;
+pub mod mcp_probe;
 pub mod meta_drift;
 pub mod orphan_cleanup;
 pub mod report;
@@ -335,6 +336,19 @@ pub fn assemble_report(
     // `--fix`'s `re_assemble` re-applies it (see `commands::doctor`).
     apply_orphan_data_findings(&mut suggested_fixes, orphan_data_dirs.as_ref());
 
+    // Issue #431: hook-dispatch drift findings. One auto-fixable fix per
+    // dispatcher harness whose probed state is not `ok` — `--fix` re-runs the
+    // coalesced per-project harness sync, which re-registers the run-hook
+    // entries and rewrites the manifest. Escalates `overall` to Degraded
+    // (drift, the same class as harness rules/MCP drift). Not part of the
+    // 8-arg classify SSOT, so `--fix`'s `re_assemble` re-applies it via
+    // `reappend_hook_drift_fixes` (see `commands::doctor`).
+    push_hook_drift_fixes(
+        &mut suggested_fixes,
+        &mut overall,
+        hook_translation.as_ref(),
+    );
+
     // Phase 13 (native-agent model-registry): read-only model-registry
     // subsystem report. Always present (baked at minimum). Read-only.
     let model_registry = checks::check_model_registry(paths);
@@ -394,6 +408,21 @@ pub fn assemble_report(
     // with `telemetry: None`) unchanged.
     let telemetry = Some(telemetry::assemble(paths));
 
+    // Issue #434: the end-to-end MCP probe, ONLY under `--verify` (spawns one
+    // real `tome mcp` subprocess per scope-effective harness). The argv comes
+    // from the sync-side SSOT (`harness::sync::expected_tome_entry`) so the
+    // probe tests exactly the command sync registered. Empty effective list →
+    // `None` (key omitted; the minimal-report pin is unchanged).
+    let mcp_probe = if verify {
+        let rows = mcp_probe::probe_effective_harnesses(
+            scope.scope.name(),
+            effective_harness_list.as_ref(),
+        );
+        if rows.is_empty() { None } else { Some(rows) }
+    } else {
+        None
+    };
+
     Ok(DoctorReport {
         tome_version,
         workspace,
@@ -429,6 +458,7 @@ pub fn assemble_report(
         unrepresented_hooks,
         overall,
         suggested_fixes,
+        mcp_probe,
     })
 }
 
@@ -469,6 +499,64 @@ pub(crate) fn reappend_corrupt_index_fix(
 /// product decisions — so a still-not-set-up install keeps its guidance through
 /// `--fix`. `Onboarding` fixes are excluded from the exit-75 gate, so re-adding
 /// them does not change the exit code.
+/// Issue #431: push one auto-fixable `HarnessHooks` fix per dispatcher harness
+/// whose probed dispatch state is not `ok`, escalating `overall` to Degraded
+/// (the same class as harness rules/MCP drift). A `None` report or all-`ok`
+/// states is a no-op, so the byte-stable minimal-report pin is unchanged for a
+/// clean system. Rows without a probed `state` (outside a project context) are
+/// skipped — there is nothing `--fix` could act on from global scope.
+fn push_hook_drift_fixes(
+    out: &mut Vec<SuggestedFix>,
+    overall: &mut DoctorClassification,
+    hook_translation: Option<&report::HookTranslationReport>,
+) {
+    let Some(ht) = hook_translation else {
+        return;
+    };
+    let mut any = false;
+    for h in &ht.per_harness {
+        let Some(state) = h.state.as_deref() else {
+            continue;
+        };
+        if state == "ok" {
+            continue;
+        }
+        any = true;
+        let detail = if h.missing_events.is_empty() {
+            String::new()
+        } else {
+            format!(" (unregistered: {})", h.missing_events.join(", "))
+        };
+        out.push(SuggestedFix {
+            subsystem: Subsystem::HarnessHooks(h.harness.clone()),
+            diagnosis: format!(
+                "plugin-hook dispatch for `{}` is {}{detail}",
+                h.harness,
+                state.replace('_', " "),
+            ),
+            command: "tome sync".to_owned(),
+            auto_fixable: true,
+        });
+    }
+    if any {
+        *overall = escalate_classification(*overall, DoctorClassification::Degraded);
+    }
+}
+
+/// Issue #431: the command-layer re-append after `--fix`'s `re_assemble`
+/// (which rebuilds `suggested_fixes` via the 8-arg SSOT that doesn't know
+/// about hook-dispatch drift). `fixes::apply`'s harness branch refreshes
+/// `report.hook_translation` after the sync, so a healed surface re-appends
+/// nothing and a still-drifted one keeps its finding + Degraded escalation.
+pub(crate) fn reappend_hook_drift_fixes(report: &mut DoctorReport) {
+    let ht = report.hook_translation.clone();
+    push_hook_drift_fixes(
+        &mut report.suggested_fixes,
+        &mut report.overall,
+        ht.as_ref(),
+    );
+}
+
 pub(crate) fn reappend_onboarding_fixes(report: &mut DoctorReport) {
     let harness_configured = report
         .effective_harness_list
@@ -770,7 +858,14 @@ fn build_phase6_surfaces(
     // hook-translation surface is gated on the SAME scope-effective set as
     // `status`, not the full module registry.
     let cfg_hooks = crate::config::load_or_default(paths);
-    let ht = checks::build_hook_translation_report(paths, workspace_name, &cfg_hooks, effective);
+    let ht = checks::build_hook_translation_report(
+        paths,
+        workspace_name,
+        &cfg_hooks,
+        effective,
+        home,
+        scope.project_root.as_deref(),
+    );
     out.hook_translation = if ht.per_harness.is_empty() {
         None
     } else {
@@ -1942,6 +2037,52 @@ mod tests {
         );
     }
 
+    /// Issue #431: a non-`ok` probed dispatch state pushes one auto-fixable
+    /// `harness-hooks:<name>` fix and escalates a clean report to Degraded
+    /// (never downgrades); `ok`/unprobed rows push nothing.
+    #[test]
+    fn push_hook_drift_fixes_degrades_and_names_the_harness() {
+        let row = |state: Option<&str>, missing: Vec<&str>| report::HookHarnessStatus {
+            harness: "cursor".to_owned(),
+            enabled: true,
+            registered_events: vec![],
+            dropped_to_guardrails: vec![],
+            manifest_stale: false,
+            trust_prompt_note: false,
+            state: state.map(str::to_owned),
+            missing_events: missing.into_iter().map(str::to_owned).collect(),
+        };
+
+        // ok + unprobed rows → no fix, overall untouched.
+        let clean = report::HookTranslationReport {
+            per_harness: vec![row(Some("ok"), vec![]), row(None, vec![])],
+        };
+        let mut fixes = Vec::new();
+        let mut overall = DoctorClassification::Ok;
+        push_hook_drift_fixes(&mut fixes, &mut overall, Some(&clean));
+        assert!(fixes.is_empty(), "{fixes:?}");
+        assert_eq!(overall, DoctorClassification::Ok);
+
+        // drift → one auto-fixable harness-hooks fix + Degraded.
+        let drifted = report::HookTranslationReport {
+            per_harness: vec![row(Some("drift"), vec!["PreToolUse"])],
+        };
+        let mut fixes = Vec::new();
+        let mut overall = DoctorClassification::Ok;
+        push_hook_drift_fixes(&mut fixes, &mut overall, Some(&drifted));
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].subsystem.to_wire_string(), "harness-hooks:cursor");
+        assert!(fixes[0].auto_fixable);
+        assert!(fixes[0].diagnosis.contains("PreToolUse"), "{fixes:?}");
+        assert_eq!(overall, DoctorClassification::Degraded);
+
+        // Never downgrades an already-Unhealthy report.
+        let mut overall = DoctorClassification::Unhealthy;
+        let mut fixes = Vec::new();
+        push_hook_drift_fixes(&mut fixes, &mut overall, Some(&drifted));
+        assert_eq!(overall, DoctorClassification::Unhealthy);
+    }
+
     #[test]
     fn escalate_classification_is_monotone_max() {
         use DoctorClassification::*;
@@ -2021,6 +2162,7 @@ mod tests {
             },
             hook_translation: None,
             unrepresented_hooks: None,
+            mcp_probe: None,
             overall: DoctorClassification::Ok,
             suggested_fixes: Vec::new(),
         }

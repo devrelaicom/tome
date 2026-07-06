@@ -195,6 +195,13 @@ pub fn run(
         // never change the exit code.
         doctor::reappend_onboarding_fixes(&mut report);
 
+        // Issue #431: `re_assemble` doesn't know about hook-dispatch drift
+        // either. `fixes::apply`'s harness branch refreshed
+        // `report.hook_translation` after the sync, so a healed dispatch
+        // surface re-appends nothing here and a still-drifted one keeps its
+        // finding + the Degraded escalation.
+        doctor::reappend_hook_drift_fixes(&mut report);
+
         // `re_assemble` rebuilds `suggested_fixes` + `overall` via the SSOT,
         // which doesn't know about the config-parse finding. `doctor --fix`
         // NEVER rewrites the user-authored `config.toml`, so a malformed config
@@ -890,6 +897,26 @@ fn build_sections(report: &DoctorReport, g: &Glyphs) -> Vec<Section> {
                     "    {warn} manifest stale — run `tome sync` to reconcile",
                 );
             }
+            // Issue #431: the probed dispatch drift verdict (project scope
+            // only). `ok` stays silent — the row's registered list already
+            // says everything. A non-`ok` state marks the SECTION Warn
+            // (mirroring `manifest_stale` above) so the drift line survives
+            // the #430 all-ok collapse.
+            if let Some(probe_state) = h.state.as_deref()
+                && probe_state != "ok"
+            {
+                state = SectionState::Warn;
+                let missing = if h.missing_events.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (unregistered: {})", h.missing_events.join(", "))
+                };
+                let _ = writeln!(
+                    s,
+                    "    {warn} dispatch {}{missing} — run `tome sync` (or `tome doctor --fix`)",
+                    probe_state.replace('_', " "),
+                );
+            }
             if h.trust_prompt_note {
                 let _ = writeln!(
                     s,
@@ -1102,6 +1129,38 @@ fn build_sections(report: &DoctorReport, g: &Glyphs) -> Vec<Section> {
         } else {
             SectionState::Ok
         };
+        sections.push(Section { state, body: s });
+    }
+
+    // ---- MCP probe (issue #434, --verify / [doctor] verify_by_default) -------
+    // One line per (workspace, server) probed. A FAILED probe marks the
+    // section Fail so it renders ahead of the warnings and can never be
+    // collapsed away; an all-ok probe participates in the normal ok collapse
+    // (the JSON `mcp_probe` field still carries the detail).
+    if let Some(probe) = &report.mcp_probe {
+        let mut s = String::new();
+        let mut state = SectionState::Ok;
+        let _ = writeln!(s, "MCP probe (end-to-end, --verify):");
+        for p in probe {
+            if p.ok {
+                let tools = p.tools.map(|t| format!(" ({t} tools)")).unwrap_or_default();
+                let _ = writeln!(
+                    s,
+                    "  {ok} {} (workspace {}) — initialize + tools/list ok{tools}",
+                    p.harness, p.workspace,
+                );
+            } else {
+                state = SectionState::Fail;
+                let _ = writeln!(
+                    s,
+                    "  {fail} {} (workspace {}) — {}",
+                    p.harness,
+                    p.workspace,
+                    p.error.as_deref().unwrap_or("failed"),
+                );
+            }
+        }
+        let _ = writeln!(s);
         sections.push(Section { state, body: s });
     }
 

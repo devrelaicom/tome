@@ -349,6 +349,7 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         hook_translation: None,
         // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         unrepresented_hooks: None,
+        mcp_probe: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -575,6 +576,7 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
         hook_translation: None,
         // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         unrepresented_hooks: None,
+        mcp_probe: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -731,6 +733,7 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
         hook_translation: None,
         // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         unrepresented_hooks: None,
+        mcp_probe: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -880,6 +883,7 @@ fn doctor_json_unrepresented_agents_populated_wire_shape() {
         hook_translation: None,
         // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         unrepresented_hooks: None,
+        mcp_probe: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -969,6 +973,11 @@ fn doctor_hook_translation_report_wire_shape() {
             dropped_to_guardrails: vec!["PreCompact".to_owned()],
             manifest_stale: false,
             trust_prompt_note: true,
+            // Issue #431: both appended-LAST fields OMITTED here (None/empty),
+            // pinning that the pre-#431 wire shape is unchanged outside a
+            // probed project context.
+            state: None,
+            missing_events: Vec::new(),
         }],
     };
     let json = serde_json::to_value(&ht).expect("serialise");
@@ -1000,4 +1009,41 @@ fn doctor_hook_translation_report_wire_shape() {
     ] {
         assert!(keys.contains(&k), "missing field {k}; got: {keys:?}");
     }
+    // Issue #431: the appended fields are OMITTED when unprobed/empty (the
+    // pre-#431 shape), and appear LAST when populated.
+    assert!(
+        !keys.contains(&"state") && !keys.contains(&"missing_events"),
+        "unprobed row must omit the #431 fields; got: {keys:?}",
+    );
+}
+
+/// Issue #431: a probed row appends `state` (and `missing_events` when
+/// non-empty) AFTER the pre-existing fields — additive, trailing.
+#[test]
+fn doctor_hook_translation_probed_row_appends_state_last() {
+    use tome::doctor::report::{HookHarnessStatus, HookTranslationReport};
+
+    let ht = HookTranslationReport {
+        per_harness: vec![HookHarnessStatus {
+            harness: "cursor".to_owned(),
+            enabled: true,
+            registered_events: vec![],
+            dropped_to_guardrails: vec![],
+            manifest_stale: false,
+            trust_prompt_note: false,
+            state: Some("drift".to_owned()),
+            missing_events: vec!["PreToolUse".to_owned()],
+        }],
+    };
+    let json = serde_json::to_value(&ht).expect("serialise");
+    let h = &json["per_harness"][0];
+    assert_eq!(h["state"], "drift");
+    assert_eq!(h["missing_events"][0], "PreToolUse");
+    let keys: Vec<&str> = h.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        keys.last(),
+        Some(&"missing_events"),
+        "the #431 fields trail the row: {keys:?}",
+    );
+    assert_eq!(keys[keys.len() - 2], "state", "{keys:?}");
 }

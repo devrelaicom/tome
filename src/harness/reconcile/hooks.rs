@@ -1268,14 +1268,8 @@ pub(crate) fn reconcile_plugin_hook_dispatch(
     }
 
     // US8.2: resolve the workspace-level `raw_event_passthrough` flag once,
-    // shared across all harnesses in this pass. Fail-open: any settings read
-    // error → flag is `false` (passthrough off, never a block).
-    let raw_event_passthrough: bool =
-        crate::settings::scopes::load_workspace_settings(deps.paths, deps.workspace_name)
-            .ok()
-            .flatten()
-            .and_then(|w| w.raw_event_passthrough)
-            .unwrap_or(false);
+    // shared across all harnesses in this pass.
+    let raw_event_passthrough = resolve_raw_event_passthrough(deps.paths, deps.workspace_name);
 
     // US6.1: opt-out gate. When `translate_plugin_hooks = false`, treat every
     // harness as non-live so any previously written run-hook entries + manifests
@@ -1426,37 +1420,12 @@ fn reconcile_one_harness_dispatch(
         return Action::LeftAlone;
     };
 
-    // US6.2 prompt gate: when neither prompt_provider nor prompt_model is
-    // configured, exclude Handler::Prompt entries from the manifest. The
-    // HookDropReason::PromptDisabled variant is available for the US11 doctor
-    // to surface; for now the drops are silently elided (matches the existing
-    // `let _ = drops;` pattern in resolve_enabled_canonical_hooks).
+    // US6.2 prompt gate + used-event computation, via the SHARED helpers the
+    // issue-#431 doctor probe also consumes — one enumerator, so the writer
+    // and the read-only drift check can never disagree about the desired set.
     let prompt_enabled = cfg.hooks.prompt_provider.is_some() || cfg.hooks.prompt_model.is_some();
-    let filtered: Vec<CanonicalHook>;
-    let effective_canonical: &[CanonicalHook] = if prompt_enabled {
-        canonical
-    } else {
-        filtered = canonical
-            .iter()
-            .filter(|h| !matches!(h.handler, Handler::Prompt { .. }))
-            .cloned()
-            .collect();
-        &filtered
-    };
-
-    // The USED events: events in this harness's support set that ≥1 enabled
-    // canonical hook targets. For a non-live harness the desired set is empty
-    // (every Tome run-hook entry is removed + the manifest deleted).
-    let used: Vec<PortableEvent> = if is_live {
-        support
-            .events
-            .iter()
-            .copied()
-            .filter(|ev| effective_canonical.iter().any(|h| h.event == *ev))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let effective_canonical = effective_canonical_hooks(canonical, prompt_enabled);
+    let used = dispatch_used_events(support, &effective_canonical, is_live);
 
     let hook_action = reconcile_dispatch_hook_file(
         &snap.name,
@@ -1472,7 +1441,7 @@ fn reconcile_one_harness_dispatch(
     let manifest_action = reconcile_dispatch_manifest(
         &snap.name,
         &manifest_path,
-        effective_canonical,
+        &effective_canonical,
         &used,
         is_live,
         deps.dry_run,
@@ -1481,6 +1450,251 @@ fn reconcile_one_harness_dispatch(
         raw_event_passthrough,
     );
     stronger(hook_action, manifest_action)
+}
+
+// =====================================================================
+// Shared dispatch-state helpers (issue #431) — the ONE enumerator both the
+// sync-side writer above and the read-only doctor drift probe consume, so
+// "what should be on disk" is computed in exactly one place.
+// =====================================================================
+
+/// The US6.2 prompt gate: with prompts disabled, `Handler::Prompt` hooks are
+/// excluded before the used-event computation (they drop to the GUARDRAILS
+/// floor at sync time, so they must not count as dispatchable).
+pub(crate) fn effective_canonical_hooks(
+    canonical: &[CanonicalHook],
+    prompt_enabled: bool,
+) -> Vec<CanonicalHook> {
+    canonical
+        .iter()
+        .filter(|h| prompt_enabled || !matches!(h.handler, Handler::Prompt { .. }))
+        .cloned()
+        .collect()
+}
+
+/// The USED events for one harness: events in its support set that ≥1
+/// (prompt-gated) enabled canonical hook targets. For a non-live harness the
+/// desired set is empty (every Tome run-hook entry is removed + the manifest
+/// deleted).
+pub(crate) fn dispatch_used_events(
+    support: &HookSupport,
+    effective_canonical: &[CanonicalHook],
+    is_live: bool,
+) -> Vec<PortableEvent> {
+    if !is_live {
+        return Vec::new();
+    }
+    support
+        .events
+        .iter()
+        .copied()
+        .filter(|ev| effective_canonical.iter().any(|h| h.event == *ev))
+        .collect()
+}
+
+/// The US8.2 workspace-level `raw_event_passthrough` flag, resolved once per
+/// pass. Fail-open: any settings read error → `false` (passthrough off,
+/// never a block).
+pub(crate) fn resolve_raw_event_passthrough(
+    paths: &crate::paths::Paths,
+    workspace_name: &crate::workspace::WorkspaceName,
+) -> bool {
+    crate::settings::scopes::load_workspace_settings(paths, workspace_name)
+        .ok()
+        .flatten()
+        .and_then(|w| w.raw_event_passthrough)
+        .unwrap_or(false)
+}
+
+/// Build the expected per-event manifest entries for `used` from the
+/// (prompt-gated) canonical hooks — the exact map
+/// [`reconcile_dispatch_manifest`] persists. Empty ⇒ no manifest should exist.
+pub(crate) fn build_dispatch_manifest_events(
+    canonical: &[CanonicalHook],
+    used: &[PortableEvent],
+) -> BTreeMap<String, Vec<ManifestEntry>> {
+    let mut events: BTreeMap<String, Vec<ManifestEntry>> = BTreeMap::new();
+    for hook in canonical {
+        if !used.contains(&hook.event) {
+            continue;
+        }
+        events
+            .entry(hook.event.cc_name().to_string())
+            .or_default()
+            .push(ManifestEntry {
+                plugin: format!("{}:{}", hook.catalog, hook.plugin),
+                // Fix 1 (US8 review): bake the resolved install root into the
+                // manifest so the hot-path dispatcher reads it directly and
+                // never re-derives it from the plugin-data path.
+                plugin_root: if hook.plugin_root.is_empty() {
+                    None
+                } else {
+                    Some(hook.plugin_root.clone())
+                },
+                matcher: hook.matcher.clone(),
+                if_pred: hook.if_pred.clone(),
+                handler: hook.handler.clone(),
+                // Manifest timeout is ALWAYS ms = CC-seconds × 1000; the
+                // harness's `timeout_unit` only governs per-plugin timeouts
+                // written INTO a harness hook file, which the match-all
+                // run-hook registration never carries.
+                timeout_ms: hook.timeout_secs.map(|s| s.saturating_mul(1000)),
+                cwd: None,
+                env: BTreeMap::new(),
+            });
+    }
+    events
+}
+
+/// The issue-#431 drift verdict for one dispatcher harness's hook surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DispatchDriftState {
+    /// Native hook file AND manifest both match the expected set.
+    Ok,
+    /// The hook file exists but its Tome-owned entries diverge from the
+    /// expected set (a used event unregistered, or a stale entry left behind).
+    Drift,
+    /// Expected entries but the hook file itself is absent (nothing
+    /// registered — sync never ran here, or the file was deleted).
+    Missing,
+    /// The hook file matches but the manifest is absent / stale / unexpected.
+    StaleManifest,
+}
+
+impl DispatchDriftState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            DispatchDriftState::Ok => "ok",
+            DispatchDriftState::Drift => "drift",
+            DispatchDriftState::Missing => "missing",
+            DispatchDriftState::StaleManifest => "stale_manifest",
+        }
+    }
+}
+
+/// The read-only probe result: the verdict plus the used events whose
+/// registration is missing from the native hook file (for the report).
+pub(crate) struct DispatchProbe {
+    pub(crate) state: DispatchDriftState,
+    pub(crate) missing_events: Vec<String>,
+}
+
+/// Read-only drift probe for ONE dispatcher harness (issue #431): compare the
+/// native hook file's Tome-owned `run-hook` entries AND the per-(workspace,
+/// harness) manifest against the currently-expected set.
+///
+/// REUSE, not a second enumerator: the expected set comes from the SAME
+/// helpers the sync writer consumes ([`effective_canonical_hooks`] →
+/// [`dispatch_used_events`] → [`build_dispatch_manifest_events`]), the entry
+/// shape from the same [`tome_run_hook_entry`] builder, and the presence test
+/// is the same launcher-tolerant [`crate::harness::hooks::tome_entries_equal`]
+/// match the writer upserts with. Never writes.
+///
+/// The version stamp (`version: 1` on Copilot/Cursor files) is deliberately
+/// NOT probed: entries-match-but-version-absent is a hand-edit edge the next
+/// sync heals silently, and flagging it here would report drift `--fix`
+/// cannot always reproduce byte-for-byte.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn probe_dispatch_state(
+    paths: &crate::paths::Paths,
+    workspace_name: &crate::workspace::WorkspaceName,
+    project_root: &Path,
+    harness_name: &str,
+    support: &HookSupport,
+    event_names: &[(PortableEvent, &'static str)],
+    canonical: &[CanonicalHook],
+    prompt_enabled: bool,
+    is_live: bool,
+) -> DispatchProbe {
+    let workspace = workspace_name.as_str();
+    let effective = effective_canonical_hooks(canonical, prompt_enabled);
+    let used = dispatch_used_events(support, &effective, is_live);
+
+    let Some(hook_path) = hook_file_path(support.file_spec, project_root) else {
+        // Only `ClaudeSettingsLocal` maps to `None`, and no `hook_support()`
+        // harness uses it — mirror the writer's defensive skip.
+        return DispatchProbe {
+            state: DispatchDriftState::Ok,
+            missing_events: Vec::new(),
+        };
+    };
+
+    // Hook-file side. A malformed file is `Drift` (sync would fail loudly on
+    // it; the doctor verdict points at the same re-sync).
+    let mut missing_events: Vec<String> = Vec::new();
+    let mut stale_entry = false;
+    let loaded = load_hook_file(&hook_path);
+    let file_existed = match &loaded {
+        Ok((_, existed)) => *existed,
+        Err(_) => false,
+    };
+    match loaded {
+        Ok((mut doc, _)) => {
+            for &event in support.events {
+                let Some(native) = event_names
+                    .iter()
+                    .find(|(e, _)| *e == event)
+                    .map(|(_, n)| *n)
+                else {
+                    continue;
+                };
+                let command = run_hook_command(harness_name, event.cc_name(), workspace);
+                let suffix = run_hook_args_suffix(harness_name, event.cc_name(), workspace);
+                let expected = tome_run_hook_entry(support.file_spec, &command);
+                let present = entry_array_opt_by_key(&mut doc, support.file_spec, native)
+                    .map(|arr| {
+                        arr.iter().any(|e| {
+                            crate::harness::hooks::tome_entries_equal(e, &expected, &suffix)
+                        })
+                    })
+                    .unwrap_or(false);
+                if used.contains(&event) && !present {
+                    missing_events.push(event.cc_name().to_string());
+                }
+                if !used.contains(&event) && present {
+                    stale_entry = true;
+                }
+            }
+        }
+        Err(_) => {
+            // Unparsable hook file: every used event counts as unregistered.
+            for ev in &used {
+                missing_events.push(ev.cc_name().to_string());
+            }
+            if !used.is_empty() {
+                stale_entry = true;
+            }
+        }
+    }
+
+    // Manifest side: byte-equal (struct-equal) against the expected manifest,
+    // absent when the expected set is empty — the writer's exact contract.
+    let manifest_path = paths.hooks_manifest(workspace_name, harness_name);
+    let expected_events = build_dispatch_manifest_events(&effective, &used);
+    let manifest_ok = if expected_events.is_empty() {
+        !manifest_path.exists()
+    } else {
+        let expected = HookManifest {
+            harness: harness_name.to_string(),
+            raw_event_passthrough: resolve_raw_event_passthrough(paths, workspace_name),
+            events: expected_events,
+        };
+        read_manifest(&manifest_path).is_ok_and(|m| m == expected)
+    };
+
+    let state = if !missing_events.is_empty() && !file_existed {
+        DispatchDriftState::Missing
+    } else if !missing_events.is_empty() || stale_entry {
+        DispatchDriftState::Drift
+    } else if !manifest_ok {
+        DispatchDriftState::StaleManifest
+    } else {
+        DispatchDriftState::Ok
+    };
+    DispatchProbe {
+        state,
+        missing_events,
+    }
 }
 
 /// Merge / prune Tome's per-event `run-hook` registration entries in the
@@ -1627,38 +1841,13 @@ fn reconcile_dispatch_manifest(
     first_error: &mut Option<TomeError>,
     raw_event_passthrough: bool,
 ) -> Action {
-    let mut events: BTreeMap<String, Vec<ManifestEntry>> = BTreeMap::new();
-    if is_live {
-        for hook in canonical {
-            if !used.contains(&hook.event) {
-                continue;
-            }
-            events
-                .entry(hook.event.cc_name().to_string())
-                .or_default()
-                .push(ManifestEntry {
-                    plugin: format!("{}:{}", hook.catalog, hook.plugin),
-                    // Fix 1 (US8 review): bake the resolved install root into the
-                    // manifest so the hot-path dispatcher reads it directly and
-                    // never re-derives it from the plugin-data path.
-                    plugin_root: if hook.plugin_root.is_empty() {
-                        None
-                    } else {
-                        Some(hook.plugin_root.clone())
-                    },
-                    matcher: hook.matcher.clone(),
-                    if_pred: hook.if_pred.clone(),
-                    handler: hook.handler.clone(),
-                    // Manifest timeout is ALWAYS ms = CC-seconds × 1000; the
-                    // harness's `timeout_unit` only governs per-plugin timeouts
-                    // written INTO a harness hook file, which the match-all
-                    // run-hook registration never carries.
-                    timeout_ms: hook.timeout_secs.map(|s| s.saturating_mul(1000)),
-                    cwd: None,
-                    env: BTreeMap::new(),
-                });
-        }
-    }
+    // The expected map via the SHARED builder (issue #431) — the doctor drift
+    // probe compares against the same computation, so they cannot diverge.
+    let events: BTreeMap<String, Vec<ManifestEntry>> = if is_live {
+        build_dispatch_manifest_events(canonical, used)
+    } else {
+        BTreeMap::new()
+    };
 
     let manifest_existed = path.exists();
 

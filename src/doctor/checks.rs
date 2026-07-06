@@ -1691,6 +1691,8 @@ pub fn build_hook_translation_report(
     workspace: &crate::workspace::WorkspaceName,
     cfg: &crate::config::Config,
     effective: Option<&crate::settings::resolver::EffectiveHarnessList>,
+    home: &Path,
+    project_root: Option<&Path>,
 ) -> crate::doctor::report::HookTranslationReport {
     use crate::doctor::report::{HookHarnessStatus, HookTranslationReport};
     use crate::harness::hooks_ir::{PortableEvent, read_manifest};
@@ -1704,6 +1706,28 @@ pub fn build_hook_translation_report(
     let effective_names: std::collections::HashSet<&str> = effective
         .map(|e| e.harnesses.iter().map(|h| h.name.as_str()).collect())
         .unwrap_or_default();
+
+    // Issue #431: the canonical hook enumeration for the drift probe, resolved
+    // ONCE via the dispatch SSOT (the same function sync + preview consume) —
+    // never a second enumerator. Only needed in a project context (the native
+    // hook file is per-project); a per-plugin parse error is recorded-but-
+    // skipped (forward progress), and a hard DB error degrades the probe to
+    // "no canonical hooks" (the report stays read-only and infallible).
+    let canonical: Vec<crate::harness::hooks_ir::CanonicalHook> = if project_root.is_some() {
+        let deps = crate::harness::sync::SyncDeps {
+            paths,
+            home_root: home,
+            workspace_name: workspace,
+            force: false,
+            only_harness: None,
+            dry_run: false,
+        };
+        let mut first_error: Option<TomeError> = None;
+        crate::harness::reconcile::hooks::resolve_enabled_canonical_hooks(&deps, &mut first_error)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let mut per_harness: Vec<HookHarnessStatus> = Vec::new();
 
@@ -1754,6 +1778,33 @@ pub fn build_hook_translation_report(
             // `translate_plugin_hooks` was turned off). Needs a `tome sync`.
             let manifest_stale = !scope_enabled && manifest_exists;
 
+            // Issue #431: the full drift probe — native hook file entries AND
+            // manifest against the expected set, via the sync-side helpers.
+            // Only in a project context; `is_live` mirrors the writer's gate
+            // (scope-effective AND config-enabled).
+            let (state, missing_events) = match project_root {
+                Some(root) => {
+                    let event_names: Vec<(PortableEvent, &'static str)> = hs
+                        .events
+                        .iter()
+                        .map(|&e| (e, m.hook_event_name(e)))
+                        .collect();
+                    let probe = crate::harness::reconcile::hooks::probe_dispatch_state(
+                        paths,
+                        workspace,
+                        root,
+                        m.name(),
+                        &hs,
+                        &event_names,
+                        &canonical,
+                        has_prompt_settings,
+                        scope_enabled,
+                    );
+                    (Some(probe.state.as_str().to_owned()), probe.missing_events)
+                }
+                None => (None, Vec::new()),
+            };
+
             per_harness.push(HookHarnessStatus {
                 harness: m.name().to_string(),
                 enabled: scope_enabled,
@@ -1761,6 +1812,8 @@ pub fn build_hook_translation_report(
                 dropped_to_guardrails,
                 manifest_stale,
                 trust_prompt_note: has_prompt_settings,
+                state,
+                missing_events,
             });
         }
     });
@@ -2367,8 +2420,14 @@ mod tests {
             excluded: vec![],
         };
 
-        let report_a =
-            build_hook_translation_report(&paths, &workspace, &cfg, Some(&effective_gemini));
+        let report_a = build_hook_translation_report(
+            &paths,
+            &workspace,
+            &cfg,
+            Some(&effective_gemini),
+            tmp.path(),
+            None,
+        );
 
         // Doctor must report exactly one row: gemini.
         assert_eq!(
@@ -2426,8 +2485,14 @@ mod tests {
             excluded: vec![],
         };
 
-        let report_b =
-            build_hook_translation_report(&paths, &workspace, &cfg, Some(&effective_two));
+        let report_b = build_hook_translation_report(
+            &paths,
+            &workspace,
+            &cfg,
+            Some(&effective_two),
+            tmp.path(),
+            None,
+        );
 
         assert_eq!(
             report_b.per_harness.len(),
