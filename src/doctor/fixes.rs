@@ -145,7 +145,7 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
             continue;
         }
         match &fix.subsystem {
-            Subsystem::HarnessRules(_) | Subsystem::HarnessMcp(_) => {
+            Subsystem::HarnessRules(_) | Subsystem::HarnessMcp(_) | Subsystem::HarnessHooks(_) => {
                 harness_fixes.push(fix.clone());
             }
             _ => other_fixes.push(fix.clone()),
@@ -333,6 +333,23 @@ fn refresh_phase6_project_surfaces(report: &mut DoctorReport, ctx: &FixContext<'
     {
         report.agents = Some(r);
     }
+    // Issue #431: the dispatch surface was just re-synced too — refresh its
+    // drift states so the post-`--fix` report (and the command layer's
+    // `reappend_hook_drift_fixes`) reflect the healed on-disk state.
+    let cfg = crate::config::load_or_default(ctx.paths);
+    let ht = crate::doctor::checks::build_hook_translation_report(
+        ctx.paths,
+        workspace,
+        &cfg,
+        report.effective_harness_list.as_ref(),
+        ctx.home,
+        Some(project_root),
+    );
+    report.hook_translation = if ht.per_harness.is_empty() {
+        None
+    } else {
+        Some(ht)
+    };
 }
 
 fn apply_one(
@@ -391,7 +408,7 @@ fn apply_one(
             report.project_binding = check_binding(ctx.scope, paths);
             Ok(())
         }
-        Subsystem::HarnessRules(_) | Subsystem::HarnessMcp(_) => {
+        Subsystem::HarnessRules(_) | Subsystem::HarnessMcp(_) | Subsystem::HarnessHooks(_) => {
             // Unreachable: `apply()` coalesces all harness fixes into a
             // single `repair_harness_sync_with` invocation outside the
             // `apply_one` dispatch (R-M2). If a caller dispatches one
