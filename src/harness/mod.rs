@@ -1129,6 +1129,26 @@ pub fn resolve_alias(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// Every canonical name [`lookup`] accepts, comma-joined for error messages —
+/// the auto-detectable registry plus the opt-in targets, sorted. Aliases are
+/// excluded (each resolves to a canonical name already listed).
+///
+/// #435: `TomeError::HarnessNotSupported`'s `Display` calls this so the
+/// message enumerates the valid names (the `MetaSkillNotFound` `available:`
+/// precedent) straight from the registry — a new harness module joins the
+/// hint without anyone remembering to update a hardcoded string. Reads the
+/// STATIC registries deliberately (not the test-only override slot): the
+/// hint must name what this binary actually supports.
+pub fn supported_names_joined() -> String {
+    let mut names: Vec<&str> = SUPPORTED_HARNESSES
+        .iter()
+        .chain(OPT_IN_TARGETS)
+        .map(|h| h.name())
+        .collect();
+    names.sort_unstable();
+    names.join(", ")
+}
+
 /// Test-only override slot for the harness registry.
 ///
 /// Integration tests under `tests/` cannot reach `#[cfg(test)]`-gated

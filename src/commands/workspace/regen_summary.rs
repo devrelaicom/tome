@@ -50,7 +50,18 @@ pub fn run(
                     resolved.as_str(),
                 )));
             }
-            // `prompt::confirm` refuses up front on a non-terminal (exit 54).
+            // #435: name the non-interactive alternative BEFORE the generic
+            // `NotATerminal` refusal `prompt::confirm` would raise, mirroring
+            // the `plugin disable` / `models remove` pointer discipline.
+            if !(crate::output::stdin_is_tty() && crate::output::stdout_is_tty()) {
+                let mut err = std::io::stderr().lock();
+                let _ = writeln!(
+                    err,
+                    "Confirmation needs a terminal. Run `tome workspace regen-summary {}` to name the workspace explicitly.",
+                    resolved.as_str(),
+                );
+                return Err(TomeError::NotATerminal);
+            }
             let ok = prompt::confirm(
                 &format!(
                     "Regenerate summaries for workspace `{}`?",
