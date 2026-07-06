@@ -160,7 +160,7 @@ suppress the diagnosis:
 | Verdict | Code | Meaning |
 | --- | --- | --- |
 | Healthy | `0` | Everything checks out. |
-| Degraded | `10` | A non-fatal issue (e.g. the reranker is missing, or a catalog cache is broken) — queries still serve. |
+| Degraded | `10` | A non-fatal issue (e.g. the reranker or summariser is missing, or a catalog cache is broken) — queries still serve. |
 | Unhealthy | `1` | A fatal issue (broken index, embedder drift, malformed config). |
 
 Both non-zero verdicts fail a plain "fail on any non-zero" gate. The distinct

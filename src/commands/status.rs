@@ -6,8 +6,8 @@
 //! Exit semantics (issue #282 — three distinct health codes):
 //!
 //! * Overall health == Ok → exit 0
-//! * Overall health == Degraded (reranker missing/drift — queries still serve)
-//!   → exit [`crate::error::EXIT_HEALTH_DEGRADED`] (10)
+//! * Overall health == Degraded (reranker or summariser missing/drift —
+//!   queries still serve) → exit [`crate::error::EXIT_HEALTH_DEGRADED`] (10)
 //! * Overall health == Unhealthy (broken index, embedder drift, …)
 //!   → exit [`crate::error::EXIT_HEALTH_UNHEALTHY`] (1)
 //!
@@ -257,7 +257,7 @@ pub fn assemble_report(
     let index = check_index(paths, scope)?;
     let drift = check_drift(paths, scope, embedder_entry, reranker_entry)?;
 
-    let overall = classify(&embedder, &reranker, &index, &drift);
+    let overall = classify(&embedder, &reranker, &summariser, &index, &drift);
 
     let current_workspace = scope.name().as_str().to_owned();
     let current_scope = if scope.is_global() {
@@ -625,6 +625,7 @@ pub fn check_drift(
 fn classify(
     embedder: &ModelHealth,
     reranker: &ModelHealth,
+    summariser: &ModelHealth,
     index: &IndexHealth,
     drift: &DriftStatus,
 ) -> OverallHealth {
@@ -642,7 +643,17 @@ fn classify(
         // index to serve queries (degraded by skipping the rerank step).
         return OverallHealth::Degraded;
     }
+    // Issue #429: the summariser degrades workspace summaries, not search —
+    // Degraded, never Unhealthy, and the SAME verdict `tome doctor`'s
+    // classifier produces for the same state (parity is pinned by
+    // `health_parity` in tests/models_doctor/doctor_p4.rs).
+    if summariser.state != "ok" {
+        return OverallHealth::Degraded;
+    }
     if matches!(drift, DriftStatus::RerankerDrift { .. }) {
+        return OverallHealth::Degraded;
+    }
+    if matches!(drift, DriftStatus::SummariserDrift { .. }) {
         return OverallHealth::Degraded;
     }
     OverallHealth::Ok

@@ -531,15 +531,11 @@ pub(crate) fn apply_provider_credential_findings(
 ) {
     for finding in checks::build_provider_credential_findings(cfg) {
         // Escalate `overall` monotonically per the finding's severity.
-        // DELIBERATE divergence from `classify`'s bundled-summariser rule: a
-        // broken *bundled* summariser is Unhealthy there (its model files are
-        // missing/corrupt — the rules pipeline can't run at all), but a missing
-        // summariser-*provider credential* is only Degraded here (it's a remote
-        // config nudge; summarisation is optional to search, which still serves
-        // on the bundled/absent-summary path). Do NOT "fix" this into false
-        // consistency with `classify` — the two conditions are genuinely
-        // different severities. Only embedding is critical (search cannot run
-        // without a working embedder).
+        // Severity matches `classify`'s model rules since #429 aligned them:
+        // a broken summariser/reranker — bundled files OR a provider
+        // credential — is Degraded (summarisation/reranking are optional to
+        // search, which still serves), while only embedding is critical
+        // (search cannot run without a working embedder → Unhealthy).
         let severity = if finding.critical {
             DoctorClassification::Unhealthy
         } else {
@@ -1012,13 +1008,16 @@ pub(crate) fn build_suggested_fixes_pub(
 ///   index dimension mismatch the assembler folds into `index.integrity_ok`)
 /// - Embedder drift (stored vectors invalidated)
 /// - Schema too new (folds into embedder/index failure paths)
-/// - Summariser missing/corrupt (US5.a — summarisation is the new pillar
-///   of the rules-file pipeline; failure surfaces RULES.md regressions)
 /// - Binding broken (project marker names a workspace that doesn't exist
 ///   in the central registry; ambiguity requires developer choice)
 ///
 /// Degraded:
 /// - Reranker missing/corrupt or reranker drift
+/// - Summariser missing/corrupt (#429: downgraded from the US5.a Unhealthy
+///   rule — a broken summariser degrades workspace summaries, not search,
+///   which is the same severity a broken reranker carries; this is also the
+///   verdict `tome status` now produces for the same state, ending the
+///   status/doctor contradiction)
 /// - Any catalog cache broken (Missing / NotARepo / ManifestInvalid)
 /// - Summariser drift (cached summaries stale)
 /// - BindingRulesCopy Missing or Drift
@@ -1052,9 +1051,6 @@ fn classify(
     ) {
         return DoctorClassification::Unhealthy;
     }
-    if summariser.state != "ok" {
-        return DoctorClassification::Unhealthy;
-    }
     // Binding broken (marker names a missing workspace) — FR-561 / US5.a.
     if let Some(b) = binding
         && !b.config_well_formed
@@ -1063,6 +1059,11 @@ fn classify(
     }
 
     if reranker.state != "ok" {
+        return DoctorClassification::Degraded;
+    }
+    // #429: summariser failure is Degraded, not Unhealthy — see the rule
+    // list above. Placed with its severity peers (the reranker rules).
+    if summariser.state != "ok" {
         return DoctorClassification::Degraded;
     }
     if matches!(drift, DriftStatus::RerankerDrift { .. }) {

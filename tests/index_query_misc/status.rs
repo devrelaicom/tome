@@ -157,6 +157,37 @@ fn status_degraded_when_only_reranker_missing() {
     assert_eq!(report.overall, OverallHealth::Degraded);
 }
 
+// ---- Degraded: summariser only (#429) --------------------------------------
+
+#[test]
+fn status_degraded_when_only_summariser_missing() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    // Remove just the summariser dir: #429 pulls the summariser into
+    // status's classification as a DEGRADING input (it degrades workspace
+    // summaries, not search) — the same verdict doctor produces for this
+    // state (parity pinned in tests/models_doctor/doctor_p4.rs).
+    let summariser_name = tome::summarise::registry::summariser_entry().name;
+    std::fs::remove_dir_all(paths.models_dir.join(summariser_name)).unwrap();
+
+    let report = assemble_report(
+        &paths,
+        &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+        false,
+    )
+    .expect("assemble");
+    assert_eq!(report.embedder.state, "ok");
+    assert_eq!(report.reranker.state, "ok");
+    assert_eq!(report.summariser.state, "missing");
+    assert_eq!(report.overall, OverallHealth::Degraded);
+}
+
 // ---- Drift: reranker drift -----------------------------------------------
 
 #[test]
