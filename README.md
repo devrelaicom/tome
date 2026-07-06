@@ -2,7 +2,7 @@
 
 **Tome is a Rust CLI _and_ MCP server** that makes Claude Code's plugin ecosystem work across other agentic coding harnesses — Cursor, Codex CLI, Gemini CLI, OpenCode, GitHub Copilot, Cline, Zed, and more.
 
-Every coding agent has its own place to put knowledge — rules files, skill directories, MCP config — and none of them read each other's. Tome organises all of it behind a small set of concepts: you register **catalogs** (git repos of plugins), enable the **plugins** you want, and Tome builds a local semantic index of their skills and commands. From there you can search that index from your shell, organise work into named **workspaces**, and wire the whole thing into around sixteen coding harnesses — both as rules-file / MCP-config integration and as a live **MCP server** that lets your agent find and load exactly the skill it needs, mid-task, instead of holding everything in context.
+Every coding agent has its own place to put knowledge — rules files, skill directories, MCP config — and none of them read each other's. Tome organises all of it behind a small set of concepts: you register **catalogs** (git repos of plugins), enable the **plugins** you want, and Tome builds a local semantic index of their skills and commands. From there you can search that index from your shell, organise work into named **workspaces**, and wire the whole thing into seventeen supported coding harnesses (plus two opt-in targets) — both as rules-file / MCP-config integration and as a live **MCP server** that lets your agent find and load exactly the skill it needs, mid-task, instead of holding everything in context.
 
 ```text
 catalog (git repo)
@@ -26,7 +26,7 @@ JetBrains AI · Zed · Kiro · Devin · Junie · Antigravity · Pi · Crush · G
 
 - **Catalogs → plugins → index.** `tome catalog add` registers a git-hosted catalog; `tome plugin enable` indexes a plugin's skills and commands into a local SQLite + vector store. `tome query` runs semantic (KNN + reranker) search across everything enabled — entirely on your machine.
 - **Named workspaces.** Central storage lives under `~/.tome/workspaces/<name>/`; a project binds to a workspace with a tiny `.tome/config.toml` pointer, so different projects can see different sets of plugins.
-- **Integration across ~16 harnesses.** Tome writes each harness's rules file and MCP-config entry, delivers a tiered skill-routing directive at session start (via a session-start hook or a Tome-shipped plugin shim where supported, otherwise the rules file), and propagates per-plugin guardrails, hooks, and agent translations where the harness supports them. See the [harness-support matrix](#harness-support).
+- **Integration across 17 harnesses.** Tome writes each harness's rules file and MCP-config entry, delivers a tiered skill-routing directive at session start (via a session-start hook or a Tome-shipped plugin shim where supported, otherwise the rules file), and propagates per-plugin guardrails, hooks, and agent translations where the harness supports them. See the [harness-support matrix](#harness-support).
 - **An MCP server.** `tome mcp` runs a stdio Model Context Protocol server backed by the resolved workspace's index, exposing `search_skills` / `get_skill_info` / `get_skill` plus a `meta` tool, and your enabled plugins' user-invocable commands as MCP prompts.
 - **Authoring & conversion.** `tome {catalog,plugin,skill} create` scaffolds a new lint-clean artifact; `… convert` brings a Claude Code marketplace/plugin/skill, a Codex project, or a native `SKILL.md` into the native Tome format; `… lint` validates an artifact for CI.
 
@@ -168,15 +168,15 @@ tome models list                            # installed models; --verify rehashe
 
 ## Harness support
 
-Tome configures around sixteen harnesses. For each, where the harness exposes a writable config, Tome registers the **Tome MCP server**; it always delivers the tiered skill-routing directive in the harness's **rules sink**; and, where the harness supports it, it delivers that directive at **session start** — through a session-start command hook, a Tome-shipped TypeScript plugin shim (executed by the harness's own runtime, never by Tome), or, for harnesses with neither, the rules file alone.
+Tome configures 17 supported harnesses, plus two opt-in targets. For each, where the harness exposes a writable config, Tome registers the **Tome MCP server**; it always delivers the tiered skill-routing directive in the harness's **rules sink**; and, where the harness supports it, it delivers that directive at **session start** — through a session-start command hook, a Tome-shipped TypeScript plugin shim (executed by the harness's own runtime, never by Tome), or, for harnesses with neither, the rules file alone.
 
-`tome harness use <name>` (and `tome sync`) target the **real** harnesses below — named, auto-detected, or selected with `--all`. The **opt-in targets** (`generic`, `generic-op` / `goose`) are reachable by name only; they are never auto-detected and never included in `--all`.
+`tome harness use <name>` (and `tome sync`) target the **real** harnesses below — named, auto-detected, or selected with `--all`. The **opt-in targets** (`generic`, `generic-op`) are reachable by name only; they are never auto-detected and never included in `--all`. (`goose` is a supported, auto-detected harness — it just integrates through the same Open Plugins bundle `generic-op` emits.)
 
 | Harness | MCP config | Rules sink | Session steering | Notes |
 |---|---|---|---|---|
-| `claude-code` | `.claude/.mcp.json` | `CLAUDE.md` | Session-start hook | Native hooks + agents |
+| `claude-code` | `.claude/settings.json` | `CLAUDE.md` | Session-start hook | Native hooks + agents |
 | `codex` | `~/.codex/config.toml` | `AGENTS.md` | Session-start hook | |
-| `cursor` | `.cursor/mcp.json` | `.cursor/rules/` | Rules only | Native agents |
+| `cursor` | `.cursor/mcp.json` | `.cursor/rules/` | Session-start hook (`.cursor/hooks.json`) | Native agents + hooks |
 | `gemini` | `~/.gemini/settings.json` | `AGENTS.md` / `GEMINI.md` | Session-start hook | `antigravity-cli` aliases here |
 | `opencode` | `opencode.json` | `AGENTS.md` | TS plugin shim | |
 | `copilot-cli` | `~/.copilot/mcp-config.json` | `.github/copilot-instructions.md` | Session-start hook | GitHub Copilot CLI |
@@ -185,12 +185,12 @@ Tome configures around sixteen harnesses. For each, where the harness exposes a 
 | `cline` | `~/.cline/mcp.json` | `.clinerules/tome.md` | TS plugin shim | |
 | `junie` | `.junie/mcp/mcp.json` | `.junie/AGENTS.md` | Rules only | EAP; no session hooks |
 | `jetbrains-ai` | manual (UI only) | `.aiassistant/rules/tome.md` | Rules only | MCP added via IDE UI |
-| `antigravity` | `~/.gemini/config/mcp_config.json` | `.agent/rules/tome.md` | Session-start hook | Hook path live-probe-gated |
+| `antigravity` | `~/.gemini/config/mcp_config.json` | `.agent/rules/tome.md` | Rules only | Session hook deferred (live-probe-gated) |
 | `pi` | manual (adapter) | `AGENTS.md` | TS plugin shim | MCP via the pi-mcp-adapter |
 | `crush` | `crush.json` | `CRUSH.md` | Rules only | |
 | `zed` | `settings.json` | `.rules` | Rules only | |
 | `kiro` | `.kiro/settings/mcp.json` | `.kiro/steering/tome.md` | Rules only | |
-| `goose` | `.mcp.json` (Open Plugins) | `AGENTS.md` | Open Plugins hook | Opt-in target (`generic-op`) |
+| `goose` | `.mcp.json` (Open Plugins) | `AGENTS.md` | Open Plugins hook | Auto-detected; integrates via the `tome-op` Open Plugins bundle |
 | `generic` | `./mcp.json` | `AGENTS.md` | Rules only | Opt-in catch-all target |
 
 For harnesses with a **manual MCP** step (`jetbrains-ai` is UI-only; `pi` needs the pi-mcp-adapter), `tome harness info <name>` prints the exact paste-able MCP-config snippet. Items marked live-probe-gated are confirmed against a real install before shipping; a harness whose session hook can't be confirmed falls back to rules-only steering. `tome status` and `tome doctor` report each harness's MCP state (`ok` / `manual` / `unverified` / `drift`). Every Tome-written rules sink opens with a self-healing preamble: if the agent can't see the Tome MCP tools, it tells the user to run `tome harness use <name>` (or `tome harness info <name>` for the snippet) and restart.
