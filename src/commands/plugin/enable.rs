@@ -438,16 +438,19 @@ fn ensure_models_or_prompt(
         return Err(TomeError::Interrupted);
     }
 
-    // Download each missing model. We wrap each in an indeterminate spinner.
-    // F6 added a byte-progress callback to `download_model`; this site keeps
-    // the spinner (matches the precedent for the embedder + reranker).
+    // Download each missing model behind the same determinate byte bar as
+    // `tome models download` (#419): the pinned `entry.size_bytes` is known up
+    // front, so the most latency-bound moment of a first run shows real
+    // bytes/throughput/ETA instead of an indeterminate spinner. Spinners stay
+    // reserved for the genuinely unpredictable phases (model load, DB open).
+    // `[output] progress` config + non-TTY suppression are honoured inside
+    // `progress::byte_bar` — identical to the models-download path.
     for entry in missing {
-        let pb = progress::spinner(format!(
-            "downloading {} (~{})",
-            entry.name,
-            human_mb(entry.size_bytes)
-        ));
-        let result = download_model(entry, &paths.models_dir, None);
+        let pb = progress::byte_bar(entry.size_bytes, format!("downloading {}", entry.name));
+        let cb = |bytes_so_far: u64, _total: u64| {
+            pb.set_position(bytes_so_far);
+        };
+        let result = download_model(entry, &paths.models_dir, Some(&cb));
         pb.finish_and_clear();
         result?;
         info!(model = entry.name, "model artefact installed");
