@@ -619,6 +619,16 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
                 )?;
             }
         }
+        // Issue #439: translated hooks fail open by design, so a misfiring
+        // hook is silent — point at the debugging tools whenever any harness
+        // has translation active. Human output only; the JSON report is
+        // untouched.
+        if ht.per_harness.iter().any(|h| h.enabled) {
+            writeln!(
+                out,
+                "  debug: TOME_HOOK_DEBUG=1 or `tome harness run-hook --explain --event <event> --harness <name>`",
+            )?;
+        }
         writeln!(out)?;
     }
 

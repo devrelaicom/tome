@@ -605,6 +605,13 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
     if let Some(notice) = &outcome.hook_translation_notice {
         writeln!(out)?;
         writeln!(out, "  Hook translation: {notice}")?;
+        // Issue #439: translated hooks FAIL OPEN by design, so a misfiring
+        // hook is silent — point at the debugging tools while translation is
+        // active. Human renderer only: the notice STRING rides `--json`
+        // byte-for-byte, so the hint must not be folded into it.
+        if let Some(hint) = hook_debug_hint(notice, &outcome.name) {
+            writeln!(out, "  {hint}")?;
+        }
     }
     // Issue #292: hooks advisory notice (for rules-only-for-hooks harnesses with
     // enabled plugin hooks that fall back to GUARDRAILS prose).
@@ -613,6 +620,21 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
         writeln!(out, "  Note: {notice}")?;
     }
     Ok(())
+}
+
+/// The hook-debugging pointer rendered under the hook-translation notice
+/// when translation is active (issue #439); `None` when it is off — there is
+/// nothing to debug then. Gated on the notice's own "hook translation on"
+/// prefix (the Tome-owned string built in `build_info`) rather than a new
+/// outcome field, so the `--json` wire shape stays byte-identical: the hint
+/// is a human-output affordance, not part of the notice.
+fn hook_debug_hint(notice: &str, harness: &str) -> Option<String> {
+    if !notice.starts_with("hook translation on") {
+        return None;
+    }
+    Some(format!(
+        "debug: TOME_HOOK_DEBUG=1 or `tome harness run-hook --explain --event <event> --harness {harness}`"
+    ))
 }
 
 /// #327: render one `emit_human` section per outcome for the no-name
@@ -797,6 +819,42 @@ mod tests {
         assert!(
             !json.contains("surface them"),
             "singular notice must not contain 'them'; got: {json}",
+        );
+    }
+
+    /// Issue #439: the hook-debug hint renders only while translation is
+    /// active, names the harness for the `run-hook` invocation, and lives
+    /// OUTSIDE the notice string — so the `--json` wire shape (which carries
+    /// the notice verbatim) stays byte-identical.
+    #[test]
+    fn hook_debug_hint_gates_on_active_translation() {
+        let on = "hook translation on; 2 event(s) registered";
+        let hint = hook_debug_hint(on, "devin").expect("active translation must yield the hint");
+        assert!(hint.contains("TOME_HOOK_DEBUG=1"), "hint names the env var");
+        assert!(
+            hint.contains("tome harness run-hook --explain --event <event> --harness devin"),
+            "hint names the dry-run command with the harness filled in; got: {hint}",
+        );
+
+        assert!(
+            hook_debug_hint("hook translation off; 0 event(s) registered", "devin").is_none(),
+            "translation off → nothing to debug → no hint",
+        );
+
+        // The JSON envelope carries the notice UNCHANGED — the hint is not
+        // folded into it.
+        let mut outcome = outcome_with_notice(None);
+        outcome.hook_translation_notice = Some(on.to_string());
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert!(
+            json.contains(
+                "\"hook_translation_notice\":\"hook translation on; 2 event(s) registered\""
+            ),
+            "notice string must ride --json verbatim; got: {json}",
+        );
+        assert!(
+            !json.contains("TOME_HOOK_DEBUG"),
+            "the debug hint must never reach the JSON envelope; got: {json}",
         );
     }
 }
