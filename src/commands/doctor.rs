@@ -157,6 +157,18 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
             &cfg,
         );
 
+        // Issue #433: `re_assemble` rebuilds `suggested_fixes` via the 8-arg
+        // SSOT, which doesn't know about the orphan-data pointers. `doctor
+        // --fix` never deletes persistent data (and refreshes no orphan
+        // report), so re-apply from the report's own (still-current) orphan
+        // surface. These are user-clearable manual findings — they
+        // deliberately remain in the exit-75 gate (see
+        // `apply_orphan_data_findings`'s GATE DECISION).
+        doctor::apply_orphan_data_findings(
+            &mut report.suggested_fixes,
+            report.orphan_data_dirs.as_ref(),
+        );
+
         // Issue #283: `re_assemble` rebuilds `suggested_fixes` via the 8-arg
         // SSOT, which doesn't know about the fresh-install onboarding nudges.
         // `doctor --fix` never enrols a catalog / enables a plugin / configures
@@ -176,7 +188,7 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         apply_config_finding(&mut report, crate::config::probe_error(&paths).as_deref());
     }
 
-    emit(&report, mode)?;
+    emit(&report, mode, &paths)?;
 
     // `tome.doctor_run`: emit AFTER the report renders but BEFORE any of the
     // exit paths below (one of which is a hard `std::process::exit` with a
@@ -253,14 +265,14 @@ fn apply_config_finding(report: &mut DoctorReport, config_error: Option<&str>) {
     report.overall = DoctorClassification::Unhealthy;
 }
 
-fn emit(report: &DoctorReport, mode: Mode) -> Result<(), TomeError> {
+fn emit(report: &DoctorReport, mode: Mode, paths: &crate::paths::Paths) -> Result<(), TomeError> {
     match mode {
-        Mode::Human => emit_human(report),
+        Mode::Human => emit_human(report, paths),
         Mode::Json => write_json(report),
     }
 }
 
-fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
+fn emit_human(report: &DoctorReport, paths: &crate::paths::Paths) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
     let tty = crate::output::stdout_is_tty();
 
@@ -407,6 +419,24 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
     }
     writeln!(out)?;
 
+    // Issue #433: name the MCP server's log file — the natural first stop
+    // for "MCP tools aren't appearing in my harness", and previously never
+    // mentioned by any surface. Resolved through the same `TOME_MCP_LOG`
+    // policy the server itself applies, so `off`/redirects report
+    // truthfully. Human-only: the path is derivable client-side from the
+    // home root, so the byte-stable `--json` envelope stays untouched.
+    let mcp_log = match crate::mcp::log::resolve_sink(
+        &paths.mcp_log,
+        std::env::var(crate::mcp::log::LOG_ENV).ok().as_deref(),
+    ) {
+        crate::mcp::log::LogSink::Off => {
+            format!("disabled ({}=off)", crate::mcp::log::LOG_ENV)
+        }
+        crate::mcp::log::LogSink::File(path) => path.display().to_string(),
+    };
+    writeln!(out, "MCP server log:  {mcp_log}")?;
+    writeln!(out)?;
+
     // Phase 5 / US5.b: prompts surface (skipped when absent).
     if let Some(p) = &report.prompts {
         let workspace_label = report
@@ -481,7 +511,7 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out)?;
         writeln!(
             out,
-            "  Cleanup: not auto-fixable in Phase 5. Manual rm -rf required; future phases will add tooling.",
+            "  Cleanup: not auto-fixable — see `Suggested fixes` below for the per-directory command.",
         )?;
         writeln!(out)?;
     }

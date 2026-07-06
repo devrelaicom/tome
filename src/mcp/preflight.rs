@@ -62,9 +62,12 @@ pub fn run(_scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, Tome
         // failure (exit 35), not a generic Phase 3 MCP-startup residual
         // (exit 60). Surfacing the specific code lets harnesses
         // distinguish "user hasn't enabled any plugins yet" from "MCP
-        // wiring itself failed".
+        // wiring itself failed". The `hint:` trailer (#433) matches the
+        // error.rs remediation-hint idiom and points at the command that
+        // diagnoses this exact state — this message surfaces on stderr
+        // inside a harness's MCP panel, a dead end without the pointer.
         return Err(TomeError::IndexIntegrityCheckFailure(format!(
-            "index database not found at {} — enable at least one plugin first",
+            "index database not found at {} — enable at least one plugin first\nhint: run `tome doctor` for a full diagnosis",
             db_path.display()
         )));
     }
