@@ -417,6 +417,12 @@
         "--verbose"
       ]
     },
+    "exit-codes": {
+      "subcommands": {},
+      "flags": [
+        "--verbose"
+      ]
+    },
     "completions": {
       "subcommands": {},
       "flags": [
@@ -650,6 +656,11 @@
       "code": 46,
       "category": "guardrails_write_failed",
       "meaning": "Failed to write the guardrails/rules file."
+    },
+    {
+      "code": 47,
+      "category": "reindex_scoped_embedder_change",
+      "meaning": "A scoped reindex was refused because the embedder changed — run a full `tome reindex`."
     },
     {
       "code": 50,

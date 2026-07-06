@@ -820,3 +820,70 @@ fn mcp_error_data_carries_retryable_and_remediation() {
     );
     assert_eq!(custom["hint"], serde_json::json!("v"));
 }
+
+// ---- #436: the `tome exit-codes` reference table ----------------------------
+
+/// Every code `TomeError::exit_code()` can return appears in
+/// `error::EXIT_CODES` with EXACTLY its `category().as_str()` slug. Driven by
+/// `build_each_variant()`, whose companion compile-time exhaustive match
+/// forces every new variant into the list — so a new exit code cannot ship
+/// without a reference-table row.
+#[test]
+fn exit_codes_table_covers_every_variant_code_and_slug() {
+    for (err, code, slug) in build_each_variant() {
+        let row = tome::error::EXIT_CODES
+            .iter()
+            .find(|r| r.code == code)
+            .unwrap_or_else(|| panic!("EXIT_CODES is missing code {code} ({slug})"));
+        assert_eq!(
+            row.category,
+            Some(err.category().as_str()),
+            "EXIT_CODES category for code {code} must match `category()`",
+        );
+    }
+}
+
+/// Docs pin: the main table in `site/docs/reference/exit-codes.md` lists the
+/// IDENTICAL `(code, category)` rows in the same order as `error::EXIT_CODES`,
+/// so `tome exit-codes` and the docs page cannot drift. (The md file is
+/// tracked; the site's own doc-drift check separately pins it against
+/// `cli-surface.json`.)
+#[test]
+fn exit_codes_table_matches_docs_page() {
+    let md_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("site/docs/reference/exit-codes.md");
+    let md = std::fs::read_to_string(&md_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", md_path.display()));
+
+    // Parse `| `N` | `slug` | meaning |` rows. Only the main table's rows
+    // start with a backticked integer cell — the health-verdicts table leads
+    // with the verdict word, so it never matches.
+    let mut docs_rows: Vec<(i32, Option<String>)> = Vec::new();
+    for line in md.lines() {
+        let Some(rest) = line.strip_prefix("| `") else {
+            continue;
+        };
+        let Some((code_str, rest)) = rest.split_once("` | ") else {
+            continue;
+        };
+        let Ok(code) = code_str.parse::<i32>() else {
+            continue;
+        };
+        let category_cell = rest.split(" | ").next().unwrap_or("").trim();
+        let category = match category_cell {
+            "—" => None,
+            slug => Some(slug.trim_matches('`').to_owned()),
+        };
+        docs_rows.push((code, category));
+    }
+
+    let table_rows: Vec<(i32, Option<String>)> = tome::error::EXIT_CODES
+        .iter()
+        .map(|r| (r.code, r.category.map(str::to_owned)))
+        .collect();
+    assert_eq!(
+        docs_rows, table_rows,
+        "site/docs/reference/exit-codes.md and error::EXIT_CODES disagree — \
+         update whichever side is stale (they must list identical (code, category) rows in order)",
+    );
+}

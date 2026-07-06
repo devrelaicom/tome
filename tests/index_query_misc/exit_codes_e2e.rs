@@ -1747,3 +1747,72 @@ fn meta_add_no_harness_detected_exits_89() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// ---- #436: `tome exit-codes` (pre-dispatch, no HOME/index/config) ----------
+
+/// The full table renders on a completely unconfigured machine (nothing under
+/// `$HOME` — the command is intercepted before `Paths::resolve()`), and one
+/// code's row filters correctly, in both human and `--json` modes.
+#[test]
+fn exit_codes_command_works_without_any_configured_state() {
+    let env = ToolEnv::new();
+    // Deliberately NO data-dir creation: the command needs no state at all.
+
+    let full = env
+        .cmd()
+        .args(["exit-codes"])
+        .output()
+        .expect("spawn exit-codes");
+    assert_eq!(
+        full.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&full.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&full.stdout);
+    for needle in ["index_busy", "remote_embedding_invalid", "Success."] {
+        assert!(
+            stdout.contains(needle),
+            "full table missing `{needle}`:\n{stdout}"
+        );
+    }
+
+    // Single-code JSON: exactly one row, the right one, `category` non-null.
+    let one = env
+        .cmd()
+        .args(["--json", "exit-codes", "50"])
+        .output()
+        .expect("spawn exit-codes 50");
+    assert_eq!(one.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&one.stdout).expect("parse JSON");
+    let rows = v["exit_codes"].as_array().expect("exit_codes array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["code"], 50);
+    assert_eq!(rows[0]["category"], "index_busy");
+
+    // The success row's `category` is JSON null (pinned — the cli-surface
+    // `exitCodes` shape).
+    let zero = env
+        .cmd()
+        .args(["--json", "exit-codes", "0"])
+        .output()
+        .expect("spawn exit-codes 0");
+    let v: serde_json::Value = serde_json::from_slice(&zero.stdout).expect("parse JSON");
+    assert!(v["exit_codes"][0]["category"].is_null());
+}
+
+/// An unknown code is a usage error (exit 2) that names the code and points
+/// at the full table.
+#[test]
+fn exit_codes_command_unknown_code_exits_2() {
+    let env = ToolEnv::new();
+    let out = env
+        .cmd()
+        .args(["exit-codes", "11"])
+        .output()
+        .expect("spawn exit-codes 11");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown exit code 11"), "{stderr}");
+    assert!(stderr.contains("tome exit-codes"), "{stderr}");
+}

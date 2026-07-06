@@ -114,6 +114,7 @@ below). It is never carried by the `--json` *error* envelope's `category`.
 | `44` | `hook_settings_write_failed` | Failed to write hook settings. |
 | `45` | `agent_translation_failed` | Agent translation failed. |
 | `46` | `guardrails_write_failed` | Failed to write the guardrails file. |
+| `47` | `reindex_scoped_embedder_change` | A scoped reindex was refused because the embedder changed — run a full `tome reindex`. |
 | `50` | `index_busy` | The index is locked by another process. |
 | `51` | `index_integrity_check_failure` | Index integrity check failed. |
 | `52` | `schema_too_new` | Index schema is newer than this binary supports. |

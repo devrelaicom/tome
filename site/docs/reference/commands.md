@@ -396,6 +396,22 @@ carry an inline `api_key`, which must never be echoed through a user-facing
 surface), and the list-valued `[harness]` composition settings. Setting values
 from the CLI (`config set`) is a planned fast-follow.
 
+## `tome exit-codes`
+
+Print the exit-code reference table: every code with its `--json` error
+`category` slug and a one-line meaning.
+
+| Subcommand | Flags | Purpose |
+| --- | --- | --- |
+| `exit-codes [<code>]` | | Print the full code → category → meaning table, or one code's row (`tome exit-codes 50`). An unknown code is a usage error (exit `2`) pointing at the full table. |
+
+The data is the same static table that backs the [Exit codes](./exit-codes.md)
+page — a test pins the two against each other, so the command and the docs
+cannot drift. It is a pure static lookup over the closed error set: it needs no
+configured HOME, index, config, or lock, and honours the global `--json` flag
+(`category` is `null` for the success row, matching the CLI contract's
+`exitCodes` shape).
+
 ## `tome completions`
 
 Generate a shell completion script and print it to stdout.
