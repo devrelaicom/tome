@@ -182,12 +182,12 @@ drift (run a bare `tome reindex` to switch embedders).
 Read-only pre-flight check across models, index, and drift. **Never takes the
 index lock.** Three distinct health verdicts drive the exit code: `0` when
 **healthy**, `10` when **degraded** (a non-fatal issue such as a missing
-reranker or summariser — queries still serve), and `1` when **unhealthy** (a broken index,
-embedder drift, or a malformed config). Both non-zero codes fail a plain "fail
-on any non-zero" CI gate; the distinct `10` lets a "fail on unhealthy only" gate
-branch (or read `--json`'s `.overall` field — `"ok"` / `"degraded"` /
-`"unhealthy"` — the documented gating source). `--verify` rehashes each
-installed model against its pinned SHA-256.
+reranker or summariser — queries still serve), and `1` when **unhealthy**
+(a broken index, embedder drift, or a malformed config). Both non-zero codes
+fail a plain "fail on any non-zero" CI gate; the distinct `10` lets a "fail on
+unhealthy only" gate branch (or read `--json`'s `.overall` field — `"ok"` /
+`"degraded"` / `"unhealthy"` — the documented gating source). `--verify`
+rehashes each installed model against its pinned SHA-256.
 
 `tome status [<workspace>]` accepts an optional positional workspace name: it
 reports on that named workspace instead of the resolved scope (defaulting to the
@@ -204,10 +204,14 @@ inactive, exactly as with `--workspace <name>`. See
 Comprehensive diagnostic across every subsystem (workspace, models, index,
 drift, catalog caches, harnesses, meta skills). **Read-only by default.**
 
-Human output leads with a one-line verdict (`unhealthy — 1 failing, 2 warnings,
-22 ok`), renders failing sections first, then warnings, and collapses the
-all-ok subsystems into a single line; the global `--verbose` flag restores the
-full section listing. `--json` output is unaffected by this structure.
+Human output leads with a one-line verdict — for example `unhealthy —
+1 failing, 2 warnings, 22 ok` on a well-populated install (a fresh install
+shows far fewer sections) — renders failing sections first, then warnings, and
+collapses the all-ok subsystems into a single line. The global `--verbose`
+flag restores the full section listing: `-v` deliberately does double duty,
+raising log verbosity *and* expanding the report, one "verbose = more output"
+convention rather than a dedicated flag. `--json` output is unaffected by this
+structure.
 
 Exit codes match `tome status`: `0` healthy, `10` degraded, `1` unhealthy — read
 `--json`'s `.overall` field to gate in scripts. When `--fix` runs but un-fixable
@@ -518,6 +522,7 @@ file log rather than failing to start.
   accepts both `--force` and `--yes` (the non-canonical spelling is a hidden
   alias).
 - `-v` / `--verbose` raises log verbosity to info; `-vv` to debug
-  (env: `TOME_LOG`).
+  (env: `TOME_LOG`). For `tome doctor` it also expands the collapsed
+  all-ok sections (deliberate: verbose means more output of every kind).
 - On `SIGINT` (Ctrl-C), Tome exits with code `8`.
 - Every failure class has its own [exit code](./exit-codes.md).

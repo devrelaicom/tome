@@ -145,7 +145,7 @@ pub fn run(
         doctor::fixes::re_assemble(&mut report);
 
         // Phase 12 / US4 (FR-017): `re_assemble` rebuilds `suggested_fixes` via
-        // the 8-arg SSOT, which doesn't know about the corrupt-remote-index
+        // the shared fixes SSOT, which doesn't know about the corrupt-remote-index
         // fix. Re-check it read-only and re-append when it still holds. A
         // BUNDLED-local repair (`reindex --force`) clears
         // `meta.embedder_dimension`, so `check_corrupt_index` then reads
@@ -159,7 +159,7 @@ pub fn run(
         doctor::reappend_corrupt_index_fix(&mut report, &paths, &cfg);
 
         // Issue #291: `re_assemble` rebuilds `suggested_fixes` + `overall` via
-        // the 8-arg SSOT, which doesn't know about the provider-credential
+        // the shared fixes SSOT, which doesn't know about the provider-credential
         // findings. `doctor --fix` NEVER sets a user's env var, so a
         // still-missing `TOME_<NAME>_API_KEY` is never auto-fixed — re-apply the
         // findings read-only so they persist through `--fix` as non-auto-fixable
@@ -174,7 +174,7 @@ pub fn run(
             &cfg,
         );
 
-        // Issue #433: `re_assemble` rebuilds `suggested_fixes` via the 8-arg
+        // Issue #433: `re_assemble` rebuilds `suggested_fixes` via the shared fixes
         // SSOT, which doesn't know about the orphan-data pointers. `doctor
         // --fix` never deletes persistent data (and refreshes no orphan
         // report), so re-apply from the report's own (still-current) orphan
@@ -186,7 +186,7 @@ pub fn run(
             report.orphan_data_dirs.as_ref(),
         );
 
-        // Issue #283: `re_assemble` rebuilds `suggested_fixes` via the 8-arg
+        // Issue #283: `re_assemble` rebuilds `suggested_fixes` via the shared fixes
         // SSOT, which doesn't know about the fresh-install onboarding nudges.
         // `doctor --fix` never enrols a catalog / enables a plugin / configures
         // a harness (those are user product decisions), so a still-not-set-up
@@ -557,11 +557,30 @@ fn build_sections(report: &DoctorReport, g: &Glyphs) -> Vec<Section> {
             report.reranker.version,
             model_glyph(&report.reranker.state),
         );
-        let _ = writeln!(s);
-        let state = if report.embedder.state == "ok" && report.reranker.state == "ok" {
-            SectionState::Ok
+        // #480: the summariser renders in the Models section and counts
+        // toward its state as a WARNING (never Fail) — matching its Degraded
+        // classification (#470/#429). Before this, a summariser-only-broken
+        // install printed a "degraded" verdict whose section counts read
+        // "0 failing, 0 warnings", with nothing in the body to substantiate
+        // it. The warn glyph (not fail) keeps the severity vocabulary aligned
+        // with `classify`.
+        let summariser_glyph = if report.summariser.state == "ok" {
+            format!("{ok} ok")
         } else {
+            format!("{warn} {}", report.summariser.state)
+        };
+        let _ = writeln!(
+            s,
+            "  summariser     {} ({})  {}",
+            report.summariser.name, report.summariser.version, summariser_glyph,
+        );
+        let _ = writeln!(s);
+        let state = if report.embedder.state != "ok" || report.reranker.state != "ok" {
             SectionState::Fail
+        } else if report.summariser.state != "ok" {
+            SectionState::Warn
+        } else {
+            SectionState::Ok
         };
         sections.push(Section { state, body: s });
     }

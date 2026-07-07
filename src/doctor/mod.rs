@@ -324,7 +324,7 @@ pub fn assemble_report(
     // `Subsystem::Provider` SuggestedFix per (provider × capability) naming the
     // exact `TOME_<NAME>_API_KEY`, and escalates `overall` (embedding → Unhealthy,
     // summariser/reranker → Degraded), mirroring `apply_config_finding` /
-    // `corrupt_index_fix`. Not part of the 8-arg classify SSOT, so `--fix`'s
+    // `corrupt_index_fix`. Not part of the classify SSOT, so `--fix`'s
     // `re_assemble` re-applies it (see `commands::doctor`). No-op when every
     // configured provider's credential resolves (byte-stable minimal-report pin
     // unchanged for a clean system).
@@ -332,7 +332,7 @@ pub fn assemble_report(
 
     // Issue #433: per-directory cleanup pointers for the orphan data dirs the
     // Phase 5 surface detects. Never escalates `overall` (orphans stay
-    // informational per contract). Not part of the 9-arg fixes SSOT, so
+    // informational per contract). Not part of the fixes SSOT, so
     // `--fix`'s `re_assemble` re-applies it (see `commands::doctor`).
     apply_orphan_data_findings(&mut suggested_fixes, orphan_data_dirs.as_ref());
 
@@ -341,7 +341,7 @@ pub fn assemble_report(
     // coalesced per-project harness sync, which re-registers the run-hook
     // entries and rewrites the manifest. Escalates `overall` to Degraded
     // (drift, the same class as harness rules/MCP drift). Not part of the
-    // 8-arg classify SSOT, so `--fix`'s `re_assemble` re-applies it via
+    // classify SSOT, so `--fix`'s `re_assemble` re-applies it via
     // `reappend_hook_drift_fixes` (see `commands::doctor`).
     push_hook_drift_fixes(
         &mut suggested_fixes,
@@ -465,7 +465,7 @@ pub fn assemble_report(
 /// Re-check the corrupt-remote-index condition (FR-017) and, when it still
 /// holds, append its cost-aware fix to `report.suggested_fixes`. Called by the
 /// `--fix` command path AFTER `fixes::re_assemble` (which rebuilds the
-/// suggested-fix list via the 8-arg SSOT that does not know about the
+/// suggested-fix list via the shared fixes SSOT that does not know about the
 /// corrupt-index fix). Read-only re-check: a BUNDLED-local repair that succeeded
 /// cleared `meta.embedder_dimension` (via the bundled `reindex --force`), so
 /// `check_corrupt_index` now reads "meta absent → N/A → no finding" and nothing
@@ -493,7 +493,7 @@ pub(crate) fn reappend_corrupt_index_fix(
 /// Issue #283: re-append the fresh-install onboarding nudges to
 /// `report.suggested_fixes` from the report's own workspace + effective-harness
 /// state. Called by the `--fix` command path AFTER `fixes::re_assemble` (which
-/// rebuilds `suggested_fixes` via the 8-arg SSOT that does not know about
+/// rebuilds `suggested_fixes` via the shared fixes SSOT that does not know about
 /// onboarding), mirroring `reappend_corrupt_index_fix`. `doctor --fix` never
 /// enrols a catalog / enables a plugin / configures a harness — those are user
 /// product decisions — so a still-not-set-up install keeps its guidance through
@@ -544,7 +544,7 @@ fn push_hook_drift_fixes(
 }
 
 /// Issue #431: the command-layer re-append after `--fix`'s `re_assemble`
-/// (which rebuilds `suggested_fixes` via the 8-arg SSOT that doesn't know
+/// (which rebuilds `suggested_fixes` via the shared fixes SSOT that doesn't know
 /// about hook-dispatch drift). `fixes::apply`'s harness branch refreshes
 /// `report.hook_translation` after the sync, so a healed surface re-appends
 /// nothing and a still-drifted one keeps its finding + Degraded escalation.
@@ -608,7 +608,7 @@ fn corrupt_index_fix(ci: checks::CorruptIndex, active_is_remote: bool) -> Sugges
 ///
 /// Shared by `assemble_report` (initial pass) and the `--fix` command layer's
 /// re-apply after `fixes::re_assemble` (which rebuilds `suggested_fixes` +
-/// `overall` via the 8-arg SSOT that doesn't know about provider findings),
+/// `overall` via the shared fixes SSOT that doesn't know about provider findings),
 /// mirroring `reappend_corrupt_index_fix` / `apply_config_finding`. `doctor
 /// --fix` never sets a user's env var, so a still-missing credential persists as
 /// a non-auto-fixable manual finding through `--fix` (→ exit 75).
@@ -684,7 +684,7 @@ pub(crate) fn apply_orphan_data_findings(
                 "orphan plugin data at {} — the plugin is no longer enabled in any workspace",
                 dir.display(),
             ),
-            command: format!("rm -rf {}", dir.display()),
+            command: format!("rm -rf '{}'", dir.display()),
             auto_fixable: false,
         });
     }
@@ -696,7 +696,7 @@ pub(crate) fn apply_orphan_data_findings(
                  workspace",
                 dir.display(),
             ),
-            command: format!("rm -rf {}", dir.display()),
+            command: format!("rm -rf '{}'", dir.display()),
             auto_fixable: false,
         });
     }
@@ -1500,7 +1500,7 @@ fn build_suggested_fixes(
 ///
 /// Shared by `assemble_report` (initial pass) and the command layer's
 /// re-append after `fixes::re_assemble` (which rebuilds `suggested_fixes` via
-/// the 8-arg SSOT that doesn't know about onboarding), mirroring the
+/// the shared fixes SSOT that doesn't know about onboarding), mirroring the
 /// `reappend_corrupt_index_fix` / `apply_config_finding` discipline so the
 /// nudges persist through `--fix`.
 pub(crate) fn push_onboarding_fixes(
@@ -1596,7 +1596,7 @@ fn catalog_fix(c: &CatalogCacheHealth) -> Option<SuggestedFix> {
                 "cache directory at {} is not referenced by any registered catalog",
                 c.cache_path.display()
             ),
-            command: format!("rm -rf {}", c.cache_path.display()),
+            command: format!("rm -rf '{}'", c.cache_path.display()),
             auto_fixable: false,
         }),
         CatalogCacheState::Ok => None,

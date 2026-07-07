@@ -162,3 +162,48 @@ fn dry_run_without_fix_is_usage_error() {
         "the error names the missing flag pair: {stderr}",
     );
 }
+
+/// #480: a summariser-only-broken install substantiates its Degraded verdict.
+/// The summariser renders in the Models section and counts toward its state as
+/// a WARNING (matching the #429 Degraded classification), so the verdict line
+/// reads `degraded — 0 failing, 1 warning, …` instead of the pre-#480
+/// `degraded — 0 failing, 0 warnings` that no section count substantiated —
+/// and the Models body renders in the non-verbose warning bucket naming the
+/// summariser.
+#[test]
+fn summariser_only_broken_counts_as_a_warning() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = crate::common::paths_for(&env);
+    // Embedder + reranker installed; the summariser alone reads `missing`.
+    {
+        use tome::embedding::profile::{Profile, embedder_for, reranker_for};
+        crate::common::fabricate_installed_models(
+            &paths,
+            &[
+                embedder_for(Profile::DEFAULT),
+                reranker_for(Profile::DEFAULT),
+            ],
+        );
+    }
+
+    let out = env.cmd().args(["doctor"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let first = stdout.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with("[warn] degraded — 0 failing, 1 warning,"),
+        "a summariser-only-broken install must count exactly one warning; got: {first}",
+    );
+    // The warning section renders in full without --verbose, naming the
+    // summariser state…
+    assert!(stdout.contains("Models:"), "{stdout}");
+    assert!(
+        stdout.contains("summariser") && stdout.contains("missing"),
+        "the Models body must name the missing summariser: {stdout}",
+    );
+    // …and the exit semantics are unchanged (Degraded = exit 10, per #429).
+    assert_eq!(out.status.code(), Some(10), "degraded exit code unchanged");
+}
