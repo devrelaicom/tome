@@ -8,13 +8,21 @@
 //!    this run verifies against; otherwise the stale tree is wiped first.
 //! 2. Stream the HTTP body chunk-by-chunk through a `Sha256` while writing
 //!    to `<.partial>/<filename>`. When a non-empty partial file already
-//!    exists, request `Range: bytes=<len>-` and APPEND on a 206 — the
+//!    exists, request `Range: bytes=<len>-` and APPEND on a 206 whose
+//!    `Content-Range` start matches the requested offset — the
 //!    already-staged prefix is folded into the streaming digest first, so
 //!    the final hash covers the whole file exactly as a fresh download
 //!    would. A 200 (or any server that ignores the range) truncates and
-//!    restarts; an oversized/corrupt partial restarts clean. After every
-//!    chunk, peek the global cancellation flag (FR-053); on cancel, abort
-//!    and RETAIN the `.partial/` tree so the next run resumes.
+//!    restarts; a 206 with a missing/unparsable/mismatched `Content-Range`
+//!    start is never appended (it would splice bytes at the wrong offset —
+//!    undetectable for unchecksummed aux files) and restarts clean with one
+//!    fresh un-ranged request (#480); an oversized/corrupt partial restarts
+//!    clean. When the marker-verified staged PRIMARY is already complete
+//!    (size equals the pin) and passes the pinned SHA-256, the primary
+//!    fetch is skipped entirely — an aux-only interruption never re-pays
+//!    the primary transfer (#480). After every chunk, peek the global
+//!    cancellation flag (FR-053); on cancel, abort and RETAIN the
+//!    `.partial/` tree so the next run resumes.
 //! 3. On EOF, hex-compare the streaming digest against the registry's
 //!    pinned hash. A mismatch on a RESUMED file gets exactly one clean full
 //!    restart (the partial prefix was bad); a mismatch on a fresh download
@@ -192,25 +200,55 @@ pub fn download_model(
     // the .partial dir.
     let pipeline = || -> Result<ModelManifest, TomeError> {
         let primary_dest = partial_dir.join(primary_filename);
-        let (observed_hash, resumed) = stream_to_partial(entry, &primary_dest, byte_progress)?;
-        if let Err(err) = verify_checksum(entry, &observed_hash) {
-            if !resumed {
-                // Verification semantics are byte-identical to pre-resume for
-                // a fresh download: mismatch errors immediately (the outer
-                // arm removes the staging tree).
-                return Err(err);
+
+        // #480: an aux-only interruption retains a COMPLETE primary in the
+        // marker-verified staging tree. When the staged primary's size
+        // already equals the pinned `size_bytes`, hash it from disk and run
+        // the SAME pinned-SHA-256 gate a fresh stream would — on a match the
+        // primary fetch is skipped entirely (an interrupted ~17 MB tokenizer
+        // no longer costs a ~280 MB reranker re-download). Verification is
+        // never skipped, only the network transfer. On a mismatch fall
+        // through to the normal streaming path, which refuses a ranged
+        // resume for an at-bound partial and restarts clean (the pre-#480
+        // behaviour).
+        let primary_already_verified = match std::fs::metadata(&primary_dest) {
+            Ok(meta) if entry.size_bytes > 0 && meta.len() == entry.size_bytes => {
+                verify_checksum(entry, &sha256_file(&primary_dest)?).is_ok()
             }
-            // A resumed file failing its pinned SHA-256 means the staged
-            // prefix was bad (torn write, disk corruption): fall back to
-            // exactly ONE clean full restart, then error as a fresh download
-            // would if it fails again (#420).
-            tracing::warn!(
+            _ => false,
+        };
+        if primary_already_verified {
+            tracing::debug!(
                 model = entry.name,
-                "resumed download failed checksum verification; restarting clean",
+                "staged primary is complete and passes the pinned checksum; \
+                 skipping the primary fetch",
             );
-            std::fs::remove_file(&primary_dest).map_err(TomeError::Io)?;
-            let (fresh_hash, _) = stream_to_partial(entry, &primary_dest, byte_progress)?;
-            verify_checksum(entry, &fresh_hash)?;
+            // Report the complete primary once so a byte bar shows 100%
+            // instead of sitting at 0 while the aux files stream.
+            if let Some(cb) = byte_progress {
+                cb(entry.size_bytes, entry.size_bytes);
+            }
+        } else {
+            let (observed_hash, resumed) = stream_to_partial(entry, &primary_dest, byte_progress)?;
+            if let Err(err) = verify_checksum(entry, &observed_hash) {
+                if !resumed {
+                    // Verification semantics are byte-identical to pre-resume
+                    // for a fresh download: mismatch errors immediately (the
+                    // outer arm removes the staging tree).
+                    return Err(err);
+                }
+                // A resumed file failing its pinned SHA-256 means the staged
+                // prefix was bad (torn write, disk corruption): fall back to
+                // exactly ONE clean full restart, then error as a fresh
+                // download would if it fails again (#420).
+                tracing::warn!(
+                    model = entry.name,
+                    "resumed download failed checksum verification; restarting clean",
+                );
+                std::fs::remove_file(&primary_dest).map_err(TomeError::Io)?;
+                let (fresh_hash, _) = stream_to_partial(entry, &primary_dest, byte_progress)?;
+                verify_checksum(entry, &fresh_hash)?;
+            }
         }
 
         // Fetch every non-primary file (tokenizer.json + optional fastembed
@@ -363,12 +401,16 @@ struct AuxCap<'a> {
 /// Resume protocol (#420): when `dest` already holds a non-empty byte prefix
 /// that is still under its bound (the pinned size for the primary, the byte
 /// cap for an aux file), the request carries `Range: bytes=<len>-`.
-/// A 206 appends to the prefix — the prefix is hashed from disk first, so
-/// the returned digest covers the whole file exactly as a fresh stream
-/// would. A 200 (or any other success status — the server ignored or never
-/// honoured the range) truncates and restarts. A 416 (the offset is past
-/// the server's actual resource end, i.e. the partial is oversized relative
-/// to reality) also truncates and re-requests once without a range. An
+/// A 206 whose `Content-Range` start equals the requested offset appends to
+/// the prefix — the prefix is hashed from disk first, so the returned digest
+/// covers the whole file exactly as a fresh stream would. A 200 (or any
+/// other success status — the server ignored or never honoured the range)
+/// truncates and restarts. A 206 with a missing, unparsable, or mismatched
+/// `Content-Range` start is REFUSED (#480 — appending a wrong-offset tail
+/// would go undetected on an unchecksummed aux file) and restarts clean via
+/// one fresh un-ranged request. A 416 (the offset is past the server's
+/// actual resource end, i.e. the partial is oversized relative to reality)
+/// also truncates and re-requests once without a range. An
 /// oversized-on-disk partial never sends a range at all.
 ///
 /// `total_for_progress` is the byte count reported to `byte_progress` as the
@@ -422,6 +464,29 @@ fn stream_url_to_partial(
         // Range-not-satisfiable: our offset is past the end of the actual
         // resource (the pin and reality disagree — verification will decide
         // later). Restart clean with one un-ranged request.
+        resume_from = 0;
+        response = send_request(url, 0)?;
+    }
+
+    // Cross-check a 206's `Content-Range` start against the offset we asked
+    // for (#480). A missing, unparsable, or mismatched start means a
+    // misbehaving server/proxy is sending a tail from the WRONG offset —
+    // appending it would splice bytes at the wrong position. The primary's
+    // pinned SHA-256 would catch that after the fact, but aux files are
+    // unchecksummed, so the splice must be refused up front: discard the
+    // response and restart clean with one fresh un-ranged request, exactly
+    // like the server-ignores-Range 200 path. The fresh request routes back
+    // through `send_request`, so credential scrubbing on its error path is
+    // unchanged.
+    if resume_from > 0
+        && response.status().as_u16() == 206
+        && content_range_start(&response) != Some(resume_from)
+    {
+        tracing::warn!(
+            requested_offset = resume_from,
+            "206 Content-Range start does not match the requested resume offset; \
+             refusing to append and restarting clean",
+        );
         resume_from = 0;
         response = send_request(url, 0)?;
     }
@@ -515,6 +580,28 @@ fn send_request(url: &str, offset: u64) -> Result<reqwest::blocking::Response, T
             "HTTP get failed: {e}"
         ))))
     })
+}
+
+/// The start offset a 206's `Content-Range: bytes <start>-<end>/<total>`
+/// header advertises, when present and parseable. `None` (absent header,
+/// non-ASCII value, or a shape [`parse_content_range_start`] rejects) reads
+/// as "the offset cannot be trusted" at the resume check above.
+fn content_range_start(response: &reqwest::blocking::Response) -> Option<u64> {
+    let value = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)?
+        .to_str()
+        .ok()?;
+    parse_content_range_start(value)
+}
+
+/// Parse the `<start>` from a `bytes <start>-<end>/<total>` header value
+/// (RFC 9110 §14.4). Anything malformed — including the `bytes */<total>`
+/// unsatisfied-range form, which carries no start — returns `None`.
+fn parse_content_range_start(value: &str) -> Option<u64> {
+    let rest = value.trim().strip_prefix("bytes")?.trim_start();
+    let (start, _) = rest.split_once('-')?;
+    start.trim().parse().ok()
 }
 
 /// Prime a `Sha256` with the existing on-disk bytes of `dest` (the staged
@@ -885,6 +972,27 @@ mod tests {
         );
         let landed = std::fs::read(root.path().join("test-resume-model/model.onnx")).unwrap();
         assert_eq!(landed, payload);
+    }
+
+    /// `Content-Range` start parsing (#480): valid `bytes <start>-<end>/<total>`
+    /// values yield the start; anything malformed — including the
+    /// `bytes */<total>` unsatisfied-range form, which carries no start —
+    /// yields `None`, which the resume check treats as "cannot trust the
+    /// offset" (clean restart).
+    #[test]
+    fn content_range_start_parses_valid_and_rejects_malformed() {
+        assert_eq!(
+            parse_content_range_start("bytes 1024-2047/4096"),
+            Some(1024)
+        );
+        assert_eq!(parse_content_range_start(" bytes  0-99/100 "), Some(0));
+        assert_eq!(parse_content_range_start("bytes 512-1023/*"), Some(512));
+        // No start offset to trust in any of these:
+        assert_eq!(parse_content_range_start("bytes */4096"), None);
+        assert_eq!(parse_content_range_start("bytes garbage"), None);
+        assert_eq!(parse_content_range_start(""), None);
+        assert_eq!(parse_content_range_start("items 1024-2047/4096"), None);
+        assert_eq!(parse_content_range_start("bytes -5-99/100"), None);
     }
 
     /// The production cap is the documented, generous-but-bounded 64 MiB —

@@ -278,10 +278,24 @@ enum Script {
     HonourRange { full: Vec<u8> },
     /// Ignore any `Range` header and reply 200 with the whole body.
     IgnoreRange { full: Vec<u8> },
+    /// Reply 206 to a ranged request but with a `Content-Range` START that
+    /// does NOT match the requested offset (a misbehaving server/proxy
+    /// restarting from 0 while still claiming partial content), serving the
+    /// FULL body as the "tail". A correct client must refuse to append.
+    /// Replies 200 with the whole body when no range came.
+    MismatchedContentRange { full: Vec<u8> },
+    /// Reply 206 to a ranged request WITHOUT any `Content-Range` header
+    /// (e.g. a proxy stripped it), serving the correct tail. The offset is
+    /// unverifiable, so a correct client must refuse to append. Replies 200
+    /// with the whole body when no range came.
+    MissingContentRange { full: Vec<u8> },
 }
 
 /// Scripted sequential server: one `Script` per accepted connection, in
-/// order. Returns the URL plus a recorder of raw request heads.
+/// order. Returns the BASE URL (callers append the file path — the server
+/// itself dispatches purely on accept order) plus a recorder of raw request
+/// heads, so tests can assert on both the `Range` header and the request
+/// path (`GET /model.onnx` vs `GET /tokenizer.json`).
 fn spawn_scripted_server(
     scripts: Vec<Script>,
 ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
@@ -343,10 +357,51 @@ fn spawn_scripted_server(
                     let _ = stream.write_all(&http_200(&full));
                     let _ = stream.flush();
                 }
+                Script::MismatchedContentRange { full } => {
+                    let response = match range_offset {
+                        Some(_) => {
+                            // Claim a start of 0 regardless of the requested
+                            // offset, and serve the full body — the classic
+                            // "proxy restarted from byte 0 but kept the 206".
+                            let mut out = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-{}/{}\r\nConnection: close\r\n\r\n",
+                                full.len(),
+                                full.len() - 1,
+                                full.len(),
+                            )
+                            .into_bytes();
+                            out.extend_from_slice(&full);
+                            out
+                        }
+                        None => http_200(&full),
+                    };
+                    let _ = stream.write_all(&response);
+                    let _ = stream.flush();
+                }
+                Script::MissingContentRange { full } => {
+                    let response = match range_offset {
+                        Some(offset) if (offset as usize) < full.len() => {
+                            // The tail is CORRECT — only the header is gone.
+                            // The client cannot verify the offset, so it must
+                            // still refuse to append.
+                            let tail = &full[offset as usize..];
+                            let mut out = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                tail.len(),
+                            )
+                            .into_bytes();
+                            out.extend_from_slice(tail);
+                            out
+                        }
+                        _ => http_200(&full),
+                    };
+                    let _ = stream.write_all(&response);
+                    let _ = stream.flush();
+                }
             }
         }
     });
-    (format!("http://{addr}/model.onnx"), requests)
+    (format!("http://{addr}"), requests)
 }
 
 /// Extract the offset of a `Range: bytes=N-` request header, if present.
@@ -376,14 +431,18 @@ fn resume_payload() -> Vec<u8> {
 #[test]
 fn interrupted_download_resumes_from_partial_offset_via_206() {
     let full = resume_payload();
-    let (url, requests) = spawn_scripted_server(vec![
+    let (base, requests) = spawn_scripted_server(vec![
         Script::DropAfter {
             prefix: full[..1024].to_vec(),
             claimed_total: full.len(),
         },
         Script::HonourRange { full: full.clone() },
     ]);
-    let entry = entry_for(url, sha256_hex(&full), full.len() as u64);
+    let entry = entry_for(
+        format!("{base}/model.onnx"),
+        sha256_hex(&full),
+        full.len() as u64,
+    );
     let root = TempDir::new().expect("tempdir");
 
     // Run 1: interrupted mid-stream; the partial is retained.
@@ -423,14 +482,18 @@ fn interrupted_download_resumes_from_partial_offset_via_206() {
 #[test]
 fn server_ignoring_range_falls_back_to_clean_restart() {
     let full = resume_payload();
-    let (url, requests) = spawn_scripted_server(vec![
+    let (base, requests) = spawn_scripted_server(vec![
         Script::DropAfter {
             prefix: full[..1024].to_vec(),
             claimed_total: full.len(),
         },
         Script::IgnoreRange { full: full.clone() },
     ]);
-    let entry = entry_for(url, sha256_hex(&full), full.len() as u64);
+    let entry = entry_for(
+        format!("{base}/model.onnx"),
+        sha256_hex(&full),
+        full.len() as u64,
+    );
     let root = TempDir::new().expect("tempdir");
 
     download_model(entry, root.path(), None).expect_err("run 1 must abort mid-stream");
@@ -458,7 +521,7 @@ fn resumed_checksum_failure_falls_back_to_one_clean_restart() {
     // Same length, different bytes: the 206 tail spliced onto the good
     // prefix will NOT hash to the pin.
     let corrupt: Vec<u8> = full.iter().map(|b| b ^ 0x5A).collect();
-    let (url, requests) = spawn_scripted_server(vec![
+    let (base, requests) = spawn_scripted_server(vec![
         Script::DropAfter {
             prefix: full[..1024].to_vec(),
             claimed_total: full.len(),
@@ -466,7 +529,11 @@ fn resumed_checksum_failure_falls_back_to_one_clean_restart() {
         Script::HonourRange { full: corrupt },
         Script::HonourRange { full: full.clone() },
     ]);
-    let entry = entry_for(url, sha256_hex(&full), full.len() as u64);
+    let entry = entry_for(
+        format!("{base}/model.onnx"),
+        sha256_hex(&full),
+        full.len() as u64,
+    );
     let root = TempDir::new().expect("tempdir");
 
     download_model(entry, root.path(), None).expect_err("run 1 must abort mid-stream");
@@ -495,7 +562,7 @@ fn resumed_checksum_failure_falls_back_to_one_clean_restart() {
 fn resumed_checksum_failure_then_fresh_failure_errors_and_cleans() {
     let full = resume_payload();
     let corrupt: Vec<u8> = full.iter().map(|b| b ^ 0x5A).collect();
-    let (url, requests) = spawn_scripted_server(vec![
+    let (base, requests) = spawn_scripted_server(vec![
         Script::DropAfter {
             prefix: full[..1024].to_vec(),
             claimed_total: full.len(),
@@ -506,7 +573,11 @@ fn resumed_checksum_failure_then_fresh_failure_errors_and_cleans() {
         // The clean restart is served corrupt bytes too.
         Script::IgnoreRange { full: corrupt },
     ]);
-    let entry = entry_for(url, sha256_hex(&full), full.len() as u64);
+    let entry = entry_for(
+        format!("{base}/model.onnx"),
+        sha256_hex(&full),
+        full.len() as u64,
+    );
     let root = TempDir::new().expect("tempdir");
 
     download_model(entry, root.path(), None).expect_err("run 1 must abort mid-stream");
@@ -527,6 +598,212 @@ fn resumed_checksum_failure_then_fresh_failure_errors_and_cleans() {
         !root.path().join("test-model").exists(),
         "no model dir may land on double checksum failure",
     );
+}
+
+/// Two-file (primary + one aux) entry whose URLs point at `base`. Same
+/// `Box::leak` fixture discipline as [`entry_for`]; the aux-URL slice needs
+/// its own leak to satisfy the `&'static [&'static str]` field.
+fn two_file_entry_for(base: &str, primary_sha: String, primary_size: u64) -> &'static ModelEntry {
+    let primary_url = format!("{base}/model.onnx");
+    let aux_url = format!("{base}/tokenizer.json");
+    let aux_urls: &'static [&'static str] =
+        Box::leak(vec![&*Box::leak(aux_url.into_boxed_str())].into_boxed_slice());
+    Box::leak(Box::new(ModelEntry {
+        name: "test-model",
+        version: "1",
+        kind: ModelKind::Embedder,
+        source_url: Box::leak(primary_url.into_boxed_str()),
+        sha256: Box::leak(primary_sha.into_boxed_str()),
+        size_bytes: primary_size,
+        licence: "MIT",
+        embedding_dim: Some(384),
+        files: &["model.onnx", "tokenizer.json"],
+        aux_urls,
+    }))
+}
+
+/// A deterministic aux payload distinct from [`resume_payload`].
+fn aux_payload() -> Vec<u8> {
+    (0u32..1024)
+        .flat_map(|i| (i ^ 0x00FF_00FF).to_le_bytes())
+        .collect()
+}
+
+/// The #480 two-file resume scenario: run 1 lands the primary in full but is
+/// interrupted mid-aux; run 2 must (a) NOT re-fetch the completed,
+/// checksum-verified primary — no second `GET /model.onnx` — and (b) resume
+/// the aux with `Range: bytes=<staged len>-`, appending the 206 tail.
+#[test]
+fn aux_interruption_resumes_aux_via_206_without_refetching_primary() {
+    let primary = resume_payload();
+    let aux = aux_payload();
+    let (base, requests) = spawn_scripted_server(vec![
+        // Run 1: primary completes (no partial exists yet → no Range → 200)…
+        Script::HonourRange {
+            full: primary.clone(),
+        },
+        // …then the aux drops mid-stream.
+        Script::DropAfter {
+            prefix: aux[..512].to_vec(),
+            claimed_total: aux.len(),
+        },
+        // Run 2: the ONLY request is the ranged aux fetch.
+        Script::HonourRange { full: aux.clone() },
+    ]);
+    let entry = two_file_entry_for(&base, sha256_hex(&primary), primary.len() as u64);
+    let root = TempDir::new().expect("tempdir");
+
+    download_model(entry, root.path(), None).expect_err("run 1 must abort during the aux fetch");
+    let partial_dir = root.path().join("test-model.partial");
+    let staged_aux = std::fs::metadata(partial_dir.join("tokenizer.json"))
+        .map(|m| m.len())
+        .expect("run 1 must retain the interrupted aux partial");
+    assert!(staged_aux > 0, "retained aux partial must be non-empty");
+    assert_eq!(
+        std::fs::metadata(partial_dir.join("model.onnx"))
+            .map(|m| m.len())
+            .expect("run 1 must retain the completed primary"),
+        primary.len() as u64,
+        "the primary must be complete in the retained staging tree",
+    );
+
+    download_model(entry, root.path(), None).expect("run 2 must resume the aux and succeed");
+
+    let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        reqs.len(),
+        3,
+        "primary + aux (run 1), aux only (run 2); got:\n{reqs:#?}",
+    );
+    assert_eq!(
+        reqs.iter().filter(|r| r.contains("/model.onnx")).count(),
+        1,
+        "the completed primary must NOT be re-fetched on run 2; requests:\n{reqs:#?}",
+    );
+    assert!(
+        reqs[2].contains("/tokenizer.json"),
+        "run 2's only request must target the aux; request was:\n{}",
+        reqs[2],
+    );
+    assert_eq!(
+        parse_range_offset(&reqs[2]),
+        Some(staged_aux),
+        "run 2 must request `Range: bytes=<staged aux len>-`; request was:\n{}",
+        reqs[2],
+    );
+
+    let landed_primary = std::fs::read(root.path().join("test-model/model.onnx")).unwrap();
+    assert_eq!(landed_primary, primary);
+    let landed_aux = std::fs::read(root.path().join("test-model/tokenizer.json")).unwrap();
+    assert_eq!(
+        landed_aux, aux,
+        "the resumed aux must reassemble to the full payload"
+    );
+    assert!(
+        !partial_dir.exists(),
+        "partial dir must be gone after a successful aux-only resume",
+    );
+}
+
+/// A 206 whose `Content-Range` start disagrees with the requested offset is
+/// never appended: the downloader restarts clean (one fresh un-ranged
+/// request). Driven on the AUX file — the unchecksummed path where a
+/// wrong-offset splice would previously have landed silently (#480): the
+/// pre-fix appender would have written `prefix + full` (a corrupt sidecar)
+/// with no later verification to catch it.
+#[test]
+fn aux_content_range_mismatch_falls_back_to_clean_restart() {
+    let primary = resume_payload();
+    let aux = aux_payload();
+    let (base, requests) = spawn_scripted_server(vec![
+        // Run 1: primary completes, aux drops mid-stream.
+        Script::HonourRange {
+            full: primary.clone(),
+        },
+        Script::DropAfter {
+            prefix: aux[..512].to_vec(),
+            claimed_total: aux.len(),
+        },
+        // Run 2: the ranged aux resume gets a 206 claiming the WRONG start…
+        Script::MismatchedContentRange { full: aux.clone() },
+        // …so the downloader must discard it and re-request fresh (no Range).
+        Script::HonourRange { full: aux.clone() },
+    ]);
+    let entry = two_file_entry_for(&base, sha256_hex(&primary), primary.len() as u64);
+    let root = TempDir::new().expect("tempdir");
+
+    download_model(entry, root.path(), None).expect_err("run 1 must abort during the aux fetch");
+    download_model(entry, root.path(), None).expect("run 2 must recover via a clean aux restart");
+
+    let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        reqs.len(),
+        4,
+        "primary + aux (run 1), refused 206 + fresh restart (run 2); got:\n{reqs:#?}",
+    );
+    assert!(
+        parse_range_offset(&reqs[2]).is_some(),
+        "request 3 must be the ranged aux resume attempt; request was:\n{}",
+        reqs[2],
+    );
+    assert_eq!(
+        parse_range_offset(&reqs[3]),
+        None,
+        "the post-mismatch restart must be a FRESH request (no Range); got:\n{}",
+        reqs[3],
+    );
+    let landed_aux = std::fs::read(root.path().join("test-model/tokenizer.json")).unwrap();
+    assert_eq!(
+        landed_aux, aux,
+        "a mismatched 206 must never be appended — the landed aux would be a \
+         wrong-offset splice",
+    );
+}
+
+/// A 206 with NO `Content-Range` header at all (a stripping proxy) is
+/// equally untrustworthy: even though this server happens to send the
+/// correct tail, the offset is unverifiable, so the downloader must refuse
+/// the append and restart clean. The pre-#480 appender would have accepted
+/// it in 2 requests; the fix costs exactly one extra fresh request.
+#[test]
+fn missing_content_range_206_falls_back_to_clean_restart() {
+    let full = resume_payload();
+    let (base, requests) = spawn_scripted_server(vec![
+        Script::DropAfter {
+            prefix: full[..1024].to_vec(),
+            claimed_total: full.len(),
+        },
+        Script::MissingContentRange { full: full.clone() },
+        Script::HonourRange { full: full.clone() },
+    ]);
+    let entry = entry_for(
+        format!("{base}/model.onnx"),
+        sha256_hex(&full),
+        full.len() as u64,
+    );
+    let root = TempDir::new().expect("tempdir");
+
+    download_model(entry, root.path(), None).expect_err("run 1 must abort mid-stream");
+    download_model(entry, root.path(), None).expect("run 2 must recover via a clean restart");
+
+    let reqs = requests.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        reqs.len(),
+        3,
+        "interrupted run + refused header-less 206 + fresh restart; got:\n{reqs:#?}",
+    );
+    assert!(
+        parse_range_offset(&reqs[1]).is_some(),
+        "request 2 must be the ranged resume attempt",
+    );
+    assert_eq!(
+        parse_range_offset(&reqs[2]),
+        None,
+        "the post-refusal restart must be a FRESH request (no Range); got:\n{}",
+        reqs[2],
+    );
+    let landed = std::fs::read(root.path().join("test-model/model.onnx")).unwrap();
+    assert_eq!(landed, full);
 }
 
 #[test]
