@@ -1645,6 +1645,8 @@ pub(crate) fn probe_dispatch_state(
     // Presence via `symlink_metadata` (never follows the final component),
     // independent of whether the read succeeded: a malformed or refused file
     // is PRESENT → `Drift`; only a genuinely absent file is `Missing`.
+    // One corner: a dangling INTERMEDIATE symlink component is refused but
+    // stats ENOENT → `Missing`; the fix is the same re-sync either way.
     let file_existed = match &loaded {
         Ok((_, existed)) => *existed,
         Err(_) => hook_path.symlink_metadata().is_ok(),
