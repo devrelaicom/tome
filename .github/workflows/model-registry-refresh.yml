@@ -28,6 +28,11 @@ jobs:
       CARGO_TERM_COLOR: always
       # Keep telemetry off on the runner (defence-in-depth, mirrors ci.yml).
       TOME_TELEMETRY: "0"
+      # Where the refresh bin writes its Markdown summary of any isolated bad
+      # upstream entries it skipped (within guardrail limits). The bin only
+      # writes this file when it actually skipped something; the "Open PR" step
+      # embeds it in the PR body so the reviewer sees exactly what was dropped.
+      REFRESH_SKIP_REPORT: ${{ github.workspace }}/model-registry-skip-report.md
     steps:
       - uses: actions/checkout@v5
         with:
@@ -75,6 +80,13 @@ jobs:
           # terminate the block and break workflow parsing. Single-quoted format
           # keeps backticks literal (no shell command substitution).
           BODY=$(printf 'Automated weekly refresh of `assets/model-registry/registry.json` from models.dev/api.json.\n\nReview the diff to confirm the upstream data looks reasonable before merging.\n')
+          # If the refresh dropped isolated bad upstream entries (within guardrail
+          # limits) the bin wrote a Markdown summary to REFRESH_SKIP_REPORT.
+          # Append it so the reviewer sees exactly what was excluded. -s is true
+          # only for a non-empty file, so a clean refresh adds nothing.
+          if [ -s "${REFRESH_SKIP_REPORT}" ]; then
+            BODY="${BODY}"$'\n'"$(cat "${REFRESH_SKIP_REPORT}")"
+          fi
           gh pr create \
             --title "chore(model-registry): weekly registry refresh" \
             --body "${BODY}" \
