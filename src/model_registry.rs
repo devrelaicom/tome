@@ -221,6 +221,25 @@ struct RawModel {
     release_date: String,
 }
 
+/// models.dev sometimes publishes a month-precision `release_date`
+/// (`YYYY-MM`, e.g. kimi-k2.5's `2026-01`), which the strict full-date
+/// validator would reject and fail the whole refresh (#487/#455). Normalise
+/// exactly that shape to the first of the month so every stored date is a
+/// full `YYYY-MM-DD`; anything else passes through verbatim for
+/// `validate_snapshot` to judge (an out-of-range month like `2026-13`
+/// becomes `2026-13-01` and still fails loudly there).
+fn normalize_release_date(raw: String) -> String {
+    let b = raw.as_bytes();
+    if b.len() == 7
+        && b[4] == b'-'
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..].iter().all(u8::is_ascii_digit)
+    {
+        return format!("{raw}-01");
+    }
+    raw
+}
+
 /// Lenient parse of `models.dev/api.json` → our trimmed snapshot.
 /// `fetched_at` is supplied by the caller (no clock in this module).
 pub fn parse_raw_api(bytes: &[u8], fetched_at: &str) -> Result<RegistrySnapshot, String> {
@@ -234,7 +253,7 @@ pub fn parse_raw_api(bytes: &[u8], fetched_at: &str) -> Result<RegistrySnapshot,
             .map(|(id, m)| Model {
                 id,
                 name: m.name,
-                release_date: m.release_date,
+                release_date: normalize_release_date(m.release_date),
             })
             .collect();
         models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -494,6 +513,64 @@ mod tests {
         let mut no_anthropic = ok.clone();
         no_anthropic.providers.remove("anthropic");
         assert!(validate_snapshot(&no_anthropic).is_err());
+    }
+
+    #[test]
+    fn parse_normalizes_month_precision_release_date() {
+        // #487/#455: kimi-k2.5 shipped a month-precision `2026-01` upstream
+        // and the refresh failed at validation. Parse now lands it as the
+        // first of the month; every other shape passes through verbatim.
+        let raw = br#"{
+            "moonshotai": { "models": {
+                "kimi-k2.5":  { "name": "Kimi K2.5",  "release_date": "2026-01" },
+                "kimi-full":  { "name": "Kimi Full",  "release_date": "2026-01-15" },
+                "kimi-year":  { "name": "Kimi Year",  "release_date": "2026" },
+                "kimi-short": { "name": "Kimi Short", "release_date": "2026-1" }
+            } }
+        }"#;
+        let snap = parse_raw_api(raw, "2026-07-07T00:00:00Z").unwrap();
+        let dates: BTreeMap<&str, &str> = snap.providers["moonshotai"]
+            .models
+            .iter()
+            .map(|m| (m.id.as_str(), m.release_date.as_str()))
+            .collect();
+        assert_eq!(dates["kimi-k2.5"], "2026-01-01", "YYYY-MM gains day 01");
+        assert_eq!(dates["kimi-full"], "2026-01-15", "full date untouched");
+        assert_eq!(dates["kimi-year"], "2026", "bare year passes through");
+        assert_eq!(
+            dates["kimi-short"], "2026-1",
+            "1-digit month passes through"
+        );
+    }
+
+    #[test]
+    fn month_precision_date_validates_but_out_of_range_month_still_fails() {
+        let ok = parse_raw_api(test_api_bytes(), "2026-06-20T00:00:00Z").unwrap();
+
+        // A normalized month-precision date is a real date → accepted.
+        let mut month_only = ok.clone();
+        month_only
+            .providers
+            .get_mut("anthropic")
+            .unwrap()
+            .models
+            .first_mut()
+            .unwrap()
+            .release_date = normalize_release_date("2026-01".to_owned());
+        assert!(validate_snapshot(&month_only).is_ok());
+
+        // Normalisation is shape-only: `2026-13` → `2026-13-01` is not a
+        // real date, so the validator still rejects it loudly.
+        let mut bad_month = ok;
+        bad_month
+            .providers
+            .get_mut("anthropic")
+            .unwrap()
+            .models
+            .first_mut()
+            .unwrap()
+            .release_date = normalize_release_date("2026-13".to_owned());
+        assert!(validate_snapshot(&bad_month).is_err());
     }
 
     #[test]
