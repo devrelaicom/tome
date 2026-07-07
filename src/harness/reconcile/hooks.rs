@@ -1594,6 +1594,16 @@ pub(crate) struct DispatchProbe {
 /// NOT probed: entries-match-but-version-absent is a hand-edit edge the next
 /// sync heals silently, and flagging it here would report drift `--fix`
 /// cannot always reproduce byte-for-byte.
+///
+/// The launcher is the second self-healing carve-out (#480): the presence
+/// test is launcher-TOLERANT — [`crate::harness::hooks::tome_entries_equal`]
+/// normalises the recognised run-hook command leaf before comparing — so an
+/// entry written by an older or relocated `tome` binary reads `ok` here even
+/// though a real sync would rewrite it in place
+/// ([`crate::harness::hooks::upsert_tome_owned_in_array`] replaces on a
+/// tolerant match with differing bytes). Deliberate: the launcher path
+/// legitimately differs across installs, the next sync heals the entry
+/// silently, and flagging it would report drift `--fix` cannot pin.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn probe_dispatch_state(
     paths: &crate::paths::Paths,
@@ -1619,14 +1629,25 @@ pub(crate) fn probe_dispatch_state(
         };
     };
 
-    // Hook-file side. A malformed file is `Drift` (sync would fail loudly on
-    // it; the doctor verdict points at the same re-sync).
+    // Hook-file side. A present-but-malformed file is `Drift` (sync would
+    // fail loudly on it; the doctor verdict points at the same re-sync).
+    //
+    // Read/write parity (#480, the P8 lint-parser precedent): refuse a
+    // symlinked component BEFORE reading, exactly like the writer sinks
+    // above, and degrade the refusal into the same unreadable-file arm — the
+    // read-only probe never halts doctor, and a re-sync fails loudly (exit
+    // 44) on the same component.
     let mut missing_events: Vec<String> = Vec::new();
     let mut stale_entry = false;
-    let loaded = load_hook_file(&hook_path);
+    let loaded = crate::util::refuse_symlinked_component(&hook_path)
+        .map_err(|e| hook_symlink_refusal(&hook_path, e))
+        .and_then(|()| load_hook_file(&hook_path));
+    // Presence via `symlink_metadata` (never follows the final component),
+    // independent of whether the read succeeded: a malformed or refused file
+    // is PRESENT → `Drift`; only a genuinely absent file is `Missing`.
     let file_existed = match &loaded {
         Ok((_, existed)) => *existed,
-        Err(_) => false,
+        Err(_) => hook_path.symlink_metadata().is_ok(),
     };
     match loaded {
         Ok((mut doc, _)) => {
@@ -1657,7 +1678,8 @@ pub(crate) fn probe_dispatch_state(
             }
         }
         Err(_) => {
-            // Unparsable hook file: every used event counts as unregistered.
+            // Unreadable hook file (malformed, oversize, or symlink-refused):
+            // every used event counts as unregistered.
             for ev in &used {
                 missing_events.push(ev.cc_name().to_string());
             }
