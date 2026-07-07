@@ -14,8 +14,7 @@ knows which workspace they belong to.
 
 ```
 ~/.tome/
-├── config.toml          # global configuration
-├── settings.toml        # global settings layer (harness composition)
+├── config.toml          # global configuration (includes the [harness] settings layer)
 ├── index.db             # the central SQLite search index
 ├── index.lock           # the index advisory lock
 ├── catalogs/            # cloned catalog content
@@ -94,7 +93,7 @@ them because a provider entry can carry an inline credential.
 
 Harness composition is resolved from layered settings:
 
-- **Global** — `~/.tome/settings.toml`
+- **Global** — the `[harness]` section of `~/.tome/config.toml`
 - **Workspace** — `~/.tome/workspaces/<name>/settings.toml`
 
 The workspace layer composes over the global layer to produce the configuration
@@ -226,7 +225,7 @@ variables are documented in full under
 | Variable | Effect |
 | --- | --- |
 | `TOME_<NAME>_API_KEY` | Per-provider BYOK credential; wins over an inline `api_key`. See credential resolution above. |
-| `TOME_PROVIDER_MAX_RETRIES` | Retries beyond the first attempt for a remote provider request. Default `2` (3 total attempts), clamped to `0..=10`. An unset, empty, non-numeric, negative, or over-range value falls back to the default; over-range clamps down to `10`. |
+| `TOME_PROVIDER_MAX_RETRIES` | Retries beyond the first attempt for a remote provider request. Default `2` (3 total attempts). An unset, empty, or non-numeric value falls back to the default; a valid number is clamped to `0..=10`, so a value above `10` becomes `10`. |
 | `TOME_PROVIDER_TIMEOUT_SECS` | Per-request timeout in whole seconds. Default `30`; a missing or unparsable value uses the default. |
 | `TOME_GAUGE_ENDPOINT` | Override the telemetry collector endpoint (must be `https` or a loopback address). Wins over `[telemetry] endpoint`. |
 | `TOME_TELEMETRY` | `1` forces telemetry on (beating the CI auto-disable); `0` forces it off. |

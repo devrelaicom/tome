@@ -34,4 +34,10 @@ extend-exclude = [
     # content must not be edited in place to fix typos — address in tome-site
     # and re-vendor. "unparseable" in docs/authoring/lint.md is upstream usage.
     "site/",
+    # Auto-generated model registry, refreshed from models.dev. It carries
+    # verbatim upstream model ids/names (e.g. "gemini-2.5-flash-nothink",
+    # "Relace") that the typos lint mis-flags; every refresh re-introduces new
+    # vendor names, so the whole generated file is excluded rather than chased
+    # word-by-word. Same rationale as vendor/ and THIRD-PARTY-LICENSES.
+    "assets/model-registry/registry.json",
 ]

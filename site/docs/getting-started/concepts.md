@@ -1,6 +1,6 @@
 ---
 title: Concepts
-sidebar_position: 4
+sidebar_position: 5
 ---
 
 # Concepts
@@ -25,7 +25,7 @@ catalog (git repo)
     (you, at a shell)      (your agent, mid-task)
 
 tome harness use <name> writes each harness's native config:
-Claude Code · Cursor · Codex · Gemini CLI · OpenCode
+Claude Code · Cursor · Codex · Gemini CLI · OpenCode · … (seventeen in all)
 ```
 
 ## Catalog

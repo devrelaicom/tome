@@ -142,6 +142,7 @@ rewrites them to their Tome equivalents and reports every occurrence:
 | `${CLAUDE_SKILL_DIR}` | `${TOME_SKILL_DIR}` |
 | `${CLAUDE_PLUGIN_DATA}` | `${TOME_PLUGIN_DATA}` |
 | `${CLAUDE_PLUGIN_ROOT}` | `${TOME_PLUGIN_DIR}` |
+| `${CLAUDE_PROJECT_DIR}` | `${TOME_PROJECT_DIR}` |
 
 Legacy positional arguments (`$1`..`$9`) are rewritten to Tome's 0-based
 argument substitution.

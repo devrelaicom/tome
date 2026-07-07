@@ -61,7 +61,7 @@ Both models run on your machine; nothing is sent anywhere.
 | Flag | Effect |
 | --- | --- |
 | `--top-k <n>` | Return at most *n* results. |
-| `--min-score <s>` | Drop results scoring below *s*. |
+| `--min-score <s>` | Set the score floor used by `--strict`. On its own it changes nothing about which rows return — it's reflected in the header line and the `threshold_passed` JSON field, but results are only dropped when `--strict` is also passed. |
 | `--no-rerank` | Skip the reranking stage; results come back in raw KNN order. |
 | `--catalog <name>` | Restrict the search to a catalog. Repeatable: pass `--catalog` several times to include entries from any of the named catalogs. |
 | `--plugin <name>` | Restrict the search to a plugin (across all catalogs unless `--catalog` is also set). Repeatable: include entries from any of the named plugins. |

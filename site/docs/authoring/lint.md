@@ -131,6 +131,10 @@ path (or `null` when the finding has no location), and `line` is a 1-based line
 number (or `null` when the location has no line). `autofixable` is `true` when
 `--autofix` can apply the fix mechanically.
 
+The `summary` object alongside the findings counts the run —
+`{ "errors": N, "warnings": N, "infos": N, "fixed": N }` — where `fixed` is how
+many findings `--autofix` patched (always `0` when `--autofix` wasn't passed).
+
 The per-finding shape is identical to a `convert --json` diagnostic line — see
 [converting](./convert.md#scripting-with---json) for the shared contract. A
 script that reads lint findings can read convert diagnostics with the same

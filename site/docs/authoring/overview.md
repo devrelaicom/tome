@@ -36,7 +36,7 @@ your-catalog/
     ├── agents/
     │   └── <name>.md          # one file per agent
     └── hooks/
-        └── <name>.md          # one file per hook
+        └── hooks.json         # event-driven actions (one JSON file)
 ```
 
 The layout is based on Claude Code's plugin format, which is why converting
@@ -102,8 +102,8 @@ A plugin contributes four kinds of
   prompts.
 - **Agents** — `agents/<name>.md`. Translated to each harness's native agent
   format where supported.
-- **Hooks** — `hooks/<name>.md`. Event-driven actions, wired in where the
-  harness supports them.
+- **Hooks** — `hooks/hooks.json`. A single JSON file describing event-driven
+  actions, wired in where the harness supports them.
 
 ## The three commands
 
