@@ -268,6 +268,59 @@ fn seeded_cursor_drift_states_detected_and_fix_heals() {
     );
 }
 
+/// #480: a PRESENT-but-malformed hook file is `drift`, not `missing` — the
+/// file exists on disk (presence probed via `symlink_metadata`, independent
+/// of parse success), and a re-sync fails loudly on the same file, which is
+/// exactly what the drift verdict points at.
+#[test]
+fn present_but_malformed_hook_file_classifies_as_drift_not_missing() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::cursor::Cursor)]);
+
+    let fx = build();
+    seed_plugin(&fx);
+
+    std::fs::create_dir_all(fx.project.join(".cursor")).expect("create .cursor");
+    std::fs::write(hook_file(&fx), "{ not json").expect("write malformed hook file");
+
+    let (state, missing) = probe(&fx);
+    assert_eq!(state, "drift", "present-but-malformed file is drift");
+    assert_eq!(missing, vec!["PreToolUse".to_owned()]);
+}
+
+/// #480: read/write parity (the P8 lint-parser precedent) — the probe routes
+/// its read through `refuse_symlinked_component` exactly like the writer
+/// sinks, and degrades the refusal to `drift` (never an error: the read-only
+/// probe must not halt doctor). Without the guard the probe would happily
+/// read THROUGH the symlink and report `ok` for a surface every real sync
+/// fails closed on.
+#[cfg(unix)]
+#[test]
+fn symlinked_hook_file_refused_and_classifies_as_drift() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::cursor::Cursor)]);
+
+    let fx = build();
+    seed_plugin(&fx);
+
+    // A real sync first, so the link target holds EXACTLY the content the
+    // probe would call `ok` — proving the refusal (not a content mismatch)
+    // produces the drift verdict.
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync");
+    let real = hook_file(&fx);
+    let moved = fx.project.join("hooks-elsewhere.json");
+    std::fs::rename(&real, &moved).expect("relocate hook file");
+    std::os::unix::fs::symlink(&moved, &real).expect("plant symlink");
+
+    let (state, missing) = probe(&fx);
+    assert_eq!(state, "drift", "symlink-refused read degrades to drift");
+    assert_eq!(missing, vec!["PreToolUse".to_owned()]);
+}
+
 /// Outside a project context the probe cannot run (the native hook file is
 /// per-project): rows carry `state: None` and no drift finding is pushed.
 #[test]
