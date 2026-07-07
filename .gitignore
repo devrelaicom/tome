@@ -37,5 +37,10 @@
 /RELEASE-BINARY-SIZE.md
 /constitution-review-report.md
 
+# Ephemeral skip-report the model-registry refresh bin writes for the PR body
+# (see .github/workflows/model-registry-refresh.yml). Never committed — the
+# refresh commit stages only the registry asset — but ignored defensively.
+/model-registry-skip-report.md
+
 # Superpowers brainstorming design docs (process artefacts, kept locally).
 /docs/superpowers/

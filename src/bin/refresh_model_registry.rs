@@ -5,6 +5,15 @@
 //! calling workflow branches on the printed status to open a PR or file an
 //! issue.
 //!
+//! Isolated bad upstream entries (a malformed / out-of-range `release_date`, an
+//! empty id) are DROPPED rather than failing the whole refresh, within the
+//! systemic-breakage guardrails in [`tome::model_registry::refresh_from_bytes`].
+//! When any entry is skipped, each drop is logged to stderr (prefixed
+//! `model-registry refresh:`) and, if the env var `REFRESH_SKIP_REPORT` names a
+//! path, a Markdown summary is written there for the PR body.  Only the status
+//! token is ever printed to stdout (the workflow captures stdout into a single
+//! variable); all skip detail goes to stderr / the report file.
+//!
 //! # Placement note
 //!
 //! The plan originally called for wiring this step inside `release.yml`, but
@@ -59,11 +68,31 @@ fn run(asset: &Path) -> Result<String, String> {
         .format(&time::format_description::well_known::Rfc3339)
         .map_err(|e| scrub(&format!("format ts: {e}")))?;
 
-    // Parse → validate BEFORE writing anything (validate-before-overwrite).
-    let snapshot = tome::model_registry::parse_raw_api(&bytes, &fetched_at)
-        .map_err(|e| scrub(&format!("trim: {e}")))?;
-    tome::model_registry::validate_snapshot(&snapshot)
-        .map_err(|e| scrub(&format!("validate: {e}")))?;
+    // Parse → lenient-sanitize → guardrail → validate BEFORE writing anything
+    // (validate-before-overwrite). Isolated bad upstream entries are dropped
+    // within guardrail limits; a systemic breakage surfaces as
+    // `failed:guardrail: …` and a structural failure as `failed:validate: …`.
+    let (snapshot, report) =
+        tome::model_registry::refresh_from_bytes(&bytes, &fetched_at).map_err(|e| scrub(&e))?;
+
+    // Surface any dropped entries — stderr (the CI "log") and, if requested, a
+    // Markdown report file for the PR body. NEVER stdout: the workflow captures
+    // stdout into a single status variable. This bin is fail-open, so a report
+    // write failure is a warning, not a run failure.
+    if !report.is_empty() {
+        for line in report.log_lines() {
+            eprintln!("model-registry refresh: {line}");
+        }
+        if let Some(path) = std::env::var_os("REFRESH_SKIP_REPORT")
+            && !path.is_empty()
+            && let Err(e) = std::fs::write(&path, report.to_markdown())
+        {
+            eprintln!(
+                "model-registry refresh: warning: could not write skip report to {}: {e}",
+                Path::new(&path).display()
+            );
+        }
+    }
 
     // Only now write to disk — atomically, via temp-file-then-rename in the
     // same directory (POSIX-atomic, same-FS), per the constitution's
