@@ -87,12 +87,26 @@ jobs:
           if [ -s "${REFRESH_SKIP_REPORT}" ]; then
             BODY="${BODY}"$'\n'"$(cat "${REFRESH_SKIP_REPORT}")"
           fi
-          gh pr create \
+          # Create the PR. The ONE benign failure is "a PR is already open for
+          # this head" (a second same-day run: the branch was just force-updated,
+          # so there is nothing more to do) — tolerate only that. Any OTHER
+          # failure (a permissions/policy error, an API outage) must surface
+          # loudly and fail the step, so a broken refresh can never masquerade as
+          # a green run. Capture stdout+stderr and branch on the message rather
+          # than swallowing every non-zero exit with `|| echo`.
+          if pr_out=$(gh pr create \
             --title "chore(model-registry): weekly registry refresh" \
             --body "${BODY}" \
             --base main \
-            --head "${BRANCH}" \
-            || echo "PR already exists for ${BRANCH}; branch updated."
+            --head "${BRANCH}" 2>&1); then
+            echo "${pr_out}"
+          elif grep -qiE 'already exists' <<<"${pr_out}"; then
+            echo "PR already exists for ${BRANCH}; branch updated."
+          else
+            echo "::error::gh pr create failed for ${BRANCH}:"
+            echo "${pr_out}"
+            exit 1
+          fi
 
       # --- failed:… : file an issue so the team can investigate --------------
       - name: File issue on refresh failure
