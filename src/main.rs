@@ -211,6 +211,10 @@ fn main() {
         Command::Workspace(args) => {
             commands::workspace::run(args.command, cli.scope.workspace.as_deref(), &scope, mode)
         }
+        // DELIBERATE (#480): the global `-v` log-verbosity flag doubles as
+        // doctor's report-expansion toggle — one "verbose = more output"
+        // convention, not a dedicated flag. `-vv` behaves like `-v` for the
+        // report (only the tracing level rises further).
         Command::Doctor(args) => commands::doctor::run(args, &scope, mode, cli.verbose > 0),
         Command::Harness(args) => commands::harness::run(args, &scope, mode),
         Command::Skill(cmd) => commands::skill::run(cmd, &scope, mode),

@@ -312,7 +312,7 @@ fn assemble_reports_orphan_clone_in_catalogs_list() {
         "orphan removal is NOT auto-fixable per contract",
     );
     assert!(
-        orphan_fix.command.starts_with("rm -rf"),
+        orphan_fix.command.starts_with("rm -rf '") && orphan_fix.command.ends_with("'"),
         "orphan fix command names the path: {}",
         orphan_fix.command,
     );

@@ -166,7 +166,7 @@ fn orphan_plugin_data_detected() {
         "deleting persistent data must never be automatic",
     );
     assert!(
-        fix.command.starts_with("rm -rf "),
+        fix.command.starts_with("rm -rf '") && fix.command.ends_with("'"),
         "cleanup command must be runnable as printed; got: {}",
         fix.command,
     );
@@ -248,7 +248,7 @@ fn orphan_workspace_data_detected() {
         .expect("orphan workspace-data dir must surface a SuggestedFix");
     assert!(!fix.auto_fixable);
     assert!(
-        fix.command.starts_with("rm -rf "),
+        fix.command.starts_with("rm -rf '") && fix.command.ends_with("'"),
         "cleanup command must be runnable as printed; got: {}",
         fix.command,
     );
