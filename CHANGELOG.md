@@ -572,6 +572,13 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.15](https://github.com/devrelaicom/tome/compare/v0.7.14...v0.7.15) - 2026-07-07
+
+### Fixed
+
+- *(models)* skip unparsable registry entries instead of failing refresh ([#491](https://github.com/devrelaicom/tome/pull/491))
+- *(models)* accept month-precision release dates in the registry refresh ([#488](https://github.com/devrelaicom/tome/pull/488))
+
 ## [0.7.14](https://github.com/devrelaicom/tome/compare/v0.7.13...v0.7.14) - 2026-07-07
 
 ### Added

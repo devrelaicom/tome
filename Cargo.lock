@@ -3555,7 +3555,7 @@ dependencies = [
 
 [[package]]
 name = "tome-mcp"
-version = "0.7.14"
+version = "0.7.15"
 dependencies = [
  "anyhow",
  "cc",
