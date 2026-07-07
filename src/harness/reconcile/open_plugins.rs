@@ -96,8 +96,18 @@ fn emit_bundle(
     let pre_existed = root.exists();
     // Dry run: the atomic landing always replaces, so the real run's
     // classification is fully determined by `pre_existed` — record it without
-    // staging or landing anything.
+    // staging or landing anything. The symlink refusal a real run would hit
+    // (`emit_tome_op`'s pre-write guard) still applies as a read-only probe
+    // FIRST, mirroring `probe_tome_op_removal` and the plugins-shim dry-run
+    // probe, so the preview surfaces the same fail-closed error instead of
+    // reporting Created/Updated where a real run would exit 7.
     if deps.dry_run {
+        if let Err(e) = crate::util::refuse_symlinked_component(root).map_err(TomeError::Io) {
+            if first_error.is_none() {
+                *first_error = Some(e);
+            }
+            return Action::LeftAlone;
+        }
         let action = if pre_existed {
             Action::Updated
         } else {
@@ -247,6 +257,71 @@ mod tests {
         assert_eq!(actions3.get("goose"), Some(&Action::Removed));
         assert!(!root.exists(), "bundle removed");
         assert_eq!(outcome3.removed.len(), 1);
+    }
+
+    /// A symlinked bundle root under `--dry-run` must surface the SAME refusal
+    /// the real run fails closed on (exit 7 / `TomeError::Io`) — never a
+    /// Created/Updated preview the real run would contradict.
+    #[cfg(unix)]
+    #[test]
+    fn dry_run_symlinked_bundle_root_reports_refusal_and_real_run_agrees() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        // Seed the inline rules source so a (wrongly) permitted emit would not
+        // fail on an unrelated read instead of the symlink guard.
+        let rules = Paths::project_marker_rules(&project);
+        std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+        std::fs::write(&rules, "# r\n").unwrap();
+
+        let paths = Paths::from_root(tmp.path().join(".tome"));
+        let home = tmp.path().join(".home");
+        let ws = WorkspaceName::global();
+
+        let snapshots = vec![op_snapshot("goose", &project)];
+        let live: HashSet<String> = std::iter::once("goose".to_string()).collect();
+
+        // The bundle root itself is a SYMLINK to a sibling directory — the
+        // final component lands in the guard's walked tail and is refused.
+        let plugins_dir = project.join(".config/goose/plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let root = plugins_dir.join("tome-op");
+        std::os::unix::fs::symlink(&elsewhere, &root).unwrap();
+
+        // Dry run: the preview surfaces the refusal (no Created/Updated).
+        let dry_deps = SyncDeps {
+            dry_run: true,
+            ..deps_for(&paths, &home, &ws)
+        };
+        let mut outcome = SyncOutcome::default();
+        let (actions, err) =
+            reconcile_open_plugins(&project, &dry_deps, &live, &snapshots, &mut outcome);
+        assert!(
+            matches!(err, Some(TomeError::Io(_))),
+            "dry run must surface the symlink refusal, got {err:?}"
+        );
+        assert_eq!(actions.get("goose"), Some(&Action::LeftAlone));
+        assert!(outcome.added.is_empty() && outcome.updated.is_empty());
+
+        // Real run: fails closed on the SAME refusal, writing nothing through
+        // the symlink.
+        let deps = deps_for(&paths, &home, &ws);
+        let mut outcome2 = SyncOutcome::default();
+        let (actions2, err2) =
+            reconcile_open_plugins(&project, &deps, &live, &snapshots, &mut outcome2);
+        assert!(
+            matches!(err2, Some(TomeError::Io(_))),
+            "real run must fail closed on the symlink refusal, got {err2:?}"
+        );
+        assert_eq!(actions2.get("goose"), Some(&Action::LeftAlone));
+        assert!(outcome2.added.is_empty() && outcome2.updated.is_empty());
+        assert!(root.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "nothing may be written through the symlink"
+        );
     }
 
     #[test]
