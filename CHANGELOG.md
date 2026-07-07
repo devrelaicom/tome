@@ -572,6 +572,48 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.14](https://github.com/devrelaicom/tome/compare/v0.7.13...v0.7.14) - 2026-07-07
+
+### Added
+
+- *(progress)* suppress bars under --json and aggregate multi-plugin reindex ([#484](https://github.com/devrelaicom/tome/pull/484))
+- *(doctor)* hook-drift checks for dispatcher harnesses ([#474](https://github.com/devrelaicom/tome/pull/474))
+- *(doctor)* end-to-end MCP server probe under --verify ([#475](https://github.com/devrelaicom/tome/pull/475))
+- *(doctor)* leading verdict, collapsed ok sections, and --fix dry-run ([#473](https://github.com/devrelaicom/tome/pull/473))
+- *(diagnostics)* link failures to their diagnosis surfaces ([#472](https://github.com/devrelaicom/tome/pull/472))
+- *(sync)* enumerate per-harness changes, add --dry-run, surface per-project failures ([#471](https://github.com/devrelaicom/tome/pull/471))
+- *(models)* byte-progress on the enable path and resumable downloads ([#468](https://github.com/devrelaicom/tome/pull/468))
+- *(progress)* per-entry embedding progress in plugin enable and reindex ([#469](https://github.com/devrelaicom/tome/pull/469))
+- *(cli)* add tome exit-codes reference command ([#464](https://github.com/devrelaicom/tome/pull/464))
+- *(errors)* add remediation hints to high-traffic error variants ([#463](https://github.com/devrelaicom/tome/pull/463))
+- *(harness)* surface hook debugging hints in info output ([#462](https://github.com/devrelaicom/tome/pull/462))
+- *(cli)* add tome init — guided first-run setup wizard ([#453](https://github.com/devrelaicom/tome/pull/453))
+
+### Documentation
+
+- correct README harness matrix against the module registry ([#477](https://github.com/devrelaicom/tome/pull/477))
+- correct model sizes, Homebrew form, and stale harness-sync prose ([#451](https://github.com/devrelaicom/tome/pull/451))
+- add ARCHITECTURE.md orientation document ([#449](https://github.com/devrelaicom/tome/pull/449))
+
+### Fixed
+
+- *(doctor)* quote rm -rf paths, count summariser in verdict, doc minors ([#485](https://github.com/devrelaicom/tome/pull/485))
+- *(harness)* classify present-but-unreadable hook files as drift in the probe ([#486](https://github.com/devrelaicom/tome/pull/486))
+- *(harness)* probe symlink refusal in the Open Plugins dry-run emit preview ([#482](https://github.com/devrelaicom/tome/pull/482))
+- *(models)* verify Content-Range on resume and skip re-fetching a verified primary ([#481](https://github.com/devrelaicom/tome/pull/481))
+- *(deps)* update crossbeam-epoch 0.9.18 -> 0.9.20 for RUSTSEC-2026-0204 ([#483](https://github.com/devrelaicom/tome/pull/483))
+- *(status)* show onboarding hints for every partial-setup state ([#476](https://github.com/devrelaicom/tome/pull/476))
+- *(doctor)* classify a fast-exiting MCP probe target via exit detection ([#479](https://github.com/devrelaicom/tome/pull/479))
+- *(health)* summariser failure classifies as degraded in both status and doctor ([#470](https://github.com/devrelaicom/tome/pull/470))
+- *(cli)* standardize --yes for confirmation skips with hidden aliases ([#465](https://github.com/devrelaicom/tome/pull/465))
+- *(cli)* hide session-start and run-hook plumbing from harness help ([#457](https://github.com/devrelaicom/tome/pull/457))
+- *(cli)* align --help QUICKSTART with the real four-step setup path ([#458](https://github.com/devrelaicom/tome/pull/458))
+- *(cli)* help and output text polish for tier set, query json, config show ([#460](https://github.com/devrelaicom/tome/pull/460))
+- *(plugin)* explain unindexable plugins in the interactive picker ([#461](https://github.com/devrelaicom/tome/pull/461))
+- *(doctor)* stop rendering the vestigial workspace-registry section ([#459](https://github.com/devrelaicom/tome/pull/459))
+- *(doctor)* derive harness display names from the module registry ([#456](https://github.com/devrelaicom/tome/pull/456))
+- *(doctor)* emit suggested fixes for manual/unverified harness MCP states ([#454](https://github.com/devrelaicom/tome/pull/454))
+
 ## [0.7.13](https://github.com/devrelaicom/tome/compare/v0.7.12...v0.7.13) - 2026-07-03
 
 ### Added
