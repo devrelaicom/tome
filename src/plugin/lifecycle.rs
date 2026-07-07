@@ -253,6 +253,23 @@ pub fn reindex_plugin(
     deps: &LifecycleDeps<'_>,
     force: bool,
 ) -> Result<ReindexOutcome, TomeError> {
+    reindex_plugin_with_entry_bar(id, deps, force, true)
+}
+
+/// [`reindex_plugin`] with the per-entry embedding bar made optional (#480).
+///
+/// Multi-plugin loops (`tome reindex` over a catalog, `catalog update`) own
+/// ONE aggregate plugin-level bar at the command layer; constructing and
+/// clearing a fresh per-entry bar inside every iteration reads as rapid bar
+/// churn for catalogs of many small plugins. Those loops pass
+/// `entry_bar: false` so this per-plugin bar never renders; single-plugin
+/// callers keep the per-entry granularity via [`reindex_plugin`].
+pub fn reindex_plugin_with_entry_bar(
+    id: &PluginId,
+    deps: &LifecycleDeps<'_>,
+    force: bool,
+    entry_bar: bool,
+) -> Result<ReindexOutcome, TomeError> {
     let started = Instant::now();
     let conn = open_for_lifecycle(deps)?;
     let plugin_dir = resolve_plugin_dir(id, &conn, deps.workspace_name(), deps.paths)?;
@@ -262,7 +279,7 @@ pub fn reindex_plugin(
     let plugin_version = manifest.version.clone();
 
     let lock = acquire_lock(&deps.paths.index_lock.clone())?;
-    let result = reindex_locked(id, &plugin_dir, &plugin_version, deps, force);
+    let result = reindex_locked(id, &plugin_dir, &plugin_version, deps, force, entry_bar);
 
     match result {
         Ok((summary, warnings)) => {
@@ -599,6 +616,7 @@ fn reindex_locked(
     plugin_version: &str,
     deps: &LifecycleDeps<'_>,
     force: bool,
+    entry_bar: bool,
 ) -> Result<(ReindexSummary, Vec<String>), TomeError> {
     if was_cancelled() {
         return Err(TomeError::Interrupted);
@@ -622,11 +640,18 @@ fn reindex_locked(
     // #421: same determinate per-entry bar as `enable_locked` — `tome
     // reindex` (and `catalog update`'s reindex) visit every on-disk entry,
     // so the total is `pending.len()`. stderr-only + cleared before return,
-    // keeping stdout and `--json` byte-identical.
-    let progress_bar = crate::presentation::progress::bar(
-        pending.len() as u64,
-        format!("embedding {}/{}", id.catalog, id.plugin),
-    );
+    // keeping stdout and `--json` byte-identical. Multi-plugin loops pass
+    // `entry_bar: false` (#480) — they own one aggregate plugin-level bar at
+    // the command layer, and a hidden handle here keeps the tick callback
+    // wiring identical without rendering a churning per-plugin bar.
+    let progress_bar = if entry_bar {
+        crate::presentation::progress::bar(
+            pending.len() as u64,
+            format!("embedding {}/{}", id.catalog, id.plugin),
+        )
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
     let result = reindex_plugin_atomic(
         &mut conn,
         workspace_name,

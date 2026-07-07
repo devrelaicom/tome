@@ -623,21 +623,40 @@ fn execute_targets(
 ) -> Result<ReindexAggregate, TomeError> {
     let started = Instant::now();
     let mut aggregate = ReindexAggregate::default();
-    for id in plugins {
-        let outcome = lifecycle::reindex_plugin(id, deps, force)?;
-        aggregate.plugins_visited = aggregate.plugins_visited.saturating_add(1);
-        let s: ReindexSummary = outcome.summary;
-        let checked = s
-            .added
-            .saturating_add(s.modified)
-            .saturating_add(s.unchanged);
-        aggregate.skills_checked = aggregate.skills_checked.saturating_add(checked);
-        aggregate.skills_re_embedded = aggregate
-            .skills_re_embedded
-            .saturating_add(s.added.saturating_add(s.modified));
-        aggregate.skills_unchanged = aggregate.skills_unchanged.saturating_add(s.unchanged);
-        aggregate.skills_removed = aggregate.skills_removed.saturating_add(s.removed);
-    }
+    // #480: a multi-plugin run owns ONE aggregate plugin-level bar here
+    // instead of the per-entry bar `reindex_plugin` would construct and
+    // clear inside every iteration — many small plugins otherwise read as
+    // rapid bar churn. A single-plugin run keeps the finer per-entry bar.
+    // The closure keeps ONE clear point for the bar on both the success and
+    // the fail-fast error path.
+    let multi = plugins.len() > 1;
+    let agg_bar = if multi {
+        crate::presentation::progress::bar(plugins.len() as u64, "reindexing")
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
+    let result = (|| -> Result<(), TomeError> {
+        for id in plugins {
+            agg_bar.set_prefix(format!("reindexing {}/{}", id.catalog, id.plugin));
+            let outcome = lifecycle::reindex_plugin_with_entry_bar(id, deps, force, !multi)?;
+            agg_bar.inc(1);
+            aggregate.plugins_visited = aggregate.plugins_visited.saturating_add(1);
+            let s: ReindexSummary = outcome.summary;
+            let checked = s
+                .added
+                .saturating_add(s.modified)
+                .saturating_add(s.unchanged);
+            aggregate.skills_checked = aggregate.skills_checked.saturating_add(checked);
+            aggregate.skills_re_embedded = aggregate
+                .skills_re_embedded
+                .saturating_add(s.added.saturating_add(s.modified));
+            aggregate.skills_unchanged = aggregate.skills_unchanged.saturating_add(s.unchanged);
+            aggregate.skills_removed = aggregate.skills_removed.saturating_add(s.removed);
+        }
+        Ok(())
+    })();
+    agg_bar.finish_and_clear();
+    result?;
     aggregate.duration_ms = duration_ms(started);
     Ok(aggregate)
 }

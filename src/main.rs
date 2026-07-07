@@ -80,9 +80,12 @@ fn main() {
         colour::init(cfg_color);
         // Resolve progress visibility: config `[output] progress = false`
         // suppresses bars/spinners even on a TTY; otherwise auto (TTY check).
+        // `--json` / TOME_JSON suppresses unconditionally (#480) — a
+        // structured-output consumer asked for machine output, so no live
+        // stderr bar even on a TTY, beating a config `progress = true`.
         // The MCP server never shows progress — do not init on that path.
         let cfg_progress = output_cfg.and_then(|(_, out)| out.progress);
-        progress::init_progress(cfg_progress);
+        progress::init_progress(cfg_progress, cli.mode() == output::Mode::Json);
     }
 
     let mode = cli.mode();
