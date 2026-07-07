@@ -6,7 +6,7 @@
 # references across src/ + tests/ keep resolving (lib name = "tome"), and the
 # built/installed binary stays `target/release/tome` (bin name = "tome").
 name = "tome-mcp"
-version = "0.7.15"
+version = "0.7.16"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT OR Apache-2.0"
