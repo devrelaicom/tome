@@ -1,6 +1,7 @@
 import React from 'react';
 import styles from './landing.module.css';
 import TypedTerminal, {type TermLine} from './TypedTerminal';
+import WorksWith from './WorksWith';
 
 // Every number and score below is read from specs/reference/captures/
 // (catalog-add.txt, query.txt, status.txt, NUMBERS.md) — captured from a real
@@ -32,14 +33,7 @@ export default function Hero(): React.JSX.Element {
           <a className={styles.btn} href="/docs/getting-started/quickstart">Read the docs</a>
         </div>
         <TypedTerminal label="fig. 1 — the bookshelf at work" lines={DEMO} />
-        <div className={styles.works}>
-          <span className={styles.worksLbl}>works with</span>
-          <span className={styles.worksItem}>Claude&nbsp;Code</span><span className={styles.worksSep}>/</span>
-          <span className={styles.worksItem}>Cursor</span><span className={styles.worksSep}>/</span>
-          <span className={styles.worksItem}>Codex</span><span className={styles.worksSep}>/</span>
-          <span className={styles.worksItem}>Gemini&nbsp;CLI</span><span className={styles.worksSep}>/</span>
-          <span className={styles.worksItem}>OpenCode</span>
-        </div>
+        <WorksWith />
       </div>
     </section>
   );

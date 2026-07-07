@@ -51,11 +51,13 @@ cargo build --release
 | Platform | x86_64 | aarch64 |
 | --- | --- | --- |
 | Linux | supported | supported |
-| macOS | supported | supported |
+| macOS | — | supported |
 | Windows | untested | untested |
 
-Prebuilt binaries are provided for Linux and macOS on both `x86_64` and
-`aarch64`. Windows is not currently tested.
+Prebuilt binaries are provided for Linux (`x86_64` and `aarch64`) and macOS
+(`aarch64` / Apple Silicon only). Intel macOS has no prebuilt binary — install
+with `cargo install tome-mcp` or build from source. Windows is not currently
+tested.
 
 ## Verify the install
 

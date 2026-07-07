@@ -73,15 +73,16 @@ flag, so it never writes an empty `[author]` `name = ""`.
 | `--description <text>` | all | Set the manifest or skill description, replacing the generic name-derived default. Indexed for semantic search. |
 | `--author <name>` | all | Set the catalog `[owner] name` or the plugin `[author] name`, replacing the `Your Name` placeholder you would otherwise edit by hand. An empty or whitespace-only value is treated as absent (no `[author]` table), so it never writes an empty `name = ""`. On `skill create --bare` or `--into` there is no wrapping plugin to record, so `--author` is silently ignored. |
 | `--dry-run` | all | Preview the plan without writing. `--into` registration is skipped, and the report switches to `Would create…` (human) or `dry_run: true` (`--json`). |
-| `--template <name>` | all | Select a built-in template. Only built-in templates are supported — anything else exits `82`. |
+| `--template <name>` | all | Select a built-in template. The built-in names are `default` and `bare-skill`; anything else exits `82`. |
 | `--force` | all | Overwrite an existing target instead of refusing with exit `81`. |
 
 ## Pitfalls
 
 - **Exit `81` (`output_exists`)** — the target path already exists, and
   `create` refuses to overwrite it. Pass `--force` to overwrite.
-- **Exit `82` (`template_invalid`)** — `--template` currently accepts only
-  built-in templates; passing a path or URL exits `82` rather than fetching.
+- **Exit `82` (`template_invalid`)** — `--template` currently accepts only the
+  built-in templates (`default` and `bare-skill`); passing a path or URL exits
+  `82` rather than fetching.
 
 The full table lives in [Exit codes](../reference/exit-codes.md).
 

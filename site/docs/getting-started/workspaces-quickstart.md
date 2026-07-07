@@ -1,6 +1,6 @@
 ---
 title: Workspaces quickstart
-sidebar_position: 3
+sidebar_position: 4
 ---
 
 # Workspaces quickstart
@@ -60,7 +60,7 @@ tome workspace info
 The report names the active workspace, its enrolled catalogs, and its enabled
 plugins.
 
-## 3. Link it to a project
+## 3. Confirm the binding
 
 You already bound this directory in step 1: `tome workspace use --create` writes
 the `.tome/config.toml` marker that ties the current tree to `contracts`. A
@@ -102,7 +102,8 @@ Run bare inside a bound project, it reconciles that project; `--all` fans out to
 every project bound to the active workspace. Run bare outside any project, it
 falls back to the `--all` fan-out over the resolved workspace's bound projects
 and prints a note to stderr, so a stray `tome sync` from your home directory
-still reaches every bound project rather than erroring.
+still reaches every bound project rather than erroring — unless that workspace
+has no bound projects, in which case it exits `2` and names the next step.
 
 ```bash
 tome sync         # sync the current project (or fan out when there isn't one)

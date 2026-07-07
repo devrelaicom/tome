@@ -29,7 +29,9 @@ convert-marketplace — Guided conversion of a Claude Code marketplace into Tome
 ```
 
 Each bundled skill appears with its revision (the hash in brackets) and an
-install state for every harness × scope pair Tome can target.
+install state for every harness × scope pair Tome can target. The harness rows
+reflect the skill-capable harnesses on your machine, so your list may name more
+than the four above.
 
 :::note
 Gemini CLI has no native skill support, so it is not a meta-skill target —
@@ -54,7 +56,7 @@ tome meta remove convert-marketplace
 
 | Flag | Effect |
 | --- | --- |
-| `--harness <name>` | Target one harness instead of all detected ones. Repeatable. |
+| `--harness <name>` | Target specific harnesses instead of all detected ones. Repeatable: `--harness claude-code --harness cursor`. |
 | `--global` | Install into the harness's *global* skill directory instead of the project one. |
 | `--force` | Overwrite an existing install (including one that's been edited on disk). `add` only. |
 

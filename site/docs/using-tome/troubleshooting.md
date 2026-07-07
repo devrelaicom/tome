@@ -19,16 +19,26 @@ tome status
 ```
 
 ```text
-Tome:               0.6.0
-Embedder:           bge-small-en-v1.5 (1.5)  [ok]
-Reranker:           bge-reranker-base (base)  [ok]
-Index database:     [ok] (1 plugins enabled, 28 skills indexed, 1.6 MiB)
-Schema version:     4
-Drift:              none
-Overall:            [ok] healthy
+Tome v0.7.16
+
+Global
+Models:       embedder [ok] · reranker [ok] · summariser [ok]
+              ~325 MB on disk
+Workspaces:   2
+Index:        schema v6 · 1.6 MiB · [ok] integrity
+Drift:        none
+
+Workspace
+Current:      contracts (project)
+Entries:      19 skills · 2 commands · 7 agents
+Catalogs:     1 enrolled
+Reindexed:    just now
 ```
 
-`--verify` runs deeper checks; `--json` emits machine-readable output.
+In an interactive terminal a coloured "bookshelf" is drawn above this panel;
+piped or `--json` output drops the art. The figures are representative — yours
+reflect your own models, catalogs, and workspaces. `--verify` runs deeper
+checks; `--json` emits machine-readable output.
 
 On a brand-new install with no catalog enrolled, `status` renders a "Getting
 started" block naming the real first-run flow instead of reading as broken:
@@ -63,19 +73,23 @@ tome doctor --json     # machine-readable
 The report starts with the same information as `status`, in more detail:
 
 ```text
-Tome:            0.6.0
+✓ healthy — 0 failing, 0 warnings, 24 ok
+
+Tome:            0.7.16
 
 Workspace:       (global)
   resolved via:  global fallback
   catalogs:      1
   plugins:       1 total, 1 enabled
 
+MCP server log:  ~/.tome/logs/mcp.log
+
 Models:
   embedder       bge-small-en-v1.5 (1.5)  [ok] ok
   reranker       bge-reranker-base (base)  [ok] ok
 
 Index database:  [ok] (1 plugins enabled, 28 skills indexed, 1.6 MiB)
-Schema version:  4
+Schema version:  6
 Drift:           none
 ```
 

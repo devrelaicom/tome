@@ -29,7 +29,7 @@ export default function FinalCta(): React.JSX.Element {
         <h2 className={styles.ctaTitle}>Add it to your bookshelf.</h2>
         <code className={styles.install}>brew install aaronbassett/homebrew-tap/tome</code>
         <div className={styles.installSub}>or cargo install tome-mcp</div>
-        <a className={styles.btnGhost} href="/docs/getting-started/quickstart">Quickstart → 4 commands</a>
+        <a className={styles.btnGhost} href="/docs/getting-started/quickstart">Quickstart → tome init</a>
       </div>
     </section>
   );

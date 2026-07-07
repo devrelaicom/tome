@@ -223,6 +223,17 @@
 .worksSep {
   color: var(--tome-rule);
 }
+/* one animated cell = its leading separator + name, so the "/" travels in and
+   out with the harness to its right */
+.worksUnit {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.9rem;
+  white-space: nowrap;
+}
+.worksMcp {
+  color: var(--tome-lapis);
+}
 
 /* ---- plates (method ×3, colophon ×4) ---- */
 
@@ -323,6 +334,11 @@
   padding: 1px 9px;
   font-size: 11px;
   white-space: nowrap;
+}
+/* a hand-edited copy drifts off the clean version tag — warm it to signal rot */
+.sprawlBadgeDrift {
+  color: #c2703c;
+  border-color: rgba(194, 112, 60, 0.5);
 }
 
 /* ---- final CTA (ink panel in both modes) ---- */
@@ -428,6 +444,12 @@
 @media (prefers-reduced-motion: no-preference) {
   .termCursor {
     animation: blink 1s steps(1) infinite;
+  }
+
+  /* ease the badge colour shift when a Sprawl copy drifts (JS-driven; never
+     fires under reduced motion since nothing drifts there) */
+  .sprawlBadge {
+    transition: color 0.35s ease, border-color 0.35s ease;
   }
 
   /* .fadeIn is added by each section's IntersectionObserver hook (which is
