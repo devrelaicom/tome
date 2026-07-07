@@ -17,6 +17,12 @@
 //! `[output] progress = false` in `~/.tome/config.toml` suppresses progress
 //! bars and spinners even on a connected TTY. `true` or absent delegates back
 //! to the TTY check (the default auto behaviour).
+//!
+//! `--json` (or a truthy `TOME_JSON`) suppresses progress unconditionally
+//! (#480): a structured-output consumer asked for machine output, so a live
+//! stderr bar on a TTY is noise it never wanted. The override beats a config
+//! `progress = true` and is resolved once at the [`init_progress`] call in
+//! `main.rs` — the same single-snapshot boundary as colour and logging.
 
 use std::io::IsTerminal;
 use std::sync::OnceLock;
@@ -36,16 +42,28 @@ static PROGRESS_ENABLED: OnceLock<bool> = OnceLock::new();
 /// `config_progress`:
 /// - `Some(false)` → suppress even on a TTY,
 /// - `Some(true)` or `None` → auto (follow stderr TTY).
-pub fn init_progress(config_progress: Option<bool>) {
-    let _ = PROGRESS_ENABLED.set(resolve_progress(config_progress, stderr_is_tty()));
+///
+/// `json_mode` (#480): `true` when the invocation asked for structured
+/// output (`--json` / truthy `TOME_JSON`) — suppresses progress
+/// unconditionally, beating a config `progress = true`.
+pub fn init_progress(config_progress: Option<bool>, json_mode: bool) {
+    let _ = PROGRESS_ENABLED.set(resolve_progress(
+        config_progress,
+        stderr_is_tty(),
+        json_mode,
+    ));
 }
 
 /// Pure progress-enabled resolver. Separated from global state for
 /// unit-testability.
 ///
+/// - `json` → always hidden (#480: machine output implies a quiet stderr),
 /// - `Some(false)` → always hidden,
 /// - `Some(true)` | `None` → honour `is_tty`.
-pub(crate) fn resolve_progress(config_progress: Option<bool>, is_tty: bool) -> bool {
+pub(crate) fn resolve_progress(config_progress: Option<bool>, is_tty: bool, json: bool) -> bool {
+    if json {
+        return false;
+    }
     match config_progress {
         Some(false) => false,
         Some(true) | None => is_tty,
@@ -125,17 +143,45 @@ mod tests {
     #[test]
     fn resolve_progress_suppression() {
         // config false → always hidden regardless of tty
-        assert!(!resolve_progress(Some(false), true), "config false on tty");
         assert!(
-            !resolve_progress(Some(false), false),
+            !resolve_progress(Some(false), true, false),
+            "config false on tty"
+        );
+        assert!(
+            !resolve_progress(Some(false), false, false),
             "config false off tty"
         );
         // config true → follow tty
-        assert!(resolve_progress(Some(true), true), "config true on tty");
-        assert!(!resolve_progress(Some(true), false), "config true off tty");
+        assert!(
+            resolve_progress(Some(true), true, false),
+            "config true on tty"
+        );
+        assert!(
+            !resolve_progress(Some(true), false, false),
+            "config true off tty"
+        );
         // no config → follow tty
-        assert!(resolve_progress(None, true), "auto on tty");
-        assert!(!resolve_progress(None, false), "auto off tty");
+        assert!(resolve_progress(None, true, false), "auto on tty");
+        assert!(!resolve_progress(None, false, false), "auto off tty");
+    }
+
+    /// #480: `--json` implies a quiet stderr — the override beats every other
+    /// combination, including an explicit config `progress = true` on a TTY.
+    #[test]
+    fn json_mode_suppresses_progress_unconditionally() {
+        assert!(
+            !resolve_progress(Some(true), true, true),
+            "json beats config true on tty"
+        );
+        assert!(
+            !resolve_progress(None, true, true),
+            "json beats auto on tty"
+        );
+        assert!(
+            !resolve_progress(Some(false), true, true),
+            "json + config false stays hidden"
+        );
+        assert!(!resolve_progress(None, false, true), "json off tty hidden");
     }
 
     #[test]

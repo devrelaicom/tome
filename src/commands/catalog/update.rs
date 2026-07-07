@@ -362,43 +362,61 @@ pub fn reindex_catalog_plugins(
     deps: &LifecycleDeps<'_>,
 ) -> Result<CatalogReindexOutcome, TomeError> {
     let mut outcome = CatalogReindexOutcome::default();
-    for plugin_name in enabled_plugins {
-        let id = PluginId {
-            catalog: catalog.to_owned(),
-            plugin: plugin_name.clone(),
-        };
-        match lifecycle::reindex_plugin(&id, deps, false) {
-            Ok(reindex) => {
-                outcome.plugins.push(PluginChange {
-                    plugin: id,
-                    summary: Some(reindex.summary),
-                    auto_disabled: None,
-                    warnings: reindex.warnings,
-                });
+    // #480: one aggregate plugin-level bar for a multi-plugin catalog update
+    // (mirrors `reindex::execute_targets`) — the per-entry bar inside
+    // `reindex_plugin` would otherwise churn once per plugin. Single-plugin
+    // updates keep the per-entry bar. The closure keeps ONE clear point for
+    // the bar across the success path and both early-return error paths.
+    let multi = enabled_plugins.len() > 1;
+    let agg_bar = if multi {
+        crate::presentation::progress::bar(enabled_plugins.len() as u64, "reindexing")
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
+    let result = (|| -> Result<(), TomeError> {
+        for plugin_name in enabled_plugins {
+            let id = PluginId {
+                catalog: catalog.to_owned(),
+                plugin: plugin_name.clone(),
+            };
+            agg_bar.set_prefix(format!("reindexing {}/{}", id.catalog, id.plugin));
+            match lifecycle::reindex_plugin_with_entry_bar(&id, deps, false, !multi) {
+                Ok(reindex) => {
+                    outcome.plugins.push(PluginChange {
+                        plugin: id,
+                        summary: Some(reindex.summary),
+                        auto_disabled: None,
+                        warnings: reindex.warnings,
+                    });
+                }
+                Err(TomeError::PluginNotFound(_)) => {
+                    let reason = "plugin directory missing upstream";
+                    lifecycle::auto_disable_orphan(&id, deps)?;
+                    outcome.plugins.push(PluginChange {
+                        plugin: id,
+                        summary: None,
+                        auto_disabled: Some(reason.to_owned()),
+                        warnings: Vec::new(),
+                    });
+                }
+                Err(TomeError::PluginManifestParseError { message, .. }) => {
+                    let reason = format!("plugin.json malformed: {message}");
+                    lifecycle::auto_disable_orphan(&id, deps)?;
+                    outcome.plugins.push(PluginChange {
+                        plugin: id,
+                        summary: None,
+                        auto_disabled: Some(reason),
+                        warnings: Vec::new(),
+                    });
+                }
+                Err(e) => return Err(e),
             }
-            Err(TomeError::PluginNotFound(_)) => {
-                let reason = "plugin directory missing upstream";
-                lifecycle::auto_disable_orphan(&id, deps)?;
-                outcome.plugins.push(PluginChange {
-                    plugin: id,
-                    summary: None,
-                    auto_disabled: Some(reason.to_owned()),
-                    warnings: Vec::new(),
-                });
-            }
-            Err(TomeError::PluginManifestParseError { message, .. }) => {
-                let reason = format!("plugin.json malformed: {message}");
-                lifecycle::auto_disable_orphan(&id, deps)?;
-                outcome.plugins.push(PluginChange {
-                    plugin: id,
-                    summary: None,
-                    auto_disabled: Some(reason),
-                    warnings: Vec::new(),
-                });
-            }
-            Err(e) => return Err(e),
+            agg_bar.inc(1);
         }
-    }
+        Ok(())
+    })();
+    agg_bar.finish_and_clear();
+    result?;
     Ok(outcome)
 }
 
