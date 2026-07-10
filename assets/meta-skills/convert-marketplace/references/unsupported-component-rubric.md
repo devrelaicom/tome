@@ -16,9 +16,12 @@ dropping — a recorded gap is recoverable; a silent loss is not.
 | **channels** | Inter-component message channels | **Document** | No Tome model for this. Note the coupling so the user understands what won't carry over. |
 | **bin/ helpers** | Bundled executables/scripts a plugin shells out to | **Hand-port** or **Document** | If a skill/command depends on the helper, keep the helper in the plugin's files and reference it via the Tome data-dir path; if it's harness-glue only, document the gap. |
 | **userConfig / custom settings** | Plugin-specific configuration schema | **Document** | Tome has no generic user-config surface. Record the settings the plugin expected and any defaults so behaviour is reproducible. |
-| **hooks** | Claude Code event hooks (`hooks/hooks.json` + scripts) | **Passed through** | Converted plugins keep their `hooks/` directory verbatim; `tome sync` reconciles real Claude Code hooks into the harness and renders the `GUARDRAILS.md` prose fallback for the others. No action needed — unless the hook encodes a *rule* that matters on non-Claude harnesses, in which case also hand-port it as guardrail prose. |
+| **hooks** | Claude Code event hooks (`hooks/hooks.json` + scripts) | **Passed through — verify** | Converted plugins keep their `hooks/` directory verbatim. Verify two things: (1) the top level of the hooks file is the event map (`{"PreToolUse": [...]}`), not the wrapped `{"description", "hooks": {...}}` form — if it is wrapped, unwrap it, or `tome sync` fails with exit 43; (2) every `${CLAUDE_PLUGIN_ROOT}/…` path the hooks reference exists in the converted plugin (see the `scripts/` row). At sync time Tome translates a subset of hooks natively for Codex, Cursor, Devin, Gemini and Copilot CLI, reconciles real hooks into Claude Code's own settings, and renders the `GUARDRAILS.md` prose fallback everywhere else. If a hook encodes a *rule* that matters on a harness with no native hook support, also hand-port it as guardrail prose. |
 | **harness-specific variables** | `CLAUDE_*` placeholders, legacy positional args | **Auto (no action)** | `tome catalog convert` rewrites these to their Tome equivalents automatically; `tome catalog lint` flags any residual and `--autofix` fixes the mechanical ones. You only act if lint still reports one. |
-| **commands/skills/agents** | The core entries | **Auto (no action)** | These convert natively. Only revisit one if `tome catalog lint` reports a finding against it. |
+| **commands / skills** | The core entries | **Auto (no action)** | These convert natively. Only revisit one if `tome catalog lint` reports a finding against it. |
+| **agents** | Subagent definitions (`agents/*.md`) | **Hand-port** | The body converts, but convert strips the frontmatter (`model`, `tools`, `allowed-tools`, `disallowed-tools`, and so on) and warns `convert/agent-lossy` / `convert/tool-restriction-dropped`. `tome sync` translates those fields into each harness's native agent format, so re-add the ones that matter to the emitted `agents/<name>.md`; `tome catalog lint` tolerates them. |
+| **plugin-root `scripts/` / `lib/`** | Support directories a hook or command shells out to | **Hand-port** | Convert neither reads nor warns about these. If any hook or command references `${CLAUDE_PLUGIN_ROOT}/scripts/…`, copy the directory into the converted plugin by hand, or the reference breaks silently. |
+| **nested `commands/` / `agents/` subdirs** | Namespaced entries (`commands/git/commit.md`) | **Hand-port** | Dropped with no diagnostic. Re-create each as a top-level entry in the converted plugin (for example `commands/git-commit.md`). |
 
 ## Recording decisions
 
@@ -34,6 +37,8 @@ monitors/auto-format         → document   — no Tome watcher; gap noted in pl
 output-styles/terse          → hand-port  — folded the "be terse" guidance into the agent body
 themes/midnight              → drop       — cosmetic, harness-only
 bin/lint.sh                  → hand-port  — kept in plugin files, referenced via the data-dir path
+agents/reviewer              → hand-port  — re-added model+disallowed-tools frontmatter to agents/reviewer.md
+scripts/                     → hand-port  — copied into the plugin; a PreToolUse hook shells out to it
 ```
 
 The user sees this full list before they decide whether to register anything —

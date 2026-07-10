@@ -28,14 +28,29 @@ and what Tome can and cannot carry over.
   ```
   `<source>` is the marketplace directory. (For a single plugin or skill rather
   than a whole marketplace, use `tome plugin convert` / `tome skill convert`
-  instead.) The JSON plan enumerates every plugin and entry that will convert,
-  and — critically —
-  every **unsupported component** Tome flagged (monitors, themes, LSP servers,
-  output-styles, status-line scripts, `bin/` helpers,
-  channels, custom `userConfig`, and so on).
-- Summarise for yourself: how many plugins, how many skills / commands / agents
-  convert cleanly, and the full list of flagged unsupported components. This list
-  is your Step 3 work queue — nothing leaves it without an explicit decision.
+  instead.) The `--json` output is JSONL: one `type: "diagnostic"` line per
+  finding (`rule`, `severity`, `message`, `file`, `line`, `autofixable`), then a
+  final `type: "result"` line carrying **counts only** — how many files would be
+  written, and the number of errors, warnings and infos. It reports the
+  **unsupported components** Tome flagged (monitors, themes, LSP servers,
+  output-styles, `bin/` executables, channels, and exotic manifest fields such
+  as `userConfig`), but it does **not** enumerate the skills, commands and agents
+  that convert cleanly. Build that inventory yourself.
+- Walk the source tree and record, per plugin, every skill / command / agent, so
+  you know what a clean conversion must produce. Convert does not flag several
+  classes that will not survive the conversion — check for each explicitly:
+  - **Non-standard plugin-root directories** (`scripts/`, `lib/`, and anything
+    other than `skills/`, `commands/`, `agents/`, `hooks/`, `.mcp.json`): convert
+    reads none of these and warns about none of them. A hook that shells out to a
+    `CLAUDE_PLUGIN_ROOT`-relative path such as `scripts/…` breaks after conversion
+    unless you copy the directory across by hand.
+  - **Nested `commands/` or `agents/` subdirectories** (namespaced entries such
+    as `commands/git/commit.md`): these are dropped with no diagnostic.
+  - **`plugin.json` component-path overrides** (for example
+    `"hooks": "./config/hooks.json"`): convert records the override as an info
+    line but does not import the component it points at.
+  Everything you find here — the flagged components and these unflagged classes —
+  is your Step 3 work queue. Nothing leaves it without an explicit decision.
 
 Do not run a non-dry-run convert yet.
 
@@ -83,6 +98,13 @@ they are skipped with warnings, exactly like the failures above).
 If you want Tome to refuse rather than warn on anything it cannot represent, add
 `--strict` — it aborts before writing so you can decide deliberately. Without
 `--strict`, convert writes the supported parts and warns about the rest.
+
+Note that `--strict` blocks on the `convert/agent-lossy` and
+`convert/tool-restriction-dropped` warnings that almost every marketplace with
+agents produces. Once you have decided how you will handle each (Step 3), re-run
+with those rules demoted so the block clears while the warnings still print:
+`--strict --allow convert/agent-lossy --allow convert/tool-restriction-dropped`.
+The abort message lists the exact rule ids to allow.
 
 ## Step 3 — Judgment pass on the unsupported residue
 
@@ -161,6 +183,11 @@ and enable its plugins in a workspace** — and wait for an explicit answer.
 Only after explicit confirmation. First ask whether they want a **new** workspace
 or an **existing** one.
 
+Enabling a plugin updates the workspace index; on its own it writes nothing into
+a harness. The rules files, MCP registration, hooks and native agents reach a
+harness only when you **sync**. So the flow is: enable the plugins, make sure a
+harness is configured, then sync.
+
 **New workspace:**
 ```sh
 tome workspace init <name>
@@ -182,6 +209,25 @@ tome plugin show <catalog>/<plugin>       # confirm
 When running non-interactively (e.g. in CI, or before the embedding models are
 downloaded), add `--yes` to `tome plugin enable` to skip its model-download
 confirmation prompt.
+
+**Then sync to the harness.** If the workspace has no harness configured yet, add
+one first, then propagate everything you enabled:
+
+```sh
+tome harness use <name>                   # only if no harness is configured yet (e.g. claude-code, cursor, codex)
+tome sync                                 # writes rules, registers MCP, wires hooks and native agents
+```
+
+You can fold the sync into the enable step instead with
+`tome plugin enable <catalog>/<plugin> --sync`, which syncs the bound harnesses
+once for the whole batch.
+
+Spot-check that the plugins actually reached the harness:
+
+```sh
+tome doctor                               # reports any drift or unsynced state
+tome harness info <name>                  # shows what is registered for that harness
+```
 
 Finish by confirming to the user what is now registered and enabled, and restate
 any documented gaps from Step 3 so nothing is silently lost.
