@@ -822,12 +822,27 @@ fn import_skill_dir_named(
 
 /// Import each `<dir>/<name>.md` file into a command/agent [`EntryIr`].
 ///
-/// Top-level `.md` files are imported directly. Subdirectories are walked one
-/// level deep: `<dir>/<sub>/<name>.md` is flattened to the name `<sub>-<name>`
-/// (G3). Collisions between two flattened names produce a Warning and the
-/// second file is skipped (forward-progress). A collision-tracking map is
-/// keyed on the flat name so every collision is reported even when more than
-/// two files map to the same name.
+/// Top-level `.md` files are imported first, then subdirectories are walked
+/// one level deep: `<dir>/<sub>/<name>.md` is flattened to the name
+/// `<sub>-<name>` (G3). Collisions between a flattened name and a top-level
+/// (or earlier nested) entry produce a Warning and the second file is skipped
+/// (forward-progress). The collision-tracking map is keyed on the
+/// **resolved** entry name (frontmatter `name:` preferred over file stem, the
+/// same resolution `import_md_entry` applies) so that the pre-scan and the
+/// import agree on the name used for deduplication.
+///
+/// # Why single-pass (not separate pre-scan)?
+///
+/// A separate pre-scan seeded `claimed` with the file *stem*, not the
+/// frontmatter-resolved name.  When a top-level `commands/deploy.md` carries
+/// `name: git-push`, the pre-scan would claim `"deploy"` while the import
+/// produced an `EntryIr` named `"git-push"`.  A nested `commands/git/push.md`
+/// (flat: `"git-push"`) would then pass the collision check (finding no
+/// `"git-push"` in `claimed`) and be imported too — resulting in two
+/// `EntryIr`s with `name = "git-push"` and silent last-write-wins overwrite
+/// in the emitter (#524).  By importing top-level entries first and recording
+/// their *actual* resolved names into `claimed` we eliminate the divergence
+/// by construction.
 fn import_md_dir(
     root: &UntrustedRoot,
     dir: &str,
@@ -838,104 +853,97 @@ fn import_md_dir(
     if !root.is_dir(Path::new(dir)) {
         return Ok(());
     }
-    // Track flat names already claimed so nested-file collisions are reported
-    // and the second file is skipped (forward-progress, not a hard abort).
+    // Track resolved names already claimed so nested-file collisions are
+    // reported and the second file is skipped (forward-progress, not a hard
+    // abort). The key is the *resolved* name so pre-scan and import agree.
     let mut claimed: std::collections::BTreeMap<String, PathBuf> =
         std::collections::BTreeMap::new();
 
-    // Bug 1 fix: seed `claimed` with the resolved names of all top-level `.md`
-    // files in this directory BEFORE the nested-dir walk.  Without this, a
-    // nested entry `commands/git/push.md` (→ flat `git-push`) would silently
-    // overwrite an already-imported top-level `commands/git-push.md` entry
-    // because the collision check only compared nested entries against each
-    // other, never against top-level names.  Seeding first ensures that a
-    // nested entry whose flat name matches a top-level file is caught by the
-    // existing NESTED_ENTRY_SKIPPED warning path, giving the user a clear
-    // diagnostic instead of a silent duplicate.
-    let top_level_children = root.list_dir(Path::new(dir))?;
-    for child in &top_level_children {
-        if child.is_dir || !child.name.ends_with(".md") {
-            continue;
-        }
-        // The top-level name is the file stem; prefer the frontmatter `name:`
-        // field the same way `import_md_entry` does, but that requires parsing
-        // the file — which is expensive and may fail.  We use the file-stem as
-        // the collision key here.  This is conservative (the actual resolved
-        // name could differ) but safe: worst case we skip a nested entry that
-        // would NOT have collided; the top-level entry is still imported.
-        let stem = child.name.strip_suffix(".md").unwrap_or(&child.name);
-        claimed.insert(stem.to_owned(), child.rel.clone());
-    }
+    let all_children = root.list_dir(Path::new(dir))?;
 
-    for child in top_level_children {
+    // ---- Phase 1: import top-level `.md` files first, record resolved names.
+    // We must do this before the nested-dir walk so that `claimed` contains
+    // the actual IR names (frontmatter-resolved), not file-stem guesses.
+    let mut subdirs: Vec<_> = Vec::new();
+    for child in all_children {
         if child.is_dir {
-            // G3: walk one level into a subdirectory.
-            for nested in root.list_dir(&child.rel)? {
-                if nested.is_dir || !nested.name.ends_with(".md") {
-                    continue;
-                }
-                // Flatten `<sub>/<name>.md` → `<sub>-<name>`.
-                let stem = nested.name.strip_suffix(".md").unwrap_or(&nested.name);
-                let flat = format!("{}-{stem}", child.name);
-                // Validate the flat name before using it (it will become an
-                // emitted file/dir name); `validate_name` rejects `..`/absolute/
-                // leading-dot/etc. so hostile source sub-dir or entry names
-                // cannot escape.
-                if let Err(e) = UntrustedRoot::validate_name(&flat) {
-                    diagnostics.push(Diagnostic::warning(
-                        rule::NESTED_ENTRY_SKIPPED,
-                        format!(
-                            "skipped nested {kind} `{}/{}/{}`; the flat name `{flat}` is unsafe: {e}",
-                            dir, child.name, nested.name,
-                        ),
-                    ));
-                    continue;
-                }
-                if let Some(prior) = claimed.get(&flat) {
-                    diagnostics.push(Diagnostic::warning(
-                        rule::NESTED_ENTRY_SKIPPED,
-                        format!(
-                            "skipped nested {kind} `{dir}/{}/{}`; its flat name `{flat}` collides with `{}`",
-                            child.name,
-                            nested.name,
-                            prior.display(),
-                        ),
-                    ));
-                    continue;
-                }
-                claimed.insert(flat.clone(), nested.rel.clone());
-                // Import using the flat name as the file-stem override.
-                match import_md_entry_with_name(root, &nested.rel, &flat, kind) {
-                    Ok(entry) => {
-                        diagnostics.push(Diagnostic::info(
-                            rule::NESTED_ENTRY_FLATTENED,
-                            format!(
-                                "nested {kind} `{dir}/{}/{}` flattened to `{flat}`",
-                                child.name, nested.name,
-                            ),
-                        ));
-                        entries.push(entry);
-                    }
-                    Err(e) => diagnostics.push(Diagnostic::warning(
-                        rule::SKIPPED_ENTRY,
-                        format!(
-                            "skipped nested {kind} `{dir}/{}/{}`: {e}",
-                            child.name, nested.name,
-                        ),
-                    )),
-                }
-            }
+            // Collect subdirectories for phase 2.
+            subdirs.push(child);
             continue;
         }
         if !child.name.ends_with(".md") {
             continue;
         }
         match import_md_entry(root, &child.rel, &child.name, kind) {
-            Ok(entry) => entries.push(entry),
+            Ok(entry) => {
+                // Record the resolved name so the nested walk can detect
+                // collisions against the name actually used in the IR.
+                claimed.insert(entry.name.clone(), child.rel.clone());
+                entries.push(entry);
+            }
             Err(e) => diagnostics.push(Diagnostic::warning(
                 rule::SKIPPED_ENTRY,
                 format!("skipped {} `{}`: {e}", kind.as_str(), child.name),
             )),
+        }
+    }
+
+    // ---- Phase 2: walk subdirectories one level deep (G3 flattening).
+    for child in subdirs {
+        for nested in root.list_dir(&child.rel)? {
+            if nested.is_dir || !nested.name.ends_with(".md") {
+                continue;
+            }
+            // Flatten `<sub>/<name>.md` → `<sub>-<name>`.
+            let stem = nested.name.strip_suffix(".md").unwrap_or(&nested.name);
+            let flat = format!("{}-{stem}", child.name);
+            // Validate the flat name before using it (it will become an
+            // emitted file/dir name); `validate_name` rejects `..`/absolute/
+            // leading-dot/etc. so hostile source sub-dir or entry names
+            // cannot escape.
+            if let Err(e) = UntrustedRoot::validate_name(&flat) {
+                diagnostics.push(Diagnostic::warning(
+                    rule::NESTED_ENTRY_SKIPPED,
+                    format!(
+                        "skipped nested {kind} `{}/{}/{}`; the flat name `{flat}` is unsafe: {e}",
+                        dir, child.name, nested.name,
+                    ),
+                ));
+                continue;
+            }
+            if let Some(prior) = claimed.get(&flat) {
+                diagnostics.push(Diagnostic::warning(
+                    rule::NESTED_ENTRY_SKIPPED,
+                    format!(
+                        "skipped nested {kind} `{dir}/{}/{}`; its flat name `{flat}` collides with `{}`",
+                        child.name,
+                        nested.name,
+                        prior.display(),
+                    ),
+                ));
+                continue;
+            }
+            claimed.insert(flat.clone(), nested.rel.clone());
+            // Import using the flat name as the file-stem override.
+            match import_md_entry_with_name(root, &nested.rel, &flat, kind) {
+                Ok(entry) => {
+                    diagnostics.push(Diagnostic::info(
+                        rule::NESTED_ENTRY_FLATTENED,
+                        format!(
+                            "nested {kind} `{dir}/{}/{}` flattened to `{flat}`",
+                            child.name, nested.name,
+                        ),
+                    ));
+                    entries.push(entry);
+                }
+                Err(e) => diagnostics.push(Diagnostic::warning(
+                    rule::SKIPPED_ENTRY,
+                    format!(
+                        "skipped nested {kind} `{dir}/{}/{}`: {e}",
+                        child.name, nested.name,
+                    ),
+                )),
+            }
         }
     }
     Ok(())

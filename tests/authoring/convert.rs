@@ -2001,6 +2001,101 @@ fn component_path_missing_dir_emits_warning() {
     assert_eq!(manifest.name, "missing-dir-tome");
 }
 
+/// Bug 4 / #524 fixup: A top-level `commands/deploy.md` with frontmatter
+/// `name: git-push` (so its resolved IR name is `"git-push"`, NOT `"deploy"`)
+/// and a nested `commands/git/push.md` with no `name:` frontmatter (so its
+/// flat name is also `"git-push"`) must produce exactly ONE `git-push` entry —
+/// the top-level one — and a `NESTED_ENTRY_SKIPPED` warning for the nested
+/// file.
+///
+/// The old two-phase (pre-scan + import) design keyed the collision map on the
+/// file *stem* (`"deploy"`) rather than the frontmatter-resolved name
+/// (`"git-push"`), so the nested file slipped through and both entries landed
+/// in the IR, causing a silent last-writer-wins overwrite in the emitter.
+#[test]
+fn frontmatter_name_vs_stem_collision_skips_nested_with_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"fm-name-col","version":"1.0.0","description":"frontmatter name collision"}"#,
+    )
+    .unwrap();
+    // Top-level entry: `commands/deploy.md` with `name: git-push` in frontmatter.
+    // The IR entry will be named "git-push", NOT "deploy".
+    fs::create_dir(src.join("commands")).unwrap();
+    fs::write(
+        src.join("commands/deploy.md"),
+        "---\nname: git-push\ndescription: top-level git push via deploy.md\n---\ntoplevel body\n",
+    )
+    .unwrap();
+    // Nested entry: `commands/git/push.md` with no `name:` frontmatter.
+    // Its flat name is "git-push" (collides with the top-level entry's resolved name).
+    fs::create_dir(src.join("commands/git")).unwrap();
+    fs::write(
+        src.join("commands/git/push.md"),
+        "---\ndescription: nested git push\n---\nnested body\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // The emitted file must be `commands/git-push.md` (the top-level entry's
+    // resolved name).
+    assert!(
+        target.join("commands/git-push.md").exists(),
+        "commands/git-push.md must be emitted for the top-level entry"
+    );
+    // Must NOT emit the stem-based name "deploy.md".
+    assert!(
+        !target.join("commands/deploy.md").exists(),
+        "commands/deploy.md must NOT be emitted (name was overridden by frontmatter)"
+    );
+
+    // The body must come from the top-level entry (not the nested one).
+    let body = fs::read_to_string(target.join("commands/git-push.md")).unwrap();
+    assert!(
+        body.contains("toplevel body"),
+        "body must be from the top-level deploy.md entry, got: {body}"
+    );
+    assert!(
+        !body.contains("nested body"),
+        "nested body must NOT appear in output, got: {body}"
+    );
+
+    // A NESTED_ENTRY_SKIPPED warning must be emitted for the collision.
+    let has_skip = outcome
+        .report
+        .diagnostics
+        .iter()
+        .any(|d| d.rule_id == "convert/nested-entry-skipped");
+    assert!(
+        has_skip,
+        "must emit convert/nested-entry-skipped for the frontmatter-name collision: {:?}",
+        outcome.report.diagnostics
+    );
+
+    // Exactly one entry named "git-push" must be present (no duplicates).
+    let git_push_files: Vec<_> = fs::read_dir(target.join("commands"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("git-push"))
+        .collect();
+    assert_eq!(
+        git_push_files.len(),
+        1,
+        "exactly one git-push file must exist in commands/, got: {:?}",
+        git_push_files
+            .iter()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Bug 3: When `componentPaths.commands` overrides the commands directory to a
 /// subdirectory like `src/commands`, the top-level `src/` directory must NOT be
 /// flagged as an unrecognised plugin-root entry.

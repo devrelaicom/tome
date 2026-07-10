@@ -129,6 +129,24 @@ fn plan(artifact: &Artifact) -> Result<Vec<PlannedFile>, TomeError> {
         Artifact::Plugin(plugin) => plan_plugin(plugin, Path::new(""), &mut files)?,
         Artifact::Skill(entry) => plan_bare_entry(entry, &mut files)?,
     }
+
+    // Belt-and-suspenders: refuse any IR that would silently overwrite a file
+    // by planning two entries with the same relative path. This can only happen
+    // when the importer allowed a name collision to reach the IR (e.g. two
+    // entries both resolving to `git-push`); the importer's `claimed` map is
+    // the primary guard, but a second IR-level collision (from a future producer
+    // or a bug in the importer) would otherwise cause `land_fresh` to write the
+    // same path twice (last-writer-wins, silent data loss). Fail loudly here
+    // instead — exit 81 `OutputExists` names the first duplicated path.
+    let mut seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    for f in &files {
+        if !seen.insert(f.rel.clone()) {
+            return Err(TomeError::OutputExists {
+                path: f.rel.clone(),
+            });
+        }
+    }
+
     Ok(files)
 }
 
