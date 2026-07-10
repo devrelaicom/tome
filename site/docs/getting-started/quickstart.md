@@ -154,14 +154,16 @@ tome query "verify a Compact contract"
 ```
 
 ```text
-top_k=10  rerank=true  min_score=none  (10 results)
+top_k=10  rerank=false  min_score=none  (10 results)
 |   Score | Catalog         | Plugin          | Name                                | Type  |
 |---------|-----------------|-----------------|-------------------------------------|-------|
-|  4.7874 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution | skill |
+|  0.7412 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution | skill |
 ```
 
-That query ran a KNN vector search and a reranking pass, entirely on your
-machine. Inside a configured harness the same search runs over the
+That query ran a KNN vector search over the embeddings, entirely on your
+machine. Reranking is off by default; add `--rerank` to run the reranker over
+the KNN hits (it needs the ~563 MB reranker model). Inside a configured harness
+the same search runs over the
 [MCP server](../using-tome/mcp-server.md) — the agent searches, then loads only
 the top result instead of holding every indexed entry in context.
 

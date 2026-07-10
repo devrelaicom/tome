@@ -165,6 +165,7 @@
         "--no-rerank",
         "--plugin",
         "--query",
+        "--rerank",
         "--strict",
         "--top-k",
         "--verbose"

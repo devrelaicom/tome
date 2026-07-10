@@ -76,12 +76,12 @@ tome query "verify a Compact contract"
 ```
 
 ```text
-top_k=10  rerank=true  min_score=none  (10 results)
+top_k=10  rerank=false  min_score=none  (10 results)
 |   Score | Catalog         | Plugin          | Name                                      | Type  | Version | Path                                                      |
 |---------|-----------------|-----------------|-------------------------------------------|-------|---------|-----------------------------------------------------------|
-|  4.7874 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution       | skill | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md       |
-|  3.4658 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker    | skill | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md    |
-|  3.1529 | midnight-expert | midnight-verify | midnight-verify:verify-compact            | skill | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md            |
+|  0.7412 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution       | skill | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md       |
+|  0.6685 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker    | skill | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md    |
+|  0.6493 | midnight-expert | midnight-verify | midnight-verify:verify-compact            | skill | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md            |
 ```
 
 (Top three of ten rows shown. The dim header line above the table — shown
@@ -90,8 +90,10 @@ and `min_score` knobs plus the result count.)
 
 :::note[What just happened]
 
-That query ran a KNN vector search and a reranking pass, entirely on your
-machine. Inside a configured harness the same search runs over the
+That query ran a KNN vector search over the embeddings, entirely on your
+machine. Reranking is off by default; add `--rerank` to run the reranker over
+the KNN hits (it needs the ~563 MB reranker model). Inside a configured harness
+the same search runs over the
 [MCP server](../using-tome/mcp-server.md) — the agent searches, then loads only
 the top result instead of holding all 28 indexed entries in context.
 

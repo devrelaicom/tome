@@ -192,6 +192,12 @@ section also takes `dimensions` — when set, it's the authoritative expected
 vector length, and a remote embedding of a different length is rejected (exit
 `95`) rather than indexed.
 
+When a capability is served by a configured provider, its bundled local model
+is no longer needed. `tome doctor` reports that model row as `not_applicable`
+rather than flagging it missing, and `tome doctor --fix` does not download it.
+The bundled row returns to a normal state only if you remove the provider from
+that capability.
+
 ### Credential resolution
 
 A provider credential resolves from one of two sources, in order:
