@@ -50,9 +50,10 @@ pub struct McpState {
     pub host_harness: Option<String>,
     /// Phase 10 / US2 (FR-028): per-session search→selection funnel state.
     /// Maps an entry `name` to its 1-indexed rank in the MOST RECENT
-    /// `search_skills` result list this session. `get_skill` / `get_skill_info`
-    /// look the selected entry up here to attribute a `rank_bucket` on their
-    /// `tome.entry_invoked` / `tome.entry_info` events — the bucket is `none`
+    /// `search_skills` result list this session. `get_skill` (body or
+    /// metadata_only) looks the selected entry up here to attribute a
+    /// `rank_bucket` on its `tome.entry_invoked` / `tome.entry_info` events —
+    /// the bucket is `none`
     /// when no preceding search this session ranked the entry.
     ///
     /// WHY a `Mutex<HashMap>` rather than per-request state: the MCP server is

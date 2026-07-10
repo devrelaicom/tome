@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### MCP tools — read-only inventory + introspection
+
+The MCP server's read-only surface now covers browsing the inventory and
+introspecting the environment, and the two fetch tools are consolidated into one.
+
+- **Changed** `get_skill` to a single tool with a `metadata_only: bool`
+  (default `false`). The default is the full-body fetch (substitution pipeline,
+  `raw`, `include_resource_bodies`); `metadata_only: true` returns metadata —
+  description, `when_to_use`, resource listing, kind, version, `user_invocable` —
+  without reading the body. Both modes take the `kind` disambiguator, the `*`
+  wildcard `name` resolution, and the `available` / `candidates` error payloads.
+  **Removed** the standalone `get_skill_info` tool (folded into `get_skill`).
+- **Added** `list_plugins` — enumerate enabled plugins and their entries
+  (skills/commands/agents, per-entry index + invocability state), with optional
+  `catalog` / `enabled_only` / `kind` filters. Mirrors `tome plugin list` /
+  `tome plugin show`.
+- **Added** `list_catalogs` — list enrolled catalogs and their metadata. Mirrors
+  `tome catalog list`.
+- **Added** `status` — an environment snapshot (active workspace, entry counts,
+  models on disk, index freshness, harness state), with an optional
+  `include_doctor: bool` that folds in the **read-only** doctor diagnostic (never
+  `--fix`). Mirrors `tome status --json`.
+- All four are read-only; `meta` remains the only write tool. No new dependency,
+  exit code, or index schema change.
+
 ### BYOK/BYOM — external model providers
 
 Each of Tome's three model capabilities can now be pointed at an external

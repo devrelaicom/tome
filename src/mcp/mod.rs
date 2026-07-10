@@ -1,8 +1,10 @@
 //! `tome mcp` — stdio MCP server.
 //!
 //! Phase 3 / F8 landed the scaffolding (runtime / log / preflight); US1
-//! fills in the actual server loop. Two tools are advertised:
-//! [`tools::search_skills`] and [`tools::get_skill`].
+//! fills in the actual server loop. The read-only surface (issue #497) is
+//! `search_skills`, the consolidated `get_skill` (body-fetch plus
+//! `metadata_only` introspection), `list_plugins`, `list_catalogs`, and
+//! `status`; plus the write-capable `meta`. See [`tools`] for each handler.
 //!
 //! ### Sync boundary
 //!

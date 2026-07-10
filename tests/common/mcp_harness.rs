@@ -57,7 +57,7 @@ use tome::index::{self, OpenOptions};
 use tome::mcp::prompts::{self, PromptDescriptor, PromptGetResponse, PromptRegistry};
 use tome::mcp::server::Server;
 use tome::mcp::state::McpState;
-use tome::mcp::tools::{get_skill, meta, search_skills};
+use tome::mcp::tools::{get_skill, list_catalogs, list_plugins, meta, search_skills, status};
 use tome::paths::Paths;
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
@@ -636,6 +636,33 @@ impl McpHarness {
     pub fn call_meta(&self, input: meta::Input) -> Result<meta::Output, McpError> {
         let _seam = lock_context_seam();
         self.rt.block_on(meta::handle(self.state(), input))
+    }
+
+    /// `tools/call list_plugins` — drive the live `list_plugins` tool
+    /// end-to-end via `list_plugins::handle` (issue #497).
+    pub fn call_list_plugins(
+        &self,
+        input: list_plugins::Input,
+    ) -> Result<list_plugins::Output, McpError> {
+        let _seam = lock_context_seam();
+        self.rt.block_on(list_plugins::handle(self.state(), input))
+    }
+
+    /// `tools/call list_catalogs` — drive the live `list_catalogs` tool
+    /// end-to-end via `list_catalogs::handle` (issue #497).
+    pub fn call_list_catalogs(
+        &self,
+        input: list_catalogs::Input,
+    ) -> Result<list_catalogs::Output, McpError> {
+        let _seam = lock_context_seam();
+        self.rt.block_on(list_catalogs::handle(self.state(), input))
+    }
+
+    /// `tools/call status` — drive the live `status` tool end-to-end via
+    /// `status::handle` (issue #497).
+    pub fn call_status(&self, input: status::Input) -> Result<status::Output, McpError> {
+        let _seam = lock_context_seam();
+        self.rt.block_on(status::handle(self.state(), input))
     }
 }
 

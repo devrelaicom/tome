@@ -18,6 +18,7 @@ mod common;
 
 use common::mcp_harness::{StagedWorkspace, mcp_error_slug};
 use tome::mcp::tools::{get_skill, search_skills};
+use tome::plugin::identity::EntryKind;
 
 const SKILL: &str = "---\nname: searchable\ndescription: a findable skill.\n---\nthe body\n";
 
@@ -40,15 +41,17 @@ fn get_skill_resolves_db_enrolled_catalog_without_config() {
             catalog: staged.catalog_name.clone(),
             plugin: staged.plugin_name.clone(),
             name: "searchable".into(),
+            kind: EntryKind::Skill,
+            metadata_only: false,
             raw: false,
             include_resource_bodies: false,
         })
         .expect("get_skill must resolve the DB-enrolled catalog (no config.toml)");
 
+    let content = out.content.as_deref().unwrap();
     assert!(
-        out.content.contains("the body"),
-        "get_skill must return the skill body; got {:?}",
-        out.content,
+        content.contains("the body"),
+        "get_skill must return the skill body; got {content:?}",
     );
 }
 
@@ -65,6 +68,8 @@ fn get_skill_unknown_catalog_still_errors_without_config() {
             catalog: "ghost-catalog".into(),
             plugin: staged.plugin_name.clone(),
             name: "searchable".into(),
+            kind: EntryKind::Skill,
+            metadata_only: false,
             raw: false,
             include_resource_bodies: false,
         })

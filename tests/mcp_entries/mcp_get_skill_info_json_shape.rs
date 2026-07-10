@@ -1,30 +1,34 @@
-//! Byte-stable JSON wire-shape pin for `get_skill_info`'s `SkillInfo`
-//! response. Phase 5 / US4.a.
+//! Byte-stable JSON wire-shape pin for the consolidated `get_skill`'s
+//! METADATA-ONLY mode. #497 (was the standalone `get_skill_info` pin).
+//!
+//! Issue #497 folded `get_skill_info` into `get_skill` behind
+//! `metadata_only: true`. The metadata-only response now serialises through the
+//! shared `get_skill::Output`, so this file pins that shape:
+//!
+//! Metadata-only field order:
+//!   catalog, plugin, name, kind, path, description, when_to_use,
+//!   plugin_version, user_invocable, [resources], [prompt_name].
+//! Every full-body field (`content` / flat `resources` array /
+//! `substitutions_applied` / `resource_bodies`) is `Option`-gated and MUST be
+//! absent here.
 //!
 //! Two snapshots are pinned:
 //!
-//! 1. Skill-kind: `resources` field PRESENT with the documented shape
-//!    (`files` array + `directories` BTreeMap-as-JSON-object).
-//! 2. Command-kind: `resources` key entirely ABSENT (FR-083 —
-//!    `#[serde(skip_serializing_if = "Option::is_none")]`).
+//! 1. Skill-kind: `resources` enumeration PRESENT (`files` array +
+//!    `directories` BTreeMap-as-JSON-object).
+//! 2. Command-kind: structured `resources` key entirely ABSENT (FR-083).
 //!
-//! Each snapshot is constructed directly from the public types so the
-//! test doesn't need a staged workspace or the index — it pins the
-//! Serialize impl shape, not the handler's behaviour (which the other
-//! `mcp_get_skill_info.rs` tests cover end-to-end).
-//!
-//! The fields are listed in the order the contract documents; the
-//! assertion compares the serialised string byte-for-byte against the
-//! expected literal. Any field rename, reorder, or default-flip will
-//! flip this test red.
+//! Each snapshot is constructed directly from the public types so the test
+//! doesn't need a staged workspace or the index — it pins the Serialize impl
+//! shape. Any field rename, reorder, or default-flip will flip this test red.
 
 use std::collections::BTreeMap;
 
-use tome::mcp::tools::get_skill_info::{ResourceEnumeration, SkillInfo};
+use tome::mcp::tools::get_skill::{MetaWhenToUse, Output, ResourceEnumeration};
 use tome::plugin::identity::EntryKind;
 
 #[test]
-fn skill_info_wire_shape_for_skill_kind() {
+fn metadata_wire_shape_for_skill_kind() {
     let mut directories: BTreeMap<String, Vec<String>> = BTreeMap::new();
     directories.insert(
         "examples".into(),
@@ -45,69 +49,75 @@ fn skill_info_wire_shape_for_skill_kind() {
         ],
     );
 
-    let info = SkillInfo {
+    let out = Output {
         catalog: "midnight-expert".into(),
         plugin: "compact-dev".into(),
         name: "compact-circuits".into(),
         kind: EntryKind::Skill,
         path: "/abs/path/to/SKILL.md".into(),
-        description: "Full description text.".into(),
-        when_to_use: Some("when guidance applies".into()),
-        plugin_version: "1.4.0".into(),
-        user_invocable: false,
+        // Full-body-mode fields absent in metadata mode.
+        content: None,
+        resources_paths: None,
+        substitutions_applied: None,
+        resource_bodies: None,
+        // Metadata-mode fields.
+        description: Some("Full description text.".into()),
+        when_to_use: MetaWhenToUse::Present("when guidance applies".into()),
+        plugin_version: Some("1.4.0".into()),
+        user_invocable: Some(false),
         resources: Some(ResourceEnumeration {
             files: vec!["/abs/skills/with-resources/config.json".into()],
             directories,
         }),
-        // A non-invocable skill has no prompt — `prompt_name` is `None` and
-        // MUST be omitted (#289 additive field, `skip_serializing_if`),
-        // keeping the pre-#289 skill-kind wire shape byte-identical.
         prompt_name: None,
     };
 
-    let json = serde_json::to_string(&info).expect("serialise");
+    let json = serde_json::to_string(&out).expect("serialise");
 
-    // Pin every field in document order. BTreeMap iteration is
-    // alphabetical, so `examples` precedes `scripts` in the directories
-    // object — the contract pins this. `prompt_name` is ABSENT (None +
-    // skip_serializing_if).
+    // Pin every field in document order. BTreeMap iteration is alphabetical, so
+    // `examples` precedes `scripts`. `prompt_name` ABSENT (None +
+    // skip_serializing_if). Every full-body field ABSENT.
     let expected = r#"{"catalog":"midnight-expert","plugin":"compact-dev","name":"compact-circuits","kind":"skill","path":"/abs/path/to/SKILL.md","description":"Full description text.","when_to_use":"when guidance applies","plugin_version":"1.4.0","user_invocable":false,"resources":{"files":["/abs/skills/with-resources/config.json"],"directories":{"examples":["/abs/skills/with-resources/examples/advanced.ts","/abs/skills/with-resources/examples/basic.ts"],"scripts":["/abs/skills/with-resources/scripts/audit.py","/abs/skills/with-resources/scripts/lint.py","/abs/skills/with-resources/scripts/build.sh","/abs/skills/with-resources/scripts/deploy.sh","/abs/skills/with-resources/scripts/test.sh","and 3 more"]}}}"#;
 
     assert_eq!(
         json, expected,
-        "skill-kind JSON wire shape drift — check field renames, reorders, or default flips",
+        "metadata-only skill-kind JSON wire shape drift (#497 consolidation)",
     );
 }
 
 #[test]
-fn skill_info_wire_shape_for_command_kind_omits_resources() {
-    let info = SkillInfo {
+fn metadata_wire_shape_for_command_kind_omits_resources() {
+    let out = Output {
         catalog: "midnight-expert".into(),
         plugin: "compact-dev".into(),
         name: "fix-issue".into(),
         kind: EntryKind::Command,
         path: "/abs/path/to/commands/fix-issue.md".into(),
-        description: "Fix a GitHub issue.".into(),
-        when_to_use: None,
-        plugin_version: "1.4.0".into(),
-        user_invocable: true,
+        content: None,
+        resources_paths: None,
+        substitutions_applied: None,
+        resource_bodies: None,
+        description: Some("Fix a GitHub issue.".into()),
+        // A command with no `when_to_use` guidance still serialises the field as
+        // JSON `null` in metadata mode (matching the former get_skill_info shape).
+        when_to_use: MetaWhenToUse::Null,
+        plugin_version: Some("1.4.0".into()),
+        user_invocable: Some(true),
+        // FR-083: commands omit the structured resource enumeration entirely.
         resources: None,
-        // #289: a user-invocable command carries its derived MCP `prompt_name`,
-        // appended LAST so the additive field never reorders the pinned fields.
+        // #289: a user-invocable command carries its derived MCP prompt_name,
+        // appended LAST.
         prompt_name: Some("compact-dev__fix-issue".into()),
     };
 
-    let json = serde_json::to_string(&info).expect("serialise");
+    let json = serde_json::to_string(&out).expect("serialise");
 
-    // The `resources` key MUST be absent (FR-083). Also pin the
-    // `when_to_use: null` shape since the field is Option<String>
-    // WITHOUT `skip_serializing_if` — it serialises as JSON `null`
-    // rather than disappearing. `prompt_name` is appended LAST and present
-    // (the command is user-invocable).
+    // The structured `resources` key MUST be absent (FR-083). `when_to_use`
+    // serialises as JSON `null`. `prompt_name` appended LAST.
     let expected = r#"{"catalog":"midnight-expert","plugin":"compact-dev","name":"fix-issue","kind":"command","path":"/abs/path/to/commands/fix-issue.md","description":"Fix a GitHub issue.","when_to_use":null,"plugin_version":"1.4.0","user_invocable":true,"prompt_name":"compact-dev__fix-issue"}"#;
 
     assert_eq!(
         json, expected,
-        "command-kind JSON wire shape drift — `resources` absent, `when_to_use` null, `prompt_name` appended LAST",
+        "metadata-only command-kind JSON wire shape drift — `resources` absent, `when_to_use` null, `prompt_name` appended LAST",
     );
 }

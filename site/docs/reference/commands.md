@@ -467,8 +467,10 @@ loads completions from:
 ## `tome mcp`
 
 Run Tome as a stdio MCP server backed by the resolved workspace's index.
-Exposes the `search_skills`, `get_skill`, and `get_skill_info` tools, the
-built-in `meta` tool, plus user-invocable entries as MCP prompts.
+Exposes five read-only tools — `search_skills`, `get_skill` (with a
+`metadata_only` middle tier), `list_plugins`, `list_catalogs`, and `status`
+(with an optional read-only `include_doctor` report) — the built-in `meta`
+tool, plus user-invocable entries as MCP prompts.
 
 `--harness <name>` tells the server which harness is hosting it
 (`claude-code`, `cursor`, `codex`, `opencode`) so the built-in `meta` tool can

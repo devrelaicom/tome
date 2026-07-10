@@ -17,7 +17,8 @@ The server uses MCP over stdio, so harnesses launch it as a subprocess.
 
 ## Tools
 
-Tome exposes four tools. The first three form a search-then-load flow:
+Tome exposes six tools. All but `meta` are read-only. The first two form a
+search-then-load flow:
 
 - **`search_skills`** — semantic search over enabled skills and commands. Returns
   candidate matches (KNN + reranker), so the agent can decide what's relevant.
@@ -29,25 +30,27 @@ Tome exposes four tools. The first three form a search-then-load flow:
   measured on the scale the `scoring` output field names, and a non-finite value
   (NaN or ±inf) is rejected. So `{"query":"format a contract","kind":"command","min_score":0.5}`
   returns only command matches at or above the floor.
-- **`get_skill_info`** — a middle tier that returns metadata about a skill
-  (including its `when_to_use` guidance) without pulling the full body. Useful for
-  confirming relevance before loading. The `name` accepts a `*` wildcard that
-  resolves to a unique match — a fuzzy name no longer forces a re-search. If the
-  wildcard matches several entries the error lists the candidate `(name, kind)`
-  pairs so the agent can pick one; if a name (exact or wildcard) resolves to
-  nothing, the error's `data` carries the available `(name, kind)` entries for
-  that `(catalog, plugin)`, so the agent needn't round-trip back to
-  `search_skills`.
-- **`get_skill`** — loads a skill's full content, with variable substitution
-  applied, ready for the agent to use. Pass `raw: true` to receive the body with
-  literal `${TOME_*}` substitution tokens preserved instead — useful for
-  authoring or conversion workflows that need the source tokens, not the
-  resolved values. Pass `include_resource_bodies: true` to also inline the
-  contents of small text resources as `{ path, content }` alongside the resource
-  paths, avoiding a separate file read per resource (and working even when the
-  host's file tool can't reach a path). Inlining is byte-capped per file and in
-  total, so binary, oversized, or budget-exceeding resources are skipped — their
-  paths still appear in `resources` for the agent to fetch itself.
+- **`get_skill`** — loads an entry by `(catalog, plugin, name)`. By default it
+  returns the full content with variable substitution applied, ready for the
+  agent to use. Pass `metadata_only: true` for the cheap middle tier: the
+  description, `when_to_use` guidance, resource listing, kind, version, and
+  `user_invocable` flag, without reading or rendering the body — useful for
+  confirming relevance before loading. Use `kind` to disambiguate a name shared
+  across skill/command/agent (defaults to `skill`); the `name` also accepts a
+  `*` wildcard that resolves to a unique match, so a fuzzy name no longer forces
+  a re-search. If the wildcard matches several entries the error lists the
+  candidate `(name, kind)` pairs so the agent can pick one; if a name (exact or
+  wildcard) resolves to nothing, the error's `data` carries the available
+  `(name, kind)` entries for that `(catalog, plugin)`, so the agent needn't
+  round-trip back to `search_skills`. In the default body mode, pass `raw: true`
+  to receive the body with literal `${TOME_*}` substitution tokens preserved
+  instead — useful for authoring or conversion workflows that need the source
+  tokens, not the resolved values — and `include_resource_bodies: true` to inline
+  the contents of small text resources as `{ path, content }` alongside the
+  resource paths, avoiding a separate file read per resource (and working even
+  when the host's file tool can't reach a path). Inlining is byte-capped per file
+  and in total, so binary, oversized, or budget-exceeding resources are skipped —
+  their paths still appear in `resources` for the agent to fetch itself.
 
 A `search_skills` result set is never a bare `[]` when it comes back empty or
 weak. The output always carries `corpus_size` (the scope-effective count of
@@ -59,8 +62,8 @@ enabling a plugin) or `no_match` (a valid filter left the scope with content but
 no match — the hint suggests a rephrase or broadening). So the agent knows
 whether to reindex or rephrase.
 
-All three tools resolve **commands** as well as skills, and each result, info,
-and `get_skill` output carries a `kind` field (`skill`, `command`, or `agent`)
+Both tools resolve **commands** as well as skills, and each result and
+`get_skill` response carries a `kind` field (`skill`, `command`, or `agent`)
 so the agent knows what it resolved. A user-invocable entry also carries a
 `prompt_name` (present only when the entry is invocable). For a **command**,
 `prompt_name` is the exact `prompts/get` name to invoke through its MCP prompt
@@ -68,11 +71,31 @@ so the agent knows what it resolved. A user-invocable entry also carries a
 `get_skill`. Branch on `kind` so you don't treat a command as a loadable skill
 body.
 
-The typical loop is: `search_skills` to find candidates → `get_skill_info` to
-confirm → `get_skill` to load the best skill, or invoke its `prompt_name` when
-the match is a command.
+The typical loop is: `search_skills` to find candidates → `get_skill` with
+`metadata_only: true` to confirm → `get_skill` again to load the best skill, or
+invoke its `prompt_name` when the match is a command.
 
-The fourth tool lets the agent extend its own harness:
+Three read-only tools let the agent browse its inventory and introspect its
+environment instead of reaching entries only through search:
+
+- **`list_plugins`** — enumerates the enabled plugins in the resolved workspace
+  and their contents (the skills, commands, and agents each plugin ships, with
+  per-entry index and invocability status). Optional filters: `catalog`
+  (restrict to one catalog), `enabled_only` (default `true` — set `false` to
+  also list discoverable plugins with nothing enabled), and `kind` (restrict the
+  listed entries to one kind). This is the "plan against the full toolbox"
+  surface, mirroring `tome plugin list` / `tome plugin show`.
+- **`list_catalogs`** — lists the catalogs enrolled in the resolved workspace and
+  their metadata (name, source URL, pinned ref, plugin count, last-synced time).
+  Mirrors `tome catalog list`.
+- **`status`** — an environment snapshot: active workspace, entry counts
+  (skills/commands/agents), models on disk, index freshness, and per-harness MCP
+  integration state. Mirrors `tome status --json`. Pass `include_doctor: true`
+  to fold in the **read-only** doctor diagnostic (per-subsystem health plus
+  suggested fixes); it never applies a repair. Use it to understand your context
+  or self-diagnose why a search returned nothing.
+
+The last tool lets the agent extend its own harness:
 
 - **`meta`** — installs a bundled [meta skill](./meta-skills.md) into the
   **host harness**, the agent the server is running inside. Install-only:

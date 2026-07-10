@@ -1,23 +1,23 @@
-//! Phase 5 / US4.a — `get_skill_info` MCP tool end-to-end at the library API.
+//! Consolidated `get_skill` metadata-only mode end-to-end at the library API.
+//! #497 (was the standalone `get_skill_info` tool).
 //!
-//! Drives the real handler against a staged workspace + indexed plugin
-//! using the StubEmbedder (no ONNX models needed). Mirrors the
-//! `mcp_prompts.rs` staging discipline: a single tempdir hosts the
-//! `Paths` root, the catalog clone, and a symlink wired up so
-//! `paths.cache_dir_for(url)` resolves into the same on-disk directory
-//! that the lifecycle pipeline indexed.
+//! Drives the real handler against a staged workspace + indexed plugin using
+//! the StubEmbedder (no ONNX models needed). Every call passes
+//! `metadata_only: true` — the middle-tier introspection that returns
+//! description + when_to_use + a capped resource enumeration WITHOUT reading
+//! the body.
 //!
-//! Covers `contracts/mcp-tools-p5.md` § `get_skill_info`:
+//! Covers the former `get_skill_info` contract behaviours:
 //!
 //! - Skill-kind entry returns full description + when_to_use + resources.
-//! - Command-kind entry omits the `resources` key entirely (FR-083).
+//! - Command-kind entry omits the structured `resources` key (FR-083).
 //! - Per-directory cap of 5 + `"and N more"` sentinel.
 //! - Subdir cap: per-subdir, NOT just top-level.
 //! - Default `kind` parameter selects `skill`.
 //! - Same name across both kinds → `kind` disambiguator selects.
-//! - #295: not-found surfaces `get_skill`'s three-code surface —
-//!   `unknown_catalog` / `unknown_plugin` / `unknown_skill` — with the same
-//!   codes + messages get_skill emits (no more collapsed `entry_not_found`).
+//! - Not-found surfaces the three-code surface (`unknown_catalog` /
+//!   `unknown_plugin` / `unknown_skill`) with the `available` payload.
+//! - `*` wildcard resolution (one / many / zero matches).
 //! - Alphabetical ordering by basename.
 
 use std::fs;
@@ -32,7 +32,7 @@ use tome::embedding::stub::{StubEmbedder, StubReranker};
 use tome::index::{self, OpenOptions};
 use tome::mcp::prompts::PromptRegistry;
 use tome::mcp::state::McpState;
-use tome::mcp::tools::get_skill_info::{self, Input};
+use tome::mcp::tools::get_skill::{self, Input};
 use tome::plugin::PluginId;
 use tome::plugin::identity::EntryKind;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
@@ -44,9 +44,7 @@ use crate::common::{
 };
 
 // ---------------------------------------------------------------------------
-// Fixture helpers (cloned from `tests/mcp_prompts.rs` — promotion to
-// `crate::common::` is deferred per the orchestrator's brief; the staging code is
-// non-trivial and the symlink discipline is test-suite-specific).
+// Fixture helpers.
 // ---------------------------------------------------------------------------
 
 fn build_deps<'a>(
@@ -85,14 +83,22 @@ fn global() -> WorkspaceName {
 }
 
 /// Bundle of files to write into a skill's directory: `(relative_path, body)`.
-/// Relative paths starting with `subdir/` create the directory automatically.
 type SkillFile<'a> = (&'a str, &'a str);
 
-/// Stage a workspace with one plugin enabled. `skills` and `commands`
-/// each carry `(name, body, extra_files)` tuples — `extra_files` are
-/// resources written alongside the entry body (relevant only for skills;
-/// for commands the slot is honoured but the contract elides the
-/// resources field entirely).
+/// Build a metadata-only `get_skill::Input`.
+fn meta_input(catalog: &str, plugin: &str, name: &str, kind: EntryKind) -> Input {
+    Input {
+        catalog: catalog.into(),
+        plugin: plugin.into(),
+        name: name.into(),
+        kind,
+        metadata_only: true,
+        raw: false,
+        include_resource_bodies: false,
+    }
+}
+
+/// Stage a workspace with one plugin enabled.
 fn stage_workspace(
     skills: &[(&str, &str, &[SkillFile<'_>])],
     commands: &[(&str, &str)],
@@ -106,7 +112,6 @@ fn stage_workspace(
     fs::create_dir_all(&catalog_root).unwrap();
     let config = config_with_catalog("acme", &catalog_root);
 
-    // Write the plugin directory under the catalog.
     let plugin_dir = catalog_root.join("plug");
     fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::write(
@@ -147,18 +152,11 @@ fn stage_workspace(
     let scope = tome::workspace::Scope(global());
     let deps = build_deps(&paths, &config, &embedder, &scope);
     let id: PluginId = "acme/plug".parse().unwrap();
-    // FF1: enrolment + cache symlink before enable — resolve_plugin_dir now
-    // reads workspace_catalogs, not the in-memory Config.
     seed_catalog_enrolment(&paths, &catalog_root, "acme");
     lifecycle::enable(&id, &deps).expect("enable plugin");
     (tmp, paths)
 }
 
-/// Insert a `workspace_catalogs` row for `global` and symlink the
-/// hashed cache dir to the on-disk catalog directory so
-/// `paths.cache_dir_for(url)` resolves into a real layout. Lifted from
-/// `tests/mcp_prompts.rs` — same discipline, same caveat about Unix vs
-/// Windows (Windows uses a recursive copy fallback).
 fn seed_catalog_enrolment(paths: &tome::paths::Paths, catalog_root: &Path, catalog_name: &str) {
     let url = format!("file://{}", catalog_root.display());
     let conn = open_index(paths);
@@ -193,9 +191,6 @@ fn seed_catalog_enrolment(paths: &tome::paths::Paths, catalog_root: &Path, catal
     }
 }
 
-/// Build the `Arc<McpState>` the handler expects. The prompt registry is
-/// empty — `get_skill_info` doesn't consume it; we still wire it so the
-/// state shape stays valid.
 fn build_state(paths: &tome::paths::Paths) -> Arc<McpState> {
     let embedder_entry = lookup("bge-small-en-v1.5").expect("registry has embedder");
     let reranker_entry = lookup("bge-reranker-base").expect("registry has reranker");
@@ -217,17 +212,12 @@ fn build_state(paths: &tome::paths::Paths) -> Arc<McpState> {
     })
 }
 
-/// Single-thread runtime + `block_on` — same shape as the prompts
-/// integration tests.
-fn invoke(
-    state: Arc<McpState>,
-    input: Input,
-) -> Result<get_skill_info::SkillInfo, rmcp::ErrorData> {
+fn invoke(state: Arc<McpState>, input: Input) -> Result<get_skill::Output, rmcp::ErrorData> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
-    rt.block_on(get_skill_info::handle(state, input))
+    rt.block_on(get_skill::handle(state, input))
 }
 
 // ---------------------------------------------------------------------------
@@ -254,35 +244,41 @@ body
 
     let info = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "with-resources".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("acme", "plug", "with-resources", EntryKind::Skill),
     )
-    .expect("get_skill_info ok");
+    .expect("get_skill metadata ok");
 
     assert_eq!(info.catalog, "acme");
     assert_eq!(info.plugin, "plug");
     assert_eq!(info.name, "with-resources");
     assert!(matches!(info.kind, EntryKind::Skill));
-    assert_eq!(info.description, "A skill that ships sibling files.");
     assert_eq!(
-        info.when_to_use.as_deref(),
+        info.description.as_deref(),
+        Some("A skill that ships sibling files.")
+    );
+    // Metadata mode does not read the body.
+    assert!(
+        info.content.is_none(),
+        "metadata mode must not fetch the body"
+    );
+    // `when_to_use` is exposed via the tri-state wire — round-trip via JSON.
+    let json = serde_json::to_value(&info).expect("serialise");
+    assert_eq!(
+        json.get("when_to_use").and_then(|v| v.as_str()),
         Some("When the user mentions resource enumeration."),
     );
-    assert_eq!(info.plugin_version, "1.0.0");
-    assert!(!info.user_invocable, "skills default user_invocable=false");
+    assert_eq!(info.plugin_version.as_deref(), Some("1.0.0"));
+    assert_eq!(
+        info.user_invocable,
+        Some(false),
+        "skills default user_invocable=false"
+    );
     assert!(info.path.ends_with("SKILL.md"));
 
     let res = info.resources.expect("skill MUST carry resources field");
-    // Top-level files: only `config.json` (SKILL.md is excluded; the two
-    // subdirs are in `directories`, not `files`).
     assert_eq!(res.files.len(), 1);
     assert!(res.files[0].ends_with("config.json"));
 
-    // Subdirs alphabetised: examples, scripts.
     let keys: Vec<&str> = res.directories.keys().map(String::as_str).collect();
     assert_eq!(keys, vec!["examples", "scripts"]);
 
@@ -305,21 +301,16 @@ fn command_info_omits_resources() {
 
     let info = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "fix-issue".into(),
-            kind: EntryKind::Command,
-        },
+        meta_input("acme", "plug", "fix-issue", EntryKind::Command),
     )
-    .expect("get_skill_info ok for command");
+    .expect("get_skill metadata ok for command");
 
     assert_eq!(info.name, "fix-issue");
     assert!(matches!(info.kind, EntryKind::Command));
-    assert_eq!(info.description, "Fix a GitHub issue.");
-    assert!(info.when_to_use.is_none());
-    assert!(
+    assert_eq!(info.description.as_deref(), Some("Fix a GitHub issue."));
+    assert_eq!(
         info.user_invocable,
+        Some(true),
         "commands default user_invocable=true per resolved-defaults table"
     );
     assert!(
@@ -327,20 +318,25 @@ fn command_info_omits_resources() {
         "FR-083: command-kind MUST omit the resources field; got Some(...)"
     );
 
-    // Serialise + assert the JSON shape physically lacks the `resources` key.
+    // Serialise + assert the JSON shape physically lacks the structured
+    // `resources` object key.
     let json = serde_json::to_value(&info).expect("serialise");
     let obj = json.as_object().expect("object");
     assert!(
-        !obj.contains_key("resources"),
-        "command JSON must not include `resources` key, got: {}",
+        obj.get("resources").is_none(),
+        "command metadata JSON must not include `resources`, got: {}",
         json
+    );
+    // when_to_use serialises as null for a command without guidance.
+    assert!(
+        json.get("when_to_use")
+            .map(|v| v.is_null())
+            .unwrap_or(false)
     );
 }
 
 #[test]
 fn heavy_directory_capped_with_sentinel() {
-    // 7 top-level files → 5 returned + "and 2 more".
-    // 7 files in subdir → same cap on the subdir.
     let mut extras: Vec<(String, String)> = Vec::new();
     for i in 0..7 {
         extras.push((format!("file-{i:02}.txt"), "x".to_owned()));
@@ -356,24 +352,12 @@ fn heavy_directory_capped_with_sentinel() {
     let (_tmp, paths) = stage_workspace(&[("heavy", body, &extras_ref)], &[]);
     let state = build_state(&paths);
 
-    let info = invoke(
-        state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "heavy".into(),
-            kind: EntryKind::Skill,
-        },
-    )
-    .expect("ok");
+    let info = invoke(state, meta_input("acme", "plug", "heavy", EntryKind::Skill)).expect("ok");
 
     let res = info.resources.expect("skill resources");
-
-    // Top-level: PER_DIRECTORY_CAP = 5 entries + 1 sentinel.
     assert_eq!(res.files.len(), 6, "5 files + 1 sentinel");
     assert_eq!(res.files[5], "and 2 more");
 
-    // Subdir: same cap.
     let scripts = res.directories.get("scripts").unwrap();
     assert_eq!(scripts.len(), 6);
     assert_eq!(scripts[5], "and 2 more");
@@ -385,30 +369,27 @@ fn default_kind_is_skill() {
     let (_tmp, paths) = stage_workspace(&[("shared-name", skill_body, &[])], &[]);
     let state = build_state(&paths);
 
-    // Construct a JSON request without `kind` and round-trip via the
-    // tool's deserialiser — proves the `default = skill` annotation
-    // resolves correctly through the wire schema.
+    // Construct a JSON request without `kind` (but WITH metadata_only) and
+    // round-trip via the tool's deserialiser.
     let raw = serde_json::json!({
         "catalog": "acme",
         "plugin": "plug",
         "name": "shared-name",
+        "metadata_only": true,
     });
     let input: Input = serde_json::from_value(raw).expect("deserialise default kind");
     assert!(
         matches!(input.kind, EntryKind::Skill),
-        "default kind must be Skill per FR-084",
+        "default kind must be Skill",
     );
 
     let info = invoke(state, input).expect("ok");
     assert!(matches!(info.kind, EntryKind::Skill));
-    assert_eq!(info.description, "a skill.");
+    assert_eq!(info.description.as_deref(), Some("a skill."));
 }
 
 #[test]
 fn kind_disambiguates_same_name_across_kinds() {
-    // Same NAME, both kinds enabled. The skill body uses
-    // `user-invocable: true` so the prompts surface would surface both;
-    // get_skill_info should pick the row matching the supplied `kind`.
     let skill_body = "---
 name: deploy
 description: SKILL deploy.
@@ -422,40 +403,24 @@ skill body
 
     let skill_info = invoke(
         state.clone(),
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "deploy".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("acme", "plug", "deploy", EntryKind::Skill),
     )
     .expect("skill lookup ok");
-    assert_eq!(skill_info.description, "SKILL deploy.");
+    assert_eq!(skill_info.description.as_deref(), Some("SKILL deploy."));
     assert!(matches!(skill_info.kind, EntryKind::Skill));
 
     let cmd_info = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "deploy".into(),
-            kind: EntryKind::Command,
-        },
+        meta_input("acme", "plug", "deploy", EntryKind::Command),
     )
     .expect("command lookup ok");
-    assert_eq!(cmd_info.description, "COMMAND deploy.");
+    assert_eq!(cmd_info.description.as_deref(), Some("COMMAND deploy."));
     assert!(matches!(cmd_info.kind, EntryKind::Command));
     assert!(cmd_info.resources.is_none());
 }
 
 #[test]
 fn unknown_entry_surfaces_unknown_skill() {
-    // #295: a real catalog + real plugin but an entry name that doesn't exist
-    // now surfaces `unknown_skill` (matching `get_skill`), not the pre-#295
-    // collapsed `entry_not_found`.
-    // #333: the `unknown_skill` envelope is ENRICHED with the available
-    // `(name, kind)` list for `(catalog, plugin)` — additive; the code / message
-    // / catalog / plugin / name fields are byte-identical to pre-#333.
     let real = "---\nname: real\ndescription: ok.\n---\nbody\n";
     let cmd = "---\nname: run-it\ndescription: a command.\n---\ndo it\n";
     let (_tmp, paths) = stage_workspace(&[("real", real, &[])], &[("run-it", cmd)]);
@@ -463,12 +428,7 @@ fn unknown_entry_surfaces_unknown_skill() {
 
     let err = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "does-not-exist".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("acme", "plug", "does-not-exist", EntryKind::Skill),
     )
     .expect_err("unknown entry must reject");
 
@@ -476,31 +436,24 @@ fn unknown_entry_surfaces_unknown_skill() {
     assert_eq!(
         data.get("code").and_then(|c| c.as_str()),
         Some("unknown_skill"),
-        "expected unknown_skill code (matching get_skill), got: {}",
+        "expected unknown_skill code, got: {}",
         data,
     );
-    // The `unknown_skill` envelope carries catalog + plugin + name (byte-
-    // identical to `get_skill`'s), NOT the pre-#295 `kind` field.
     assert_eq!(data.get("catalog").and_then(|c| c.as_str()), Some("acme"));
     assert_eq!(data.get("plugin").and_then(|c| c.as_str()), Some("plug"));
     assert_eq!(
         data.get("name").and_then(|c| c.as_str()),
         Some("does-not-exist"),
     );
-    // The message matches get_skill's exact wording for the same case.
     assert_eq!(
         err.message,
         "skill `acme/plug/does-not-exist` is not enabled in the resolved scope",
     );
 
-    // #333: `available` lists BOTH enabled entries for `(acme, plug)` — the
-    // `real` skill and the `run-it` command — each as `{ name, kind }`. Ordered
-    // by `(kind, name)` (list_for_plugin order): the command precedes the skill
-    // alphabetically by kind slug (`command` < `skill`).
     let available = data
         .get("available")
         .and_then(|a| a.as_array())
-        .expect("#333: unknown_skill data must carry an `available` array");
+        .expect("unknown_skill data must carry an `available` array");
     let pairs: Vec<(String, String)> = available
         .iter()
         .map(|e| {
@@ -522,20 +475,13 @@ fn unknown_entry_surfaces_unknown_skill() {
 
 #[test]
 fn unknown_catalog_surfaces_unknown_catalog() {
-    // #295: get_skill_info now splits not-found the same way get_skill does —
-    // an unenrolled catalog surfaces `unknown_catalog`, not `entry_not_found`.
     let body = "---\nname: real\ndescription: ok.\n---\nbody\n";
     let (_tmp, paths) = stage_workspace(&[("real", body, &[])], &[]);
     let state = build_state(&paths);
 
     let err = invoke(
         state,
-        Input {
-            catalog: "nonexistent".into(),
-            plugin: "plug".into(),
-            name: "real".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("nonexistent", "plug", "real", EntryKind::Skill),
     )
     .expect_err("unknown catalog must reject");
 
@@ -543,7 +489,7 @@ fn unknown_catalog_surfaces_unknown_catalog() {
     assert_eq!(
         data.get("code").and_then(|c| c.as_str()),
         Some("unknown_catalog"),
-        "expected unknown_catalog code (matching get_skill), got: {data}",
+        "expected unknown_catalog code, got: {data}",
     );
     assert_eq!(
         data.get("catalog").and_then(|c| c.as_str()),
@@ -557,21 +503,13 @@ fn unknown_catalog_surfaces_unknown_catalog() {
 
 #[test]
 fn unknown_plugin_surfaces_unknown_plugin() {
-    // #295: a real, enrolled catalog but a plugin with zero rows surfaces
-    // `unknown_plugin` (matching get_skill's split), not the collapsed
-    // `entry_not_found`.
     let body = "---\nname: real\ndescription: ok.\n---\nbody\n";
     let (_tmp, paths) = stage_workspace(&[("real", body, &[])], &[]);
     let state = build_state(&paths);
 
     let err = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "no-such-plugin".into(),
-            name: "real".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("acme", "no-such-plugin", "real", EntryKind::Skill),
     )
     .expect_err("unknown plugin must reject");
 
@@ -579,7 +517,7 @@ fn unknown_plugin_surfaces_unknown_plugin() {
     assert_eq!(
         data.get("code").and_then(|c| c.as_str()),
         Some("unknown_plugin"),
-        "expected unknown_plugin code (matching get_skill), got: {data}",
+        "expected unknown_plugin code, got: {data}",
     );
     assert_eq!(data.get("catalog").and_then(|c| c.as_str()), Some("acme"));
     assert_eq!(
@@ -598,16 +536,8 @@ fn empty_field_validation_rejects() {
     let (_tmp, paths) = stage_workspace(&[("real", body, &[])], &[]);
     let state = build_state(&paths);
 
-    let err = invoke(
-        state,
-        Input {
-            catalog: "".into(),
-            plugin: "plug".into(),
-            name: "real".into(),
-            kind: EntryKind::Skill,
-        },
-    )
-    .expect_err("empty catalog must reject");
+    let err = invoke(state, meta_input("", "plug", "real", EntryKind::Skill))
+        .expect_err("empty catalog must reject");
     assert!(
         err.message.contains("non-empty"),
         "expected empty-field rejection, got: {}",
@@ -617,8 +547,6 @@ fn empty_field_validation_rejects() {
 
 #[test]
 fn alphabetical_ordering_independent_of_creation_order() {
-    // Write files in reverse-alphabetical order; the handler must still
-    // return them alphabetised by basename.
     let extras: Vec<SkillFile<'_>> =
         vec![("zebra.txt", "z"), ("mango.txt", "m"), ("apple.txt", "a")];
     let body = "---\nname: ordered\ndescription: ordering check.\n---\nbody\n";
@@ -627,12 +555,7 @@ fn alphabetical_ordering_independent_of_creation_order() {
 
     let info = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "ordered".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("acme", "plug", "ordered", EntryKind::Skill),
     )
     .expect("ok");
 
@@ -644,12 +567,9 @@ fn alphabetical_ordering_independent_of_creation_order() {
 }
 
 // ---------------------------------------------------------------------------
-// #333 — get_skill_info wildcard `name` resolution.
+// Wildcard `name` resolution (metadata-only mode).
 // ---------------------------------------------------------------------------
 
-/// A glob `name` matching exactly ONE enabled entry of the requested kind
-/// resolves to that entry — and the response reports the CONCRETE name, not
-/// the pattern.
 #[test]
 fn glob_name_matching_one_resolves() {
     let body = "---\nname: compact-circuits\ndescription: circuit skill.\n---\nbody\n";
@@ -662,12 +582,7 @@ fn glob_name_matching_one_resolves() {
 
     let info = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "compact-*".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("acme", "plug", "compact-*", EntryKind::Skill),
     )
     .expect("glob matching one entry must resolve");
 
@@ -676,12 +591,10 @@ fn glob_name_matching_one_resolves() {
         "the response reports the RESOLVED concrete name, not the glob pattern",
     );
     assert!(matches!(info.kind, EntryKind::Skill));
-    assert_eq!(info.description, "circuit skill.");
+    assert_eq!(info.description.as_deref(), Some("circuit skill."));
     assert!(info.path.ends_with("SKILL.md"));
 }
 
-/// A glob `name` matching MULTIPLE enabled entries of the requested kind is an
-/// ambiguous error listing the candidate `(name, kind)` pairs.
 #[test]
 fn glob_name_matching_many_is_ambiguous() {
     let a = "---\nname: compact-lint\ndescription: lint.\n---\nbody\n";
@@ -691,12 +604,7 @@ fn glob_name_matching_many_is_ambiguous() {
 
     let err = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "compact-*".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("acme", "plug", "compact-*", EntryKind::Skill),
     )
     .expect_err("ambiguous glob must reject");
 
@@ -721,15 +629,11 @@ fn glob_name_matching_many_is_ambiguous() {
     assert!(names.contains(&"compact-lint"));
     assert!(names.contains(&"compact-fmt"));
     assert_eq!(names.len(), 2, "both matches listed; got: {candidates:?}");
-    // Every candidate carries a `kind` slug.
     for c in candidates {
         assert_eq!(c.get("kind").and_then(|k| k.as_str()), Some("skill"));
     }
 }
 
-/// A glob `name` matching ZERO entries falls through to `unknown_skill` and
-/// carries the available `(name, kind)` list (identical to a mistyped exact
-/// name — a glob that matched nothing IS an entry-not-found).
 #[test]
 fn glob_name_matching_zero_is_unknown_skill_with_available() {
     let body = "---\nname: real\ndescription: ok.\n---\nbody\n";
@@ -738,12 +642,7 @@ fn glob_name_matching_zero_is_unknown_skill_with_available() {
 
     let err = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "nomatch-*".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("acme", "plug", "nomatch-*", EntryKind::Skill),
     )
     .expect_err("zero-match glob must reject as unknown_skill");
 
@@ -753,13 +652,12 @@ fn glob_name_matching_zero_is_unknown_skill_with_available() {
         Some("unknown_skill"),
         "zero-match glob is an entry-not-found; got: {data}",
     );
-    // The name field echoes the pattern verbatim.
     assert_eq!(data.get("name").and_then(|c| c.as_str()), Some("nomatch-*"));
 
     let available = data
         .get("available")
         .and_then(|a| a.as_array())
-        .expect("#333: zero-match glob must carry `available`");
+        .expect("zero-match glob must carry `available`");
     let names: Vec<&str> = available
         .iter()
         .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
@@ -767,9 +665,6 @@ fn glob_name_matching_zero_is_unknown_skill_with_available() {
     assert_eq!(names, vec!["real"], "available lists the one enabled skill");
 }
 
-/// A glob restricted by `kind`: only entries of the requested kind are
-/// candidates, so a `*` glob with `kind: command` resolves the command even
-/// when a same-shaped skill also exists.
 #[test]
 fn glob_name_respects_kind_filter() {
     let skill = "---\nname: deploy\ndescription: SKILL deploy.\nuser-invocable: true\n---\nbody\n";
@@ -777,26 +672,17 @@ fn glob_name_respects_kind_filter() {
     let (_tmp, paths) = stage_workspace(&[("deploy", skill, &[])], &[("deploy-cmd", cmd)]);
     let state = build_state(&paths);
 
-    // `deploy*` matches the skill `deploy` and the command `deploy-cmd`, but the
-    // command-kind filter restricts candidates to `deploy-cmd` alone → unique.
     let info = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "deploy*".into(),
-            kind: EntryKind::Command,
-        },
+        meta_input("acme", "plug", "deploy*", EntryKind::Command),
     )
     .expect("kind-filtered glob resolves the single command candidate");
 
     assert_eq!(info.name, "deploy-cmd");
     assert!(matches!(info.kind, EntryKind::Command));
-    assert_eq!(info.description, "COMMAND deploy.");
+    assert_eq!(info.description.as_deref(), Some("COMMAND deploy."));
 }
 
-/// An EXACT (non-glob) name still resolves byte-identically — the wildcard path
-/// triggers ONLY when the name contains `*`.
 #[test]
 fn exact_name_unaffected_by_wildcard_path() {
     let body = "---\nname: exact-one\ndescription: exact.\n---\nbody\n";
@@ -805,22 +691,14 @@ fn exact_name_unaffected_by_wildcard_path() {
 
     let info = invoke(
         state,
-        Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "exact-one".into(),
-            kind: EntryKind::Skill,
-        },
+        meta_input("acme", "plug", "exact-one", EntryKind::Skill),
     )
     .expect("exact name resolves");
 
     assert_eq!(info.name, "exact-one");
-    assert_eq!(info.description, "exact.");
+    assert_eq!(info.description.as_deref(), Some("exact."));
     assert!(matches!(info.kind, EntryKind::Skill));
 }
 
-// Avoid an unused-import warning on platforms where some paths above
-// don't reference `PathBuf` directly (the alias keeps the typed staging
-// signature readable even when the test body never names the type).
 #[allow(dead_code)]
 fn _path_buf_marker(_: PathBuf) {}
