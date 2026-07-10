@@ -285,10 +285,13 @@ pub fn backend() -> Result<&'static LlamaBackend, TomeError> {
 
     // Route llama.cpp/ggml C-side logging through `tracing` instead of raw
     // stderr (send_logs_to_tracing sets BOTH llama_log_set and ggml_log_set,
-    // so the Metal/sched chatter is captured too). At the default `warn`
-    // filter the info-level load/buffer lines disappear; `-vv` still surfaces
-    // them. Must run at most once per process — guaranteed by the surrounding
-    // once-only init path.
+    // so the Metal/sched chatter is captured too). Every such log is emitted
+    // under the `llama-cpp-2` tracing target, which the default CLI directive
+    // (`logging::DEFAULT_CLI_DIRECTIVE`) demotes to `error` — so the info-level
+    // load/buffer lines AND the benign `n_ctx` WARN (issue #501) disappear at
+    // the default level while genuine errors still surface; `-vv` restores the
+    // full output. Must run at most once per process — guaranteed by the
+    // surrounding once-only init path.
     llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
 
     match LlamaBackend::init() {

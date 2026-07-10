@@ -328,10 +328,9 @@ impl Subsystem {
                     Subsystem::HarnessMcp(name.to_owned())
                 } else if let Some(name) = other.strip_prefix("harness-hooks:") {
                     Subsystem::HarnessHooks(name.to_owned())
-                } else if let Some(name) = other.strip_prefix("provider:") {
-                    Subsystem::Provider(name.to_owned())
                 } else {
-                    return None;
+                    let name = other.strip_prefix("provider:")?;
+                    Subsystem::Provider(name.to_owned())
                 }
             }
         })
