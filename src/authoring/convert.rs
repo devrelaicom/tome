@@ -31,7 +31,7 @@ use crate::authoring::lint::{self, LintReport};
 use crate::authoring::rewrite::is_unsupported_harness_ism;
 use crate::authoring::untrusted::UntrustedRoot;
 use crate::error::TomeError;
-use crate::plugin::identity::{SegmentRejection, validate_segment};
+use crate::plugin::identity::{EntryKind, SegmentRejection, validate_segment};
 
 /// Inputs to a single conversion.
 #[derive(Debug, Clone)]
@@ -61,6 +61,20 @@ pub struct ConvertConfig {
     pub output_dir: PathBuf,
 }
 
+/// One planned entry (skill / command / agent) in the dry-run inventory.
+/// Included in [`ConvertOutcome::entries`] only when `--dry-run` is active, so
+/// a calling agent or script can see WHAT would be converted without having to
+/// walk the source tree itself (G7).
+#[derive(Debug, Clone)]
+pub struct PlannedEntry {
+    /// `"skill"` | `"command"` | `"agent"` — the [`EntryKind`] string form.
+    pub kind: &'static str,
+    /// The entry name (e.g. `"greet"` for `skills/greet/SKILL.md`).
+    pub name: String,
+    /// The owning plugin name (`None` for a bare-skill artifact).
+    pub plugin: Option<String>,
+}
+
 /// The result of a conversion (or a dry-run plan).
 #[derive(Debug, Clone)]
 pub struct ConvertOutcome {
@@ -83,6 +97,12 @@ pub struct ConvertOutcome {
     /// only when both `--dry-run` and `--strict` are set and, after `--allow`,
     /// at least one blocking diagnostic remained).
     pub strict_blocked: Option<String>,
+    /// Planned entries (skills / commands / agents) in the conversion. Populated
+    /// only under `--dry-run` so an agent or script can see WHAT would be
+    /// converted (G7). `None` on a real (non-dry-run) conversion — callers that
+    /// need the inventory regardless should traverse the emitted artifact on disk
+    /// instead.
+    pub entries: Option<Vec<PlannedEntry>>,
 }
 
 /// Run a conversion end-to-end. `source_root` must be a local directory.
@@ -138,6 +158,15 @@ pub fn run(source_root: &Path, cfg: &ConvertConfig) -> Result<ConvertOutcome, To
         });
     }
 
+    // Under `--dry-run` collect the planned entry inventory BEFORE emit, while
+    // the IR is still in scope. A real (non-dry-run) conversion leaves this as
+    // `None` — the caller can inspect the emitted artifact on disk instead.
+    let entries = if cfg.dry_run {
+        Some(collect_planned_entries(&artifact))
+    } else {
+        None
+    };
+
     let target = cfg.output_dir.join(&final_name);
     let outcome = emit(
         &artifact,
@@ -158,6 +187,7 @@ pub fn run(source_root: &Path, cfg: &ConvertConfig) -> Result<ConvertOutcome, To
         written: outcome.written,
         dry_run: cfg.dry_run,
         strict_blocked,
+        entries,
     })
 }
 
@@ -197,6 +227,40 @@ fn import(
             "plugin conversion from `{}` is not supported",
             other.as_str()
         ))),
+    }
+}
+
+/// Collect the planned entry inventory from an IR artifact for the dry-run JSON
+/// output (G7). A catalog enumerates every entry across all its plugins; a
+/// plugin enumerates its own entries; a bare skill contributes one entry with
+/// `plugin: None`. The entry `kind` string comes from [`EntryKind::as_str`].
+fn collect_planned_entries(artifact: &Artifact) -> Vec<PlannedEntry> {
+    match artifact {
+        Artifact::Catalog(cat) => cat
+            .plugins
+            .iter()
+            .flat_map(|p| {
+                p.entries.iter().map(move |e| PlannedEntry {
+                    kind: e.kind.as_str(),
+                    name: e.name.clone(),
+                    plugin: Some(p.name.clone()),
+                })
+            })
+            .collect(),
+        Artifact::Plugin(plugin) => plugin
+            .entries
+            .iter()
+            .map(|e| PlannedEntry {
+                kind: e.kind.as_str(),
+                name: e.name.clone(),
+                plugin: Some(plugin.name.clone()),
+            })
+            .collect(),
+        Artifact::Skill(entry) => vec![PlannedEntry {
+            kind: EntryKind::Skill.as_str(),
+            name: entry.name.clone(),
+            plugin: None,
+        }],
     }
 }
 

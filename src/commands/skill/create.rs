@@ -3,6 +3,7 @@
 //! [`crate::commands::create`] wrapper at the skill level.
 
 use crate::authoring::detect::ArtifactLevel;
+use crate::authoring::scaffold::ScaffoldComponent;
 use crate::cli::SkillCreateArgs;
 use crate::commands::create::CreateRequest;
 use crate::error::TomeError;
@@ -23,6 +24,7 @@ pub fn run(args: SkillCreateArgs, scope: &ResolvedScope, mode: Mode) -> Result<(
             description: args.description,
             author: args.author,
             dry_run: args.dry_run,
+            component: ScaffoldComponent::Skill,
         },
         scope,
         mode,

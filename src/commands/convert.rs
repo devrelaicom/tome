@@ -373,8 +373,14 @@ fn convert_diagnostic_json(d: &crate::authoring::ir::Diagnostic) -> serde_json::
 
 /// The final `--json` JSONL `result` line. Shape pinned by
 /// `convert_result_json_shape_is_pinned`.
+///
+/// When `--dry-run` is active the `entries` field carries the planned entry
+/// inventory (G7): an array of objects with `kind`/`name`/`plugin` fields.
+/// On a real (non-dry-run) conversion the field is omitted (`skip_serializing_if`
+/// semantics — the field is absent in the JSON, not `null`) so existing
+/// callers that script the non-dry-run shape are unaffected.
 fn convert_result_json(outcome: &ConvertOutcome) -> serde_json::Value {
-    json!({
+    let mut obj = json!({
         "type": "result",
         "harness": outcome.harness.as_str(),
         "level": outcome.level.as_str(),
@@ -387,7 +393,26 @@ fn convert_result_json(outcome: &ConvertOutcome) -> serde_json::Value {
         "warnings": outcome.report.warnings,
         "infos": outcome.report.infos,
         "strict_blocked": outcome.strict_blocked,
-    })
+    });
+    // Append the `entries` inventory only for dry-run output (G7). It is the
+    // LAST field so the byte-stable pin on the existing non-dry-run shape stays
+    // valid — a new trailing field is always additive.
+    if let Some(entries) = &outcome.entries {
+        let arr: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                json!({
+                    "kind": e.kind,
+                    "name": e.name,
+                    "plugin": e.plugin,
+                })
+            })
+            .collect();
+        obj.as_object_mut()
+            .expect("convert_result_json always builds an object")
+            .insert("entries".to_owned(), json!(arr));
+    }
+    obj
 }
 
 #[cfg(test)]
@@ -413,6 +438,7 @@ mod tests {
             written: vec![PathBuf::from("tome-plugin.toml")],
             dry_run,
             strict_blocked: None,
+            entries: None,
         }
     }
 
@@ -463,6 +489,7 @@ mod tests {
             written: vec![PathBuf::from("tome-plugin.toml")],
             dry_run: false,
             strict_blocked: None,
+            entries: None,
         };
         let v = convert_result_json(&outcome);
         assert_eq!(v["type"], "result");
@@ -477,6 +504,44 @@ mod tests {
         assert_eq!(v["warnings"], 0);
         assert_eq!(v["infos"], 0);
         assert!(v["strict_blocked"].is_null());
+        // A non-dry-run result must NOT include the `entries` field (additive
+        // only under `--dry-run`, so the existing non-dry-run wire shape is stable).
+        assert!(
+            v.get("entries").is_none(),
+            "non-dry-run result must not carry `entries`: {v}"
+        );
+
+        // Under `--dry-run` the `entries` field is present and carries the
+        // planned inventory. Verify the shape (G7).
+        use crate::authoring::convert::PlannedEntry;
+        let dry_outcome = ConvertOutcome {
+            harness: crate::authoring::detect::SourceHarness::ClaudeCode,
+            level: ArtifactLevel::Plugin,
+            source_name: "demo".to_owned(),
+            final_name: "demo-tome".to_owned(),
+            target: PathBuf::from("/out/demo-tome"),
+            report: crate::authoring::lint::LintReport::default(),
+            written: vec![
+                PathBuf::from("tome-plugin.toml"),
+                PathBuf::from("skills/greet/SKILL.md"),
+            ],
+            dry_run: true,
+            strict_blocked: None,
+            entries: Some(vec![PlannedEntry {
+                kind: "skill",
+                name: "greet".to_owned(),
+                plugin: Some("demo-tome".to_owned()),
+            }]),
+        };
+        let dv = convert_result_json(&dry_outcome);
+        assert_eq!(dv["dry_run"], true);
+        let entries = dv["entries"]
+            .as_array()
+            .expect("`entries` must be an array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["kind"], "skill");
+        assert_eq!(entries[0]["name"], "greet");
+        assert_eq!(entries[0]["plugin"], "demo-tome");
 
         // A diagnostic line carries its own `type` discriminator PLUS the shared
         // finding fields (`file`/`line`/`autofixable`) enriching it to parity
