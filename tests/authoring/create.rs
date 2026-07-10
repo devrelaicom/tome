@@ -6,11 +6,12 @@
 use std::fs;
 use std::path::Path;
 
+use serde_json::Value as JsonValue;
 use tome::authoring::detect::ArtifactLevel;
 use tome::authoring::emit::{EmitOptions, emit};
 use tome::authoring::lint::parse::parse_artifact;
 use tome::authoring::lint::{rules, run};
-use tome::authoring::scaffold::{CreateParams, create_artifact};
+use tome::authoring::scaffold::{CreateParams, ScaffoldComponent, create_artifact};
 
 fn params(name: &str) -> CreateParams {
     CreateParams {
@@ -20,6 +21,7 @@ fn params(name: &str) -> CreateParams {
         author_name: None,
         date: "2026-06-08".to_owned(),
         bare: false,
+        component: ScaffoldComponent::Skill,
     }
 }
 
@@ -223,4 +225,148 @@ fn emit_refuses_a_symlinked_target_parent() {
         !outside.join(&name).exists(),
         "no write escaped through the symlink"
     );
+}
+
+// G9 — scaffold new component kinds.
+
+#[test]
+fn command_scaffold_lints_clean() {
+    // `plugin create my-plugin --kind command` → plugin with commands/my-plugin.md.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut p = params("my-plugin");
+    p.component = ScaffoldComponent::Command;
+    let root = scaffold_to_disk(tmp.path(), ArtifactLevel::Plugin, &p);
+    assert!(root.join("tome-plugin.toml").is_file(), "manifest present");
+    assert!(
+        root.join("commands/my-plugin.md").is_file(),
+        "command file present"
+    );
+    assert!(
+        !root.join("skills").exists(),
+        "no skills/ dir for a command scaffold"
+    );
+    assert_lints_clean(&root);
+}
+
+#[test]
+fn agent_scaffold_lints_clean() {
+    // `plugin create my-agent --kind agent` → plugin with agents/my-agent.md.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut p = params("my-agent");
+    p.component = ScaffoldComponent::Agent;
+    let root = scaffold_to_disk(tmp.path(), ArtifactLevel::Plugin, &p);
+    assert!(root.join("tome-plugin.toml").is_file(), "manifest present");
+    assert!(
+        root.join("agents/my-agent.md").is_file(),
+        "agent file present"
+    );
+    assert!(
+        !root.join("skills").exists(),
+        "no skills/ dir for an agent scaffold"
+    );
+    assert_lints_clean(&root);
+}
+
+#[test]
+fn hooks_scaffold_emits_hooks_json_and_script() {
+    // `plugin create my-hooks --kind hooks` → plugin with hooks/hooks.json +
+    // hooks/on-start.sh.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut p = params("my-hooks");
+    p.component = ScaffoldComponent::Hooks;
+    let root = scaffold_to_disk(tmp.path(), ArtifactLevel::Plugin, &p);
+    assert!(root.join("tome-plugin.toml").is_file(), "manifest present");
+    assert!(
+        root.join("hooks/hooks.json").is_file(),
+        "hooks.json present"
+    );
+    assert!(
+        root.join("hooks/on-start.sh").is_file(),
+        "on-start.sh present"
+    );
+    // The hooks.json must be valid JSON in the event-map form (top-level keys are
+    // event names, not a "hooks" wrapper) and reference the TOME_PLUGIN_ROOT token.
+    let hooks_content = fs::read_to_string(root.join("hooks/hooks.json")).unwrap();
+    let parsed: JsonValue =
+        serde_json::from_str(&hooks_content).expect("hooks/hooks.json must be valid JSON");
+    assert!(
+        parsed.is_object() && parsed.get("hooks").is_none(),
+        "hooks.json must use the event-map form (no top-level 'hooks' wrapper): {hooks_content}"
+    );
+    assert!(
+        hooks_content.contains("${TOME_PLUGIN_ROOT}"),
+        "hooks.json must reference TOME_PLUGIN_ROOT: {hooks_content}"
+    );
+    assert_lints_clean(&root);
+}
+
+#[test]
+fn mcp_scaffold_emits_mcp_json() {
+    // `plugin create my-server --kind mcp` → plugin with .mcp.json.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut p = params("my-server");
+    p.component = ScaffoldComponent::Mcp;
+    let root = scaffold_to_disk(tmp.path(), ArtifactLevel::Plugin, &p);
+    assert!(root.join("tome-plugin.toml").is_file(), "manifest present");
+    assert!(root.join(".mcp.json").is_file(), ".mcp.json present");
+
+    // The .mcp.json must be valid JSON with an mcpServers top-level key.
+    let mcp_content = fs::read_to_string(root.join(".mcp.json")).unwrap();
+    let parsed: JsonValue =
+        serde_json::from_str(&mcp_content).expect(".mcp.json must be valid JSON");
+    assert!(
+        parsed.get("mcpServers").is_some(),
+        ".mcp.json must have a top-level 'mcpServers' key"
+    );
+    // The server name must match the plugin name.
+    assert!(
+        parsed["mcpServers"].get("my-server").is_some(),
+        ".mcp.json server name must match the plugin name: {mcp_content}"
+    );
+    assert_lints_clean(&root);
+}
+
+#[test]
+fn clap_parses_plugin_create_kind_flag() {
+    // `tome plugin create my-server --kind mcp` must parse successfully and
+    // produce a `ScaffoldKindArg::Mcp` on `PluginCreateArgs.kind`.
+    use clap::Parser;
+    use tome::cli::{Cli, Command, PluginCommand, ScaffoldKindArg};
+
+    for (kind_str, expected) in [
+        ("skill", ScaffoldKindArg::Skill),
+        ("command", ScaffoldKindArg::Command),
+        ("agent", ScaffoldKindArg::Agent),
+        ("hooks", ScaffoldKindArg::Hooks),
+        ("mcp", ScaffoldKindArg::Mcp),
+    ] {
+        let cli =
+            Cli::try_parse_from(["tome", "plugin", "create", "my-plugin", "--kind", kind_str])
+                .unwrap_or_else(|e| panic!("parse failed for --kind {kind_str}: {e}"));
+        match cli.command {
+            Command::Plugin(pa) => match pa.command {
+                Some(PluginCommand::Create(args)) => {
+                    assert_eq!(
+                        args.kind,
+                        Some(expected),
+                        "--kind {kind_str} must parse to {expected:?}"
+                    );
+                }
+                other => panic!("expected plugin create, got {other:?}"),
+            },
+            other => panic!("expected plugin command, got {other:?}"),
+        }
+    }
+
+    // Omitting --kind produces None (the default).
+    let cli = Cli::try_parse_from(["tome", "plugin", "create", "my-plugin"]).unwrap();
+    match cli.command {
+        Command::Plugin(pa) => match pa.command {
+            Some(PluginCommand::Create(args)) => {
+                assert_eq!(args.kind, None, "omitting --kind must yield None");
+            }
+            other => panic!("expected plugin create, got {other:?}"),
+        },
+        other => panic!("expected plugin command, got {other:?}"),
+    }
 }

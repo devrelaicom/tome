@@ -20,7 +20,7 @@ use serde_json::json;
 
 use crate::authoring::detect::ArtifactLevel;
 use crate::authoring::emit::{EmitOptions, EmitOutcome, emit};
-use crate::authoring::scaffold::{CreateParams, create_artifact};
+use crate::authoring::scaffold::{CreateParams, ScaffoldComponent, create_artifact};
 use crate::commands::convert::{into_target, register_plugin_in_catalog};
 use crate::error::TomeError;
 use crate::output::{Mode, write_json};
@@ -49,6 +49,10 @@ pub struct CreateRequest {
     pub author: Option<String>,
     /// `--dry-run`: compute + report the plan without writing to disk.
     pub dry_run: bool,
+    /// What component to scaffold inside the plugin (G9). Defaults to `Skill`
+    /// for all existing callers; `Command`/`Agent`/`Hooks`/`Mcp` when the user
+    /// passes `--kind <kind>` on `tome plugin create`.
+    pub component: ScaffoldComponent,
 }
 
 /// Scaffold a new artifact at the request's level.
@@ -117,6 +121,7 @@ fn run_inner(req: CreateRequest, _scope: &ResolvedScope, mode: Mode) -> Result<(
         author_name: req.author.clone(),
         date: today(),
         bare: bare || into_existing_plugin,
+        component: req.component,
     };
     let (artifact, final_name) = create_artifact(req.level, &params)?;
 
@@ -236,6 +241,7 @@ mod tests {
             description: None,
             author: None,
             dry_run: false,
+            component: ScaffoldComponent::Skill,
         }
     }
 

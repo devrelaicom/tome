@@ -3,6 +3,7 @@
 //! level (no `--into`/`--bare`/`--plugin-name`).
 
 use crate::authoring::detect::ArtifactLevel;
+use crate::authoring::scaffold::ScaffoldComponent;
 use crate::cli::CatalogCreateArgs;
 use crate::commands::create::CreateRequest;
 use crate::error::TomeError;
@@ -23,6 +24,7 @@ pub fn run(args: CatalogCreateArgs, scope: &ResolvedScope, mode: Mode) -> Result
             description: args.description,
             author: args.author,
             dry_run: args.dry_run,
+            component: ScaffoldComponent::Skill,
         },
         scope,
         mode,

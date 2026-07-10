@@ -1407,6 +1407,25 @@ pub struct CatalogCreateArgs {
     pub force: bool,
 }
 
+/// CLI-facing scaffold-component selector for `tome plugin create --kind`.
+///
+/// Selects what to scaffold inside the new plugin. Defaults to `skill` (the
+/// pre-G9 behaviour) when `--kind` is omitted. `hooks` and `mcp` produce
+/// structural stubs rather than named entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ScaffoldKindArg {
+    /// A skill entry (`skills/<name>/SKILL.md`). Default.
+    Skill,
+    /// A command entry (`commands/<name>.md`).
+    Command,
+    /// An agent entry (`agents/<name>.md`).
+    Agent,
+    /// A hooks stub (`hooks/hooks.json` + `hooks/on-start.sh`).
+    Hooks,
+    /// An MCP server stub (`.mcp.json`).
+    Mcp,
+}
+
 /// `tome plugin create <NAME>`.
 #[derive(Debug, clap::Args)]
 pub struct PluginCreateArgs {
@@ -1438,6 +1457,10 @@ pub struct PluginCreateArgs {
     /// Overwrite colliding files (only those files; never a directory wipe).
     #[arg(long)]
     pub force: bool,
+    /// Component kind to scaffold inside the plugin (`skill`, `command`,
+    /// `agent`, `hooks`, `mcp`). Defaults to `skill`.
+    #[arg(long)]
+    pub kind: Option<ScaffoldKindArg>,
 }
 
 /// `tome skill create <NAME>`. Wraps the skill in a minimal plugin by default.
