@@ -124,17 +124,24 @@ const SPAWN_OLDEST_AGE: time::Duration = time::Duration::minutes(5);
 
 /// Build the global telemetry handle. Called once, early in `main` (and the MCP
 /// boot), for EVERY command — the flush child + MCP timer + every emit site need
-/// the handle. Best-effort: a `BuildError` (e.g. a misconfigured endpoint) stores
-/// a forced-disabled handle so every later [`emit`] is a safe no-op. Records a
-/// fresh-mint observation (the id file was absent before build) for the first-run
-/// notice + flush priming.
+/// the handle. Best-effort: a `BuildError` (e.g. a misconfigured endpoint) degrades
+/// to a disabled handle so every later [`emit`] / [`is_enabled`] / [`teardown_at_exit`]
+/// is a safe no-op. If the disabled-handle build ALSO fails (CR-09 latent trap),
+/// `HANDLE` is simply left unset — all callers already treat `HANDLE.get() == None`
+/// as "telemetry off". Records a fresh-mint observation (the id file was absent
+/// before build) for the first-run notice + flush priming.
 ///
 /// The kernel resolves consent itself (env opt-out / CI auto-off / global var) on
 /// top of the `config.toml [telemetry] enabled` bool we pass; we do NOT
 /// double-gate here.
 pub fn init(paths: &crate::paths::Paths) {
     let first_run = !paths.telemetry_id().exists();
-    let handle = build_handle(paths);
+    let Some(handle) = build_handle(paths) else {
+        // Double-build failure (CR-09 guard): leave HANDLE unset.
+        // is_enabled() / emit() / teardown_at_exit() all already
+        // degrade to no-ops on an absent HANDLE.
+        return;
+    };
 
     if handle.is_enabled() && first_run {
         MINTED_THIS_RUN.store(true, Ordering::Relaxed);
@@ -146,11 +153,17 @@ pub fn init(paths: &crate::paths::Paths) {
 /// The shared body of [`init`]; also the seam an in-process emit test installs
 /// via [`TelemetryHandleGuard`] (the production `init` sets the set-once global,
 /// which a test can't re-point at its own `TempDir` queue).
-fn build_handle(paths: &crate::paths::Paths) -> Telemetry {
+///
+/// Returns `None` only on a total double-build-failure (the primary build AND the
+/// disabled-fallback build both fail). Every caller is safe with `None` since the
+/// read paths (`is_enabled`/`emit`/`handle`) all treat a missing `HANDLE` as
+/// "disabled". In practice this is unreachable with the current kernel — the guard
+/// prevents a latent regression if future builder validation tightens.
+fn build_handle(paths: &crate::paths::Paths) -> Option<Telemetry> {
     let config_enabled = config::config_enabled_value(paths);
     let endpoint = config::resolve_endpoint(paths);
 
-    Telemetry::builder()
+    let primary = Telemetry::builder()
         .app("tome")
         .app_version(env!("CARGO_PKG_VERSION"))
         .endpoint(endpoint)
@@ -167,26 +180,38 @@ fn build_handle(paths: &crate::paths::Paths) -> Telemetry {
         .ci(config::is_ci())
         .accel("cpu")
         .flush_args(vec!["telemetry".into(), "flush".into(), "--quiet".into()])
-        .build()
-        .unwrap_or_else(|e| {
+        .build();
+
+    match primary {
+        Ok(h) => Some(h),
+        Err(e) => {
             tracing::debug!(target: "telemetry", error = %e, "telemetry disabled: handle build failed");
             disabled_handle(paths)
-        })
+        }
+    }
 }
 
 /// Build a handle for `paths` exactly as [`init`] would, for installation into
 /// the [`HANDLE_OVERRIDE`] test slot. Doc-hidden, test-only.
+///
+/// Panics on a double-build-failure (see [`build_handle`]) — this is acceptable
+/// in a test context (tests don't run under `panic = "abort"`).
 #[doc(hidden)]
 pub fn build_handle_for_test(paths: &crate::paths::Paths) -> Telemetry {
-    build_handle(paths)
+    build_handle(paths).expect("build_handle_for_test: double-build-failure in tests")
 }
 
-/// A guaranteed-disabled handle (the kernel has no `disabled()` constructor): a
+/// A best-effort disabled handle (the kernel has no `disabled()` constructor): a
 /// forced `config_enabled(false)` + `runtime_enabled(false)` build resolves
 /// consent to off and yields a pure no-op `Telemetry(None)`. A disabled build
 /// never touches the filesystem, so the placeholder endpoint is unused.
-fn disabled_handle(paths: &crate::paths::Paths) -> Telemetry {
-    Telemetry::builder()
+///
+/// Returns `None` if even this minimal build fails. CR-09 fix: the previous code
+/// used `unreachable!()` here, which under `panic = "abort"` would hard-abort the
+/// process on the best-effort startup path. `None` lets the caller (`build_handle`)
+/// leave `HANDLE` unset instead, which every downstream site already handles.
+fn disabled_handle(paths: &crate::paths::Paths) -> Option<Telemetry> {
+    match Telemetry::builder()
         .app("tome")
         .app_version(env!("CARGO_PKG_VERSION"))
         .endpoint("https://invalid.localhost")
@@ -195,7 +220,23 @@ fn disabled_handle(paths: &crate::paths::Paths) -> Telemetry {
         .config_enabled(false)
         .runtime_enabled(false)
         .build()
-        .unwrap_or_else(|_| unreachable!("a disabled-consent build cannot fail"))
+    {
+        Ok(h) => Some(h),
+        Err(e) => {
+            // Total double-build failure: the primary build failed AND the
+            // disabled-consent fallback also failed. This is currently
+            // unreachable with the gauge-telemetry kernel, but guard against
+            // a future builder regression rather than relying on
+            // `unreachable!()` which under `panic = "abort"` aborts the
+            // process — a silent hard-fail on a best-effort startup path.
+            tracing::debug!(
+                target: "telemetry",
+                error = %e,
+                "telemetry: disabled-handle build also failed; leaving HANDLE unset (all emit calls degrade to no-op)"
+            );
+            None
+        }
+    }
 }
 
 /// The global handle, if [`init`] has run. Used by the MCP `Flusher` and the
