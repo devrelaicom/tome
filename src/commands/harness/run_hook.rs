@@ -1380,6 +1380,14 @@ fn cc_json_to_decision(v: &Value) -> CcDecision {
 /// in-order concat; `updated_input` is last-wins. The block reason is the FIRST
 /// blocking entry's reason, prefixed with that plugin's provenance
 /// `[<plugin>] ` so the agent can see which hook denied.
+///
+/// **Reason selection is intentionally "first blocker wins"** (manifest order).
+/// The `[<plugin>]` provenance prefix lets the agent see the source of the
+/// denial. If multiple plugins block, subsequent reasons are not surfaced here
+/// — they appear in `additional_context` entries emitted by each plugin.
+/// Changing this to "longest wins" or concatenation would increase output
+/// verbosity without a clear quality gain; the current behaviour is a
+/// deliberate trade-off.
 fn merge_decisions(plugin_keyed: &[(String, CcDecision)]) -> CcDecision {
     let mut merged = CcDecision::default();
     let mut best_rank = 0u8;

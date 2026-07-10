@@ -153,6 +153,13 @@ pub fn emit_tome_op(
 pub fn remove_tome_op(plugin_root: &Path) -> Result<RemoveOutcome, TomeError> {
     match probe_tome_op_removal(plugin_root)? {
         RemoveOutcome::Removed => {
+            // Bounded TOCTOU: there is a check-to-use window between the
+            // `probe_tome_op_removal` call above and this `remove_dir_all`.
+            // This is the same accepted race as the Devin `DirPerAgent` sink
+            // in `src/harness/reconcile/agents.rs`: Tome only ever writes a
+            // static bundle here, and modern `remove_dir_all` implementations
+            // are `openat`-based, so the window is bounded and non-exploitable
+            // in practice. Documented, not deep-guarded.
             std::fs::remove_dir_all(plugin_root).map_err(TomeError::Io)?;
             Ok(RemoveOutcome::Removed)
         }
