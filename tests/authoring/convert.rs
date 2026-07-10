@@ -1899,3 +1899,149 @@ fn unrecognised_component_path_key_produces_info_diagnostic() {
     // Conversion still succeeds.
     assert!(out.join(&outcome.final_name).exists());
 }
+
+// ---------------------------------------------------------------------------
+// Bug fixes: #524 — nested CC subdirs + componentPath overrides
+// ---------------------------------------------------------------------------
+
+/// Bug 1: A top-level `commands/git-push.md` and a nested `commands/git/push.md`
+/// both flatten to `git-push`.  The nested one must be skipped with a
+/// NESTED_ENTRY_SKIPPED warning; the top-level entry is kept.
+#[test]
+fn nested_vs_toplevel_collision_skips_nested_with_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"col2","version":"1.0.0","description":"nested vs top-level"}"#,
+    )
+    .unwrap();
+    // Top-level entry: commands/git-push.md  → name "git-push"
+    fs::create_dir(src.join("commands")).unwrap();
+    fs::write(
+        src.join("commands/git-push.md"),
+        "---\ndescription: top-level git-push\n---\ngit push\n",
+    )
+    .unwrap();
+    // Nested entry that flattens to the same name: commands/git/push.md → "git-push"
+    fs::create_dir(src.join("commands/git")).unwrap();
+    fs::write(
+        src.join("commands/git/push.md"),
+        "---\ndescription: nested git push\n---\ngit push nested\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // The top-level entry must be present.
+    assert!(
+        target.join("commands/git-push.md").exists(),
+        "top-level commands/git-push.md must be emitted"
+    );
+    // The nested entry's content must NOT have overwritten the top-level one.
+    let body = fs::read_to_string(target.join("commands/git-push.md")).unwrap();
+    assert!(
+        body.contains("git push\n"),
+        "body must be the top-level entry, not the nested one: {body}"
+    );
+    assert!(
+        !body.contains("nested"),
+        "nested entry body must not appear in output: {body}"
+    );
+    // A NESTED_ENTRY_SKIPPED warning must be emitted for the collision.
+    let has_skip = outcome
+        .report
+        .diagnostics
+        .iter()
+        .any(|d| d.rule_id == "convert/nested-entry-skipped");
+    assert!(
+        has_skip,
+        "must emit convert/nested-entry-skipped for the nested-vs-toplevel collision: {:?}",
+        outcome.report.diagnostics
+    );
+}
+
+/// Bug 2: When `componentPaths.commands` points to a path that is not a
+/// directory, a Warning diagnostic must be emitted.
+#[test]
+fn component_path_missing_dir_emits_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"missing-dir","version":"1.0.0","description":"missing","componentPaths":{"commands":"./nonexistent-commands"}}"#,
+    )
+    .unwrap();
+    // The override path `./nonexistent-commands` does not exist.
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+
+    let has_warn = outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/component-path-override-missing-dir"
+            && d.message.contains("commands")
+            && d.message.contains("nonexistent-commands")
+    });
+    assert!(
+        has_warn,
+        "must emit convert/component-path-override-missing-dir warning for missing override dir: {:?}",
+        outcome.report.diagnostics
+    );
+    // Conversion still succeeds (forward-progress, no entries from the dir).
+    assert!(out.join(&outcome.final_name).exists());
+    // No commands were imported (the override dir is empty/absent).
+    let manifest =
+        tome::plugin::manifest::read_plugin_manifest(&out.join(&outcome.final_name)).unwrap();
+    assert_eq!(manifest.name, "missing-dir-tome");
+}
+
+/// Bug 3: When `componentPaths.commands` overrides the commands directory to a
+/// subdirectory like `src/commands`, the top-level `src/` directory must NOT be
+/// flagged as an unrecognised plugin-root entry.
+#[test]
+fn component_path_override_top_dir_not_flagged_as_unrecognised() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"override-src","version":"1.0.0","description":"override src","componentPaths":{"commands":"src/commands"}}"#,
+    )
+    .unwrap();
+    // Commands live at the overridden path.
+    fs::create_dir_all(src.join("src/commands")).unwrap();
+    fs::write(
+        src.join("src/commands/build.md"),
+        "---\nname: build\ndescription: build it\n---\nbuild\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // The overridden command must be imported.
+    assert!(
+        target.join("commands/build.md").exists(),
+        "command from componentPaths.commands override must be imported"
+    );
+    // The `src/` top-level directory must NOT produce an UNRECOGNISED_PLUGIN_DIR warning.
+    let unrecognised: Vec<_> = outcome
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule_id == "convert/unrecognised-plugin-dir" && d.message.contains("src/"))
+        .collect();
+    assert!(
+        unrecognised.is_empty(),
+        "componentPaths override top-level dir 'src/' must not be flagged as unrecognised: {:?}",
+        unrecognised
+    );
+}

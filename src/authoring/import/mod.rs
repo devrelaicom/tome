@@ -91,4 +91,9 @@ pub mod rule {
     /// unrecognised component. Dropped with Info.
     pub const COMPONENT_PATH_OVERRIDE_UNRECOGNISED: &str =
         "convert/component-path-override-unrecognised";
+    /// A `componentPaths` override for a recognised component (`commands`,
+    /// `agents`, `skills`) points to a path that is not a directory. Content
+    /// loss: the component is effectively empty. Warning, strict-blocking.
+    pub const COMPONENT_PATH_OVERRIDE_MISSING_DIR: &str =
+        "convert/component-path-override-missing-dir";
 }

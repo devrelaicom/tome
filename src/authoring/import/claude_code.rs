@@ -325,6 +325,26 @@ pub fn import_plugin(
         .map(String::as_str)
         .unwrap_or("skills");
 
+    // Bug 2 fix: warn when a recognised componentPaths override path is not a
+    // directory.  The comment above ("Unresolvable overrides warn") was correct
+    // in intent but the warning was never emitted.  Emit it now so callers see
+    // the content-loss rather than silently importing zero entries.
+    for (component, dir) in [
+        ("commands", commands_dir),
+        ("agents", agents_dir),
+        ("skills", skills_dir),
+    ] {
+        if component_paths.contains_key(component) && !root.is_dir(Path::new(dir)) {
+            diagnostics.push(Diagnostic::warning(
+                rule::COMPONENT_PATH_OVERRIDE_MISSING_DIR,
+                format!(
+                    "plugin.json `componentPaths.{component}` points to `{dir}` which is not a \
+                     directory — falling back to an empty component set"
+                ),
+            ));
+        }
+    }
+
     for component in component_paths.keys() {
         if !["commands", "agents", "skills", "hooks"].contains(&component.as_str()) {
             diagnostics.push(Diagnostic::info(
@@ -379,7 +399,26 @@ pub fn import_plugin(
     // This matters because hooks or commands often shell out to
     // `${CLAUDE_PLUGIN_ROOT}/scripts/…` — if the directory isn't imported the
     // reference breaks silently at runtime.
-    warn_unrecognised_plugin_root_entries(root, &mut diagnostics)?;
+    //
+    // Bug 3 fix: collect the TOP-LEVEL path component of every componentPaths
+    // override value (e.g. `"src/commands"` → `"src"`) and pass it as an
+    // extra skip set so override-target dirs are not falsely flagged.
+    let component_path_top_dirs: std::collections::HashSet<String> = component_paths
+        .values()
+        .filter_map(|p| {
+            Path::new(p.trim_start_matches("./"))
+                .components()
+                .next()
+                .and_then(|c| {
+                    if let std::path::Component::Normal(s) = c {
+                        s.to_str().map(str::to_owned)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
+    warn_unrecognised_plugin_root_entries(root, &component_path_top_dirs, &mut diagnostics)?;
 
     // --- hooks/ verbatim pass-through --------------------------------------
     // Honour a componentPaths.hooks override when present.
@@ -804,7 +843,31 @@ fn import_md_dir(
     let mut claimed: std::collections::BTreeMap<String, PathBuf> =
         std::collections::BTreeMap::new();
 
-    for child in root.list_dir(Path::new(dir))? {
+    // Bug 1 fix: seed `claimed` with the resolved names of all top-level `.md`
+    // files in this directory BEFORE the nested-dir walk.  Without this, a
+    // nested entry `commands/git/push.md` (→ flat `git-push`) would silently
+    // overwrite an already-imported top-level `commands/git-push.md` entry
+    // because the collision check only compared nested entries against each
+    // other, never against top-level names.  Seeding first ensures that a
+    // nested entry whose flat name matches a top-level file is caught by the
+    // existing NESTED_ENTRY_SKIPPED warning path, giving the user a clear
+    // diagnostic instead of a silent duplicate.
+    let top_level_children = root.list_dir(Path::new(dir))?;
+    for child in &top_level_children {
+        if child.is_dir || !child.name.ends_with(".md") {
+            continue;
+        }
+        // The top-level name is the file stem; prefer the frontmatter `name:`
+        // field the same way `import_md_entry` does, but that requires parsing
+        // the file — which is expensive and may fail.  We use the file-stem as
+        // the collision key here.  This is conservative (the actual resolved
+        // name could differ) but safe: worst case we skip a nested entry that
+        // would NOT have collided; the top-level entry is still imported.
+        let stem = child.name.strip_suffix(".md").unwrap_or(&child.name);
+        claimed.insert(stem.to_owned(), child.rel.clone());
+    }
+
+    for child in top_level_children {
         if child.is_dir {
             // G3: walk one level into a subdirectory.
             for nested in root.list_dir(&child.rel)? {
@@ -1200,8 +1263,14 @@ const SKIP_PLUGIN_ROOT_FILES: &[&str] = &[
 /// that hooks or commands commonly reference via
 /// `${CLAUDE_PLUGIN_ROOT}/scripts/…` — without this warning they vanish
 /// silently from the conversion and the reference breaks at runtime.
+///
+/// `component_path_top_dirs` is the set of top-level path components extracted
+/// from `componentPaths` override values (e.g. `"src/commands"` → `"src"`).
+/// These must NOT be flagged as unrecognised — they are intentional override
+/// target directories, not stray files. (Bug 3 fix.)
 fn warn_unrecognised_plugin_root_entries(
     root: &UntrustedRoot,
+    component_path_top_dirs: &std::collections::HashSet<String>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<(), TomeError> {
     // list_dir on the root itself (Path::new("")) enumerates only depth-0 entries,
@@ -1234,6 +1303,12 @@ fn warn_unrecognised_plugin_root_entries(
             || lower.starts_with("license")
             || lower.starts_with("changelog")
         {
+            continue;
+        }
+        // Bug 3 fix: skip directories that are the top-level component of a
+        // componentPaths override value (e.g. `"src"` when commands points to
+        // `"src/commands"`).  These are known-intentional dirs, not stray ones.
+        if component_path_top_dirs.contains(&child.name) {
             continue;
         }
         let kind_label = if child.is_dir { "directory" } else { "file" };
