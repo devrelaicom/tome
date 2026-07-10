@@ -77,6 +77,7 @@ pub fn import_project(root: &UntrustedRoot, source_path: &Path) -> Result<Plugin
         mcp_servers,
         hooks_files: Vec::new(),
         hooks_json: None,
+        mcp_json: None,
         provenance: Provenance {
             source_harness: "codex".to_owned(),
             source_path: source_path.to_path_buf(),

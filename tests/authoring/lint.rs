@@ -569,3 +569,133 @@ fn single_source_clean_and_error_exit_codes_are_unchanged() {
     assert_eq!(run_plugin_lint(lint_args(vec![clean], false)), Ok(()));
     assert_eq!(run_plugin_lint(lint_args(vec![bad], false)), Err(85));
 }
+
+// --- Gap 1: mcp-spec rule integration tests ---------------------------------
+
+#[test]
+fn mcp_json_invalid_json_flags_mcp_spec() {
+    // A native plugin with a malformed .mcp.json must produce a lint/mcp-spec
+    // warning — this is the signal that would otherwise only surface at
+    // `harness sync` time.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"my-plugin\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::write(dir.join(".mcp.json"), "{not valid json").unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/mcp-spec"),
+        "expected lint/mcp-spec finding: {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn mcp_json_valid_object_passes() {
+    // A native plugin with a valid .mcp.json (a JSON object) must not produce
+    // any lint/mcp-spec finding.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"my-plugin\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::write(dir.join(".mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
+    // A skill so the plugin is otherwise clean.
+    fs::create_dir_all(dir.join("skills/foo")).unwrap();
+    fs::write(
+        dir.join("skills/foo/SKILL.md"),
+        "---\nname: foo\ndescription: a skill\n---\nbody\n",
+    )
+    .unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/mcp-spec"),
+        "unexpected lint/mcp-spec finding: {:?}",
+        report.diagnostics
+    );
+    assert_eq!(report.errors, 0, "{:?}", report.diagnostics);
+}
+
+// --- Gap 2: agent-spec rule integration tests --------------------------------
+
+#[test]
+fn agent_spec_wrong_tools_type_flags() {
+    // An agent entry with `tools: 7` (scalar not list) must produce a
+    // lint/agent-spec warning — this is what would fail harness sync at exit 45.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"my-plugin\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir(dir.join("agents")).unwrap();
+    fs::write(
+        dir.join("agents/helper.md"),
+        "---\nname: helper\ndescription: helps\ntools: 7\n---\nbody\n",
+    )
+    .unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/agent-spec"),
+        "expected lint/agent-spec finding: {:?}",
+        report.diagnostics
+    );
+}
+
+// --- Gap 3: hooks-spec non-array values integration test --------------------
+
+#[test]
+fn hooks_spec_non_array_event_value_flags() {
+    // A hooks.json where an event key maps to a non-array value (e.g. a string)
+    // must produce a lint/hooks-spec warning — harness sync deserialises as
+    // HashMap<String, Vec<HookEntry>> which would fail on a non-array value.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"my-plugin\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("hooks")).unwrap();
+    fs::write(
+        dir.join("hooks/hooks.json"),
+        r#"{"PreToolUse": "not-an-array"}"#,
+    )
+    .unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/hooks-spec"),
+        "expected lint/hooks-spec finding for non-array value: {:?}",
+        report.diagnostics
+    );
+}

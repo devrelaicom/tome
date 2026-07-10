@@ -516,6 +516,7 @@ mod tests {
             mcp_servers: Vec::new(),
             hooks_files: Vec::new(),
             hooks_json: None,
+            mcp_json: None,
             provenance: Provenance::local("test", PathBuf::from("src")),
             diagnostics: Vec::new(),
         }

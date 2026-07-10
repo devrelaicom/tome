@@ -227,6 +227,7 @@ pub fn import_plugin(
         mcp_servers,
         hooks_files,
         hooks_json,
+        mcp_json: None,
         provenance: Provenance {
             source_harness: "claude-code".to_owned(),
             source_path: source_path.to_path_buf(),

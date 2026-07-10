@@ -66,6 +66,11 @@ pub struct PluginIr {
     /// file was absent, the `hooks/` directory was absent, or the file was
     /// present but unreadable (that last case also emits `convert/hooks-unreadable`).
     pub hooks_json: Option<String>,
+    /// Raw `.mcp.json` body when present and readable — carried so the lint
+    /// mcp-spec rule reads the IR, not the source tree. `None` means the file
+    /// was absent or present but unreadable (unreadable also emits
+    /// `lint/mcp-spec`).
+    pub mcp_json: Option<String>,
     pub provenance: Provenance,
     pub diagnostics: Vec<Diagnostic>,
 }

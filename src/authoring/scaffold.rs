@@ -129,6 +129,7 @@ fn plugin_ir(name: &str, entries: Vec<EntryIr>, params: &CreateParams) -> Plugin
         mcp_servers: Vec::new(),
         hooks_files: Vec::new(),
         hooks_json: None,
+        mcp_json: None,
         provenance: Provenance::local("scaffold", std::path::PathBuf::from(name)),
         diagnostics: Vec::new(),
     }

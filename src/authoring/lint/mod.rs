@@ -227,6 +227,7 @@ mod tests {
             mcp_servers: Vec::new(),
             hooks_files: Vec::new(),
             hooks_json: None,
+            mcp_json: None,
             provenance: Provenance::local("t", PathBuf::from("s")),
             diagnostics: node_diags,
         }
