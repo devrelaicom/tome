@@ -43,6 +43,12 @@ pub mod rule {
     /// `hooks/hooks.json` is present but not valid JSON (or unreadable);
     /// `harness sync` would fail on this plugin (exit 43).
     pub const HOOKS_SPEC: &str = "lint/hooks-spec";
+    /// `.mcp.json` is present but not valid JSON, or not a JSON object at the
+    /// top level; `harness sync` would fail on this plugin.
+    pub const MCP_SPEC: &str = "lint/mcp-spec";
+    /// An agent entry's frontmatter has a wrong-typed field (e.g. `tools: 7`
+    /// instead of a list); `harness sync` would fail on this plugin (exit 45).
+    pub const AGENT_SPEC: &str = "lint/agent-spec";
     /// Skill body is too large to fit the harness MCP-output budget that
     /// `get_skill` returns it inside (70% of the limit, after envelope).
     pub const BODY_TOO_LARGE: &str = "lint/body-too-large";
@@ -121,6 +127,8 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(CatalogManifest),
         Box::new(PluginManifest),
         Box::new(HooksSpec),
+        Box::new(McpSpec),
+        Box::new(AgentSpec),
         Box::new(UnsupportedComponents),
         Box::new(EntryName),
         Box::new(EntryDescription),
@@ -145,6 +153,8 @@ pub fn for_convert() -> Vec<Box<dyn Rule>> {
         Box::new(CatalogManifest),
         Box::new(PluginManifest),
         Box::new(HooksSpec),
+        Box::new(McpSpec),
+        Box::new(AgentSpec),
         Box::new(EntryDescription),
         Box::new(EntryHarnessIsms),
         Box::new(EntryBodyBudget { budgets }),
@@ -257,8 +267,151 @@ impl Rule for HooksSpec {
                     .to_owned(),
             )];
         }
+        // After checking the wrapped form, normalise the object (simple inline
+        // unwrap: we already know the "hooks" discriminator is absent or
+        // non-object) so we can validate the event-map values. `harness sync`
+        // deserialises with `HashMap<String, Vec<HookEntry>>` — a non-array
+        // value for any event key causes a parse failure there.
+        let event_map = match value.as_object() {
+            Some(obj) => obj,
+            None => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for (key, val) in event_map {
+            if !val.is_array() {
+                out.push(Diagnostic::warning(
+                    rule::HOOKS_SPEC,
+                    format!(
+                        "hooks event map value for '{}' must be an array (sync would fail with exit 43)",
+                        key
+                    ),
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// `.mcp.json`, when present, must be valid JSON and a top-level object —
+/// otherwise `harness sync` would fail. Content arrives on the IR (`mcp_json`),
+/// so the rule is provenance-safe in both registries (it never reads the source
+/// tree).
+struct McpSpec;
+impl Rule for McpSpec {
+    fn id(&self) -> &'static str {
+        rule::MCP_SPEC
+    }
+    fn scope(&self) -> Scope {
+        Scope::Plugin
+    }
+    fn check_plugin(&self, p: &PluginIr) -> Vec<Diagnostic> {
+        let Some(json) = &p.mcp_json else {
+            return Vec::new();
+        };
+        let value = match serde_json::from_str::<serde_json::Value>(json) {
+            Ok(v) => v,
+            Err(e) => {
+                return vec![Diagnostic::warning(
+                    rule::MCP_SPEC,
+                    format!(".mcp.json is not valid JSON: {e}"),
+                )];
+            }
+        };
+        if !value.is_object() {
+            return vec![Diagnostic::warning(
+                rule::MCP_SPEC,
+                ".mcp.json must be a JSON object at the top level",
+            )];
+        }
         Vec::new()
     }
+}
+
+/// Agent entries' frontmatter must have well-typed fields — otherwise
+/// `harness sync` fails with exit 45 when it tries to deserialise
+/// `AgentFrontmatter`. Re-reads the source file so it works in both `lint`
+/// (source IS the artifact) and `convert` (IR carries the source path).
+struct AgentSpec;
+impl Rule for AgentSpec {
+    fn id(&self) -> &'static str {
+        rule::AGENT_SPEC
+    }
+    fn scope(&self) -> Scope {
+        Scope::Entry
+    }
+    fn check_entry(&self, e: &EntryIr) -> Vec<Diagnostic> {
+        if e.kind != EntryKind::Agent {
+            return Vec::new();
+        }
+        // Re-read the source file for frontmatter validation.
+        let raw = match bounded_read_to_string(&e.source_path, ENTRY_BODY_MAX) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(), // can't validate; parse already warned
+        };
+        let yaml_block = match extract_frontmatter_yaml(&raw) {
+            Some(s) => s,
+            None => return Vec::new(), // no frontmatter — nothing to check
+        };
+
+        // Deserialise only the agent-specific fields that carry type
+        // constraints leniently (no deny_unknown_fields — frontmatter is
+        // third-party input). We only validate the fields whose wrong type
+        // would cause harness sync to fail; others are ignored.
+        #[derive(serde::Deserialize)]
+        struct AgentFrontmatterCheck {
+            tools: Option<serde_json::Value>,
+            #[serde(default, rename = "disallowedTools", alias = "disallowed_tools")]
+            disallowed_tools: Option<serde_json::Value>,
+        }
+
+        let fm = match serde_yaml::from_str::<AgentFrontmatterCheck>(yaml_block) {
+            Ok(f) => f,
+            Err(parse_err) => {
+                return vec![Diagnostic::warning(
+                    rule::AGENT_SPEC,
+                    format!(
+                        "agent frontmatter parse error (sync would fail with exit 45): {parse_err}"
+                    ),
+                )
+                .at(Location::file(e.source_path.clone()))];
+            }
+        };
+
+        let mut out = Vec::new();
+        if let Some(v) = &fm.tools
+            && !v.is_array()
+            && !v.is_null()
+        {
+            out.push(
+                Diagnostic::warning(
+                    rule::AGENT_SPEC,
+                    "agent 'tools' field must be a list of strings, not a scalar (sync would fail with exit 45)",
+                )
+                .at(Location::file(e.source_path.clone())),
+            );
+        }
+        if let Some(v) = &fm.disallowed_tools
+            && !v.is_array()
+            && !v.is_null()
+        {
+            out.push(
+                Diagnostic::warning(
+                    rule::AGENT_SPEC,
+                    "agent 'disallowedTools' field must be a list of strings, not a scalar (sync would fail with exit 45)",
+                )
+                .at(Location::file(e.source_path.clone())),
+            );
+        }
+        out
+    }
+}
+
+/// Extract the YAML block from a frontmatter-fenced markdown file.
+/// Returns `None` when the standard `---\n…\n---` fences are not present.
+fn extract_frontmatter_yaml(raw: &str) -> Option<&str> {
+    let rest = raw.strip_prefix("---\n")?;
+    let end = rest.find("\n---\n").or_else(|| rest.find("\n---"))?;
+    Some(&rest[..end])
 }
 
 struct UnsupportedComponents;
@@ -694,6 +847,7 @@ mod tests {
             mcp_servers: Vec::new(),
             hooks_files: Vec::new(),
             hooks_json: None,
+            mcp_json: None,
             provenance: Provenance::local("tome", dir),
             diagnostics: Vec::new(),
         }
@@ -1061,6 +1215,162 @@ mod tests {
         let d = run_catalog(c);
         assert!(has(&d, rule::OWNER_EMAIL_INVALID));
         assert!(has(&d, rule::DUP_PLUGIN));
+    }
+
+    // --- mcp-spec rule -------------------------------------------------------
+
+    #[test]
+    fn mcp_spec_valid_object_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
+        p.mcp_json = Some(r#"{"mcpServers":{}}"#.to_owned());
+        assert!(
+            McpSpec.check_plugin(&p).is_empty(),
+            "valid object must pass"
+        );
+    }
+
+    #[test]
+    fn mcp_spec_invalid_json_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
+        p.mcp_json = Some("{not json".to_owned());
+        let d = McpSpec.check_plugin(&p);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].rule_id, rule::MCP_SPEC);
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(d[0].message.contains(".mcp.json is not valid JSON"));
+    }
+
+    #[test]
+    fn mcp_spec_non_object_top_level_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
+        // Arrays and null are not top-level objects.
+        p.mcp_json = Some("[1, 2, 3]".to_owned());
+        let d = McpSpec.check_plugin(&p);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].rule_id, rule::MCP_SPEC);
+        assert!(d[0].message.contains("JSON object at the top level"));
+
+        // A string is also not an object.
+        p.mcp_json = Some("\"hello\"".to_owned());
+        let d = McpSpec.check_plugin(&p);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].rule_id, rule::MCP_SPEC);
+    }
+
+    #[test]
+    fn mcp_spec_absent_is_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
+        p.mcp_json = None;
+        assert!(McpSpec.check_plugin(&p).is_empty(), "absent is silent");
+    }
+
+    // --- agent-spec rule -----------------------------------------------------
+
+    #[test]
+    fn agent_spec_wrong_tools_type_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("agents");
+        fs::create_dir_all(&dir).unwrap();
+        let agent_file = dir.join("helper.md");
+        fs::write(
+            &agent_file,
+            "---\nname: helper\ndescription: d\ntools: 7\n---\nbody\n",
+        )
+        .unwrap();
+        let e = entry(EntryKind::Agent, "helper", agent_file, Some("d"), "body\n");
+        let d = AgentSpec.check_entry(&e);
+        assert!(
+            d.iter().any(|x| x.rule_id == rule::AGENT_SPEC),
+            "scalar tools must be flagged: {d:?}"
+        );
+        assert!(
+            d.iter().any(|x| x.message.contains("'tools'")),
+            "message must mention the field: {d:?}"
+        );
+    }
+
+    #[test]
+    fn agent_spec_valid_tools_list_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("agents");
+        fs::create_dir_all(&dir).unwrap();
+        let agent_file = dir.join("helper.md");
+        fs::write(
+            &agent_file,
+            "---\nname: helper\ndescription: d\ntools:\n  - Bash\n  - Read\n---\nbody\n",
+        )
+        .unwrap();
+        let e = entry(EntryKind::Agent, "helper", agent_file, Some("d"), "body\n");
+        assert!(AgentSpec.check_entry(&e).is_empty(), "list tools must pass");
+    }
+
+    #[test]
+    fn agent_spec_wrong_disallowed_tools_type_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("agents");
+        fs::create_dir_all(&dir).unwrap();
+        let agent_file = dir.join("helper.md");
+        fs::write(
+            &agent_file,
+            "---\nname: helper\ndescription: d\ndisallowedTools: NotAList\n---\nbody\n",
+        )
+        .unwrap();
+        let e = entry(EntryKind::Agent, "helper", agent_file, Some("d"), "body\n");
+        let d = AgentSpec.check_entry(&e);
+        assert!(
+            d.iter().any(|x| x.rule_id == rule::AGENT_SPEC),
+            "scalar disallowedTools must be flagged: {d:?}"
+        );
+        assert!(
+            d.iter().any(|x| x.message.contains("'disallowedTools'")),
+            "message must mention the field: {d:?}"
+        );
+    }
+
+    #[test]
+    fn agent_spec_non_agent_entry_is_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("skills/foo");
+        fs::create_dir_all(&dir).unwrap();
+        let skill = dir.join("SKILL.md");
+        fs::write(
+            &skill,
+            "---\nname: foo\ndescription: d\ntools: 7\n---\nbody\n",
+        )
+        .unwrap();
+        let e = entry(EntryKind::Skill, "foo", skill, Some("d"), "body\n");
+        assert!(
+            AgentSpec.check_entry(&e).is_empty(),
+            "non-agent must be silent even with bad fields"
+        );
+    }
+
+    // --- hooks-spec non-array values -----------------------------------------
+
+    #[test]
+    fn hooks_spec_non_array_values_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
+        // A string value for a hooks event must be flagged.
+        p.hooks_json = Some(r#"{"PreToolUse": "not-an-array"}"#.to_owned());
+        let d = HooksSpec.check_plugin(&p);
+        assert_eq!(d.len(), 1, "one non-array value must produce one warning");
+        assert_eq!(d[0].rule_id, rule::HOOKS_SPEC);
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(
+            d[0].message.contains("PreToolUse"),
+            "message must name the key: {}",
+            d[0].message
+        );
+        assert!(
+            d[0].message.contains("array"),
+            "message must mention array: {}",
+            d[0].message
+        );
     }
 
     #[test]

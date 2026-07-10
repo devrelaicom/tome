@@ -226,6 +226,23 @@ fn parse_plugin(ur: &UntrustedRoot) -> Result<PluginIr, TomeError> {
         None
     };
 
+    // .mcp.json content for the McpSpec rule — same UntrustedRoot guard pattern.
+    // An unreadable file is itself a finding (never-halt).
+    let mcp_json = if ur.is_file(Path::new(".mcp.json")) {
+        match ur.read_text(Path::new(".mcp.json"), HARNESS_MCP_MAX) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                diagnostics.push(Diagnostic::warning(
+                    rule::MCP_SPEC,
+                    format!("could not read .mcp.json: {e}"),
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(PluginIr {
         name,
         version,
@@ -236,6 +253,7 @@ fn parse_plugin(ur: &UntrustedRoot) -> Result<PluginIr, TomeError> {
         mcp_servers: Vec::new(),
         hooks_files: Vec::new(),
         hooks_json,
+        mcp_json,
         provenance: Provenance::local("tome", ur.root().to_path_buf()),
         diagnostics,
     })
