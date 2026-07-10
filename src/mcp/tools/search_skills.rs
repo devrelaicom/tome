@@ -50,6 +50,14 @@ pub struct Input {
     /// `agent` typically yields nothing — agents are not searchable.)
     #[serde(default)]
     pub kind: Option<crate::plugin::identity::EntryKind>,
+    /// Run the cross-encoder reranker for this call. OPT-IN — reranking is OFF
+    /// by default (#502). When absent, the resolved default applies: `[query]
+    /// rerank` in `~/.tome/config.toml` (explicit wins), else a configured
+    /// `[reranker]` provider (implicit enable), else off. Pass `true` to force
+    /// reranking on for this call (higher-quality but slower ranking), or
+    /// `false` to force it off even when config/implicit-enable turned it on.
+    #[serde(default)]
+    pub rerank: Option<bool>,
     /// Relevance floor: drop matches scoring below this value. OPT-IN — omit
     /// for the default behavior of returning the top_k scored results. The
     /// scale is scoring-mode-dependent (see the output `scoring` field: a
@@ -220,6 +228,21 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         .or(cfg.query.top_k)
         .unwrap_or(crate::commands::query::DEFAULT_TOP_K);
 
+    // #502: resolve whether the reranker runs for THIS call. Reranking is OFF
+    // by default. Precedence mirrors the CLI: the per-call `rerank` input (when
+    // present) wins → else `[query] rerank` (explicit config) → else a
+    // configured `[reranker]` provider (implicit enable) → else the built-in
+    // default (off). The one divergence from the CLI is the per-invocation
+    // override surface: the CLI uses two flags, the tool uses one tri-state
+    // `Option<bool>` input.
+    let rerank = match input.rerank {
+        Some(explicit) => explicit,
+        None => crate::commands::query::resolve_effective_rerank(
+            cfg.query.rerank,
+            cfg.reranker.is_provider_configured(),
+        ),
+    };
+
     // Bounds-check the RESOLVED value so the config default is also guarded.
     if effective_top_k == 0 || effective_top_k > 100 {
         return Err(McpError::invalid_params(
@@ -324,40 +347,51 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     }
 
-    // Lazy-build the reranker. `tokio::sync::OnceCell::get_or_try_init`
-    // dedupes concurrent first-call requests; the build runs once and the
-    // resulting `Arc<dyn Reranker>` is startup-frozen for the rest of the
-    // server's lifetime (mirroring the startup-frozen embedder).
+    // Lazy-build the reranker — ONLY when reranking is on for this call (#502:
+    // off by default). Skipping the build when reranking is off means the
+    // default search path never loads (or requires) the heavy bundled
+    // `bge-reranker` (~280 MB). `tokio::sync::OnceCell::get_or_try_init` dedupes
+    // concurrent first-call requests; the build runs once and the resulting
+    // `Arc<dyn Reranker>` is startup-frozen for the rest of the server's
+    // lifetime (mirroring the startup-frozen embedder).
     //
     // Phase 12 / US3: select remote-vs-bundled INSIDE the `spawn_blocking` (the
     // RemoteReranker is sync). `build_reranker` resolves `[reranker]` from config
     // (loaded defensively — MCP handlers never hard-fail on a malformed config;
     // a malformed config resolves to bundled here). A remote build is infallible
     // at construction; a missing bundled model still surfaces via `load`.
-    let reranker_entry = state.reranker_entry;
-    let reranker_paths = state.paths.clone();
-    let reranker_arc = state
-        .reranker
-        .get_or_try_init(|| async move {
-            tokio::task::spawn_blocking(move || {
-                let cfg = crate::config::load_or_default(&reranker_paths);
-                crate::embedding::build_reranker(&cfg, &reranker_paths, reranker_entry)
-            })
-            .await
-            .map_err(|e| TomeError::McpStartupFailed {
-                reason: format!("reranker build join: {e}"),
-            })?
-            .map(Arc::from)
-        })
-        .await
-        .map_err(tome_to_mcp)?
-        .clone();
+    let reranker_arc: Option<Arc<dyn Reranker>> = if rerank {
+        let reranker_entry = state.reranker_entry;
+        let reranker_paths = state.paths.clone();
+        Some(
+            state
+                .reranker
+                .get_or_try_init(|| async move {
+                    tokio::task::spawn_blocking(move || {
+                        let cfg = crate::config::load_or_default(&reranker_paths);
+                        crate::embedding::build_reranker(&cfg, &reranker_paths, reranker_entry)
+                    })
+                    .await
+                    .map_err(|e| TomeError::McpStartupFailed {
+                        reason: format!("reranker build join: {e}"),
+                    })?
+                    .map(Arc::from)
+                })
+                .await
+                .map_err(tome_to_mcp)?
+                .clone(),
+        )
+    } else {
+        None
+    };
 
     // Translate Input → QueryArgs.
     //
-    // `rerank` follows `cfg.query.rerank` (no per-call MCP arg exists today):
-    //   config `rerank = false` → `no_rerank: true` → reranker skipped.
-    //   This matters when the reranker model is not installed for the profile.
+    // `no_rerank` reflects the resolved `rerank` decision above (#502: per-call
+    // `rerank` input → `[query] rerank` → implicit `[reranker]` enable → default
+    // off). `no_rerank: true` skips the reranker; the pipeline then also receives
+    // `reranker: None` (built above only when `rerank`), so the two are always
+    // consistent.
     //
     // #320: `min_score` is now an OPT-IN MCP input. The pipeline applies a floor
     // ONLY under `args.strict` (non-strict mode never filters), so when the caller
@@ -367,7 +401,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // decides). Dropping every result under a floor is NOT a silent drop: the #285
     // empty-result path attaches `no_results_reason` + `hint` so the caller sees
     // the signal.
-    let no_rerank = !cfg.query.rerank.unwrap_or(true);
+    let no_rerank = !rerank;
     // #319 widened `QueryArgs` input fields to multi-value. The MCP tool keeps
     // its single-value surface (`Input.query`/`catalog`/`plugin`/`kind` are one
     // each), so map them onto the vec/`query` forms: the query goes through the
@@ -388,6 +422,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             .map(crate::commands::tier::set::tierkind_of)
             .into_iter()
             .collect(),
+        // The `rerank` decision is already resolved into `no_rerank`; the
+        // per-invocation `--rerank` flag is a CLI-only surface (the tool has
+        // resolved its own `rerank` input above), so leave it `false` here.
+        rerank: false,
         no_rerank,
         strict,
         min_score: input.min_score,
@@ -418,7 +456,9 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     };
 
     let embedder = state.embedder.clone();
-    let reranker: Arc<dyn Reranker> = reranker_arc;
+    // `None` when reranking is off for this call (#502) — the pipeline then
+    // scores by cosine similarity and never touches a reranker model.
+    let reranker: Option<Arc<dyn Reranker>> = reranker_arc;
     let paths = state.paths.clone();
     let scope = state.scope.scope.clone();
     // FF2 vestigial slot: `QueryDeps.config` is unused by `query::pipeline`
@@ -449,7 +489,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             scope: &scope,
             config: &config,
             embedder: embedder.as_ref(),
-            reranker: Some(reranker.as_ref()),
+            reranker: reranker.as_deref(),
             embedder_seed,
             reranker_seed,
         };
@@ -471,11 +511,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             Err(TomeError::QueryNoResultsStrict { .. }) => {
                 // Mirror the pipeline's `scoring` derivation EXACTLY
                 // (`src/commands/query.rs`: `if deps.reranker.is_some()`), not
-                // `args.no_rerank` — the MCP handler always supplies a reranker,
-                // so a non-empty result always reports `reranked`; the empty path
-                // must agree. Reading `deps.reranker.is_some()` keeps them
-                // structurally in lockstep even if the handler ever conditionally
-                // omits the reranker.
+                // `args.no_rerank`, so the empty path reports the same scoring
+                // mode a non-empty result would. #502: the handler now supplies a
+                // reranker only when reranking is on for this call, so
+                // `deps.reranker.is_some()` correctly reports `reranked` vs
+                // `embedding-similarity` on the empty path too.
                 let empty = empty_strict_outcome(&paths, &scope, deps.reranker.is_some());
                 Ok((empty, compute_elapsed))
             }
@@ -757,9 +797,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 /// `scoring` MUST match what the pipeline would report for the SAME call, so the
 /// wire field is consistent between a non-empty and a strict-empty result. The
 /// pipeline derives it from `deps.reranker.is_some()` (NOT `--no-rerank`), so the
-/// caller passes `reranker_present` = `deps.reranker.is_some()`; on the MCP path
-/// that is always `true` (the handler always supplies a reranker) → `Reranked`.
-/// Reranker drift is not re-derived here (a soft label the handler never
+/// caller passes `reranker_present` = `deps.reranker.is_some()`. #502: the
+/// handler supplies a reranker only when reranking is on for the call, so this is
+/// `true` → `Reranked` when reranking ran and `false` → `Similarity` when it did
+/// not. Reranker drift is not re-derived here (a soft label the handler never
 /// surfaces on the empty path).
 fn empty_strict_outcome(
     paths: &crate::paths::Paths,

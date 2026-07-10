@@ -105,13 +105,19 @@ applies mechanically-safe lint fixes.
 
 ## `tome query`
 
-Semantic search across enabled skills and commands (KNN + reranker).
+Semantic search across enabled skills and commands (KNN, with an optional
+reranker stage).
 
 The query text is given as one or more positional words, joined with a single
 space, so `tome query reset a counter` works without quoting. Alternatively pass
 a single quoted string with `-q`/`--query` (`tome query -q "reset a counter"`)
 when the query contains flag-like or shell-significant tokens. The two forms are
 mutually exclusive; giving neither is a usage error.
+
+Reranking is off by default: KNN over the embeddings alone gives a usable
+ranking. Enable it per query with `--rerank`, for every query with `[query]
+rerank = true`, or implicitly by configuring a `[reranker]` provider (an explicit
+`[query] rerank` value always wins). See [Search](../using-tome/search.md#reranking).
 
 | Flag | Meaning |
 | --- | --- |
@@ -120,9 +126,10 @@ mutually exclusive; giving neither is a usage error.
 | `--catalog <name>` | Restrict the search to a catalog. Repeatable: pass `--catalog` several times to include entries from any of the named catalogs. |
 | `--plugin <name>` | Restrict the search to a plugin (across all catalogs unless `--catalog` is also set). Repeatable: include entries from any of the named plugins. |
 | `--kind <kind>` | Restrict the search to an entry kind (`skill`, `command`, or `agent`). Repeatable. Note that `query` only searches indexed, searchable entries, so `--kind agent` typically returns nothing. |
-| `--no-rerank` | Skip the reranker stage; scores are raw cosine similarity. |
+| `--rerank` | Run the reranker stage for this query (off by default). Mutually exclusive with `--no-rerank`. |
+| `--no-rerank` | Skip the reranker stage; scores are raw cosine similarity. Only meaningful when reranking is otherwise on (via `[query] rerank` or a configured reranker provider). Mutually exclusive with `--rerank`. |
 | `--strict` | Apply the score threshold and exit `40` on an empty result. |
-| `--min-score <s>` | Minimum score to retain a result (only enforced with `--strict`). Default `0.0` with the reranker on, `0.5` with `--no-rerank`. |
+| `--min-score <s>` | Minimum score to retain a result (only enforced with `--strict`). Default `0.5` (embedding similarity — the default path) or `0.0` when the reranker is on. |
 
 Example: `tome query reset a counter --kind skill --plugin a --plugin b`.
 

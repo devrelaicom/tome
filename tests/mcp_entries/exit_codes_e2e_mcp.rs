@@ -424,6 +424,7 @@ fn harness_drives_search_skills_end_to_end() {
             catalog: None,
             plugin: None,
             kind: None,
+            rerank: None,
             min_score: None,
             description_max_chars: Some(150),
         })
@@ -472,6 +473,7 @@ fn search_skills_honors_query_top_k_from_config() {
             catalog: None,
             plugin: None,
             kind: None,
+            rerank: None,
             min_score: None,
             description_max_chars: Some(150),
         })
@@ -518,6 +520,7 @@ fn search_skills_honors_query_rerank_false_from_config() {
             catalog: None,
             plugin: None,
             kind: None,
+            rerank: None,
             min_score: None,
             description_max_chars: Some(150),
         })
@@ -529,5 +532,14 @@ fn search_skills_honors_query_rerank_false_from_config() {
         out.matches.iter().any(|m| m.name == "rerank-test"),
         "search_skills with config rerank = false must still return results; got {:?}",
         out.matches.iter().map(|m| &m.name).collect::<Vec<_>>(),
+    );
+    // `rerank = false` must actually SKIP the reranker (not merely not crash):
+    // the pipeline scores by cosine similarity, so the wire `scoring` field is
+    // `embedding-similarity`, NOT `reranked`. Mirrors the #502 default-off guard
+    // in `mcp_search_skills_truncation::search_skills_default_does_not_rerank`.
+    assert_eq!(
+        out.scoring, "embedding-similarity",
+        "config rerank = false must skip the reranker and report embedding-similarity; got {:?}",
+        out.scoring,
     );
 }

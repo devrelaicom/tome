@@ -464,6 +464,7 @@ mod cli_search {
             catalog: Vec::new(),
             plugin: Vec::new(),
             kind: Vec::new(),
+            rerank: false,
             no_rerank: false,
             strict: false,
             min_score: None,

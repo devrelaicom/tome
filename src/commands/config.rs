@@ -253,10 +253,17 @@ fn collect_knobs(cfg: &Config, raw: Option<&toml::Value>, paths: &Paths) -> Vec<
         "query.rerank",
         "query",
         "rerank",
-        cfg.query
-            .rerank
-            .unwrap_or(crate::commands::query::DEFAULT_RERANK)
-            .to_string(),
+        // #502: the effective rerank state, single-sourced through the same
+        // resolver the CLI query path uses — explicit `[query] rerank` wins,
+        // else a configured `[reranker]` provider implicitly enables it, else
+        // the built-in default (off). So `query.rerank` reads `true` when a
+        // `[reranker]` provider is configured even though `[query] rerank` is
+        // unset, matching what a query would actually do.
+        crate::commands::query::resolve_effective_rerank(
+            cfg.query.rerank,
+            cfg.reranker.is_provider_configured(),
+        )
+        .to_string(),
     ));
     knobs.push(plain(
         raw,

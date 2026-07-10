@@ -247,6 +247,10 @@ fn make_input(query: &str, description_max_chars: u32) -> Input {
         catalog: None,
         plugin: None,
         kind: None,
+        // #502: reranking is OFF by default, but these tests wire a StubReranker
+        // via `build_state` and exercise the reranked path (scoring == "reranked"),
+        // so opt in explicitly per-call rather than depend on the (now off) default.
+        rerank: Some(true),
         min_score: None,
         description_max_chars: Some(description_max_chars),
     }
@@ -619,6 +623,65 @@ fn non_empty_search_reports_corpus_size_and_scoring() {
 }
 
 #[test]
+fn search_skills_default_does_not_rerank() {
+    // #502: reranking is OFF by default on the MCP surface. With no per-call
+    // `rerank` input, no `[query] rerank`, and no `[reranker]` provider (the
+    // staged workspace writes no config.toml), the handler must NOT rerank —
+    // it scores by embedding similarity and reports `embedding-similarity`.
+    let body = "---\nname: findme\ndescription: A findable skill.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("findme", body)], &[]);
+    let state = build_state(&paths);
+
+    // `rerank: None` (default) — the reranked variant is `make_input`, which now
+    // opts in explicitly.
+    let input = Input {
+        query: "findme".into(),
+        top_k: Some(10),
+        catalog: None,
+        plugin: None,
+        kind: None,
+        rerank: None,
+        min_score: None,
+        description_max_chars: Some(150),
+    };
+    let out = invoke(state, input).expect("search ok");
+    assert!(!out.matches.is_empty(), "expected at least one match");
+    assert_eq!(
+        out.scoring, "embedding-similarity",
+        "the default MCP search must NOT rerank (#502); got scoring = {:?}",
+        out.scoring
+    );
+}
+
+#[test]
+fn search_skills_per_call_rerank_true_reranks() {
+    // #502: an explicit `rerank: Some(true)` opts back into the reranker for the
+    // call (the StubReranker is wired via `build_state`), producing `reranked`
+    // scoring even though the default is off.
+    let body = "---\nname: findme\ndescription: A findable skill.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("findme", body)], &[]);
+    let state = build_state(&paths);
+
+    let input = Input {
+        query: "findme".into(),
+        top_k: Some(10),
+        catalog: None,
+        plugin: None,
+        kind: None,
+        rerank: Some(true),
+        min_score: None,
+        description_max_chars: Some(150),
+    };
+    let out = invoke(state, input).expect("search ok");
+    assert!(!out.matches.is_empty(), "expected at least one match");
+    assert_eq!(
+        out.scoring, "reranked",
+        "an explicit rerank: true must rerank the MCP search (#502); got {:?}",
+        out.scoring
+    );
+}
+
+#[test]
 fn empty_corpus_search_reports_index_empty_reason_and_reindex_hint() {
     // #285: an empty index (zero searchable entries) returns
     // corpus_size == 0 with `no_results_reason: index_empty` + a reindex hint.
@@ -747,6 +810,10 @@ fn input_with_filters(query: &str, kind: Option<EntryKind>, min_score: Option<f3
         catalog: None,
         plugin: None,
         kind,
+        // #502: opt into reranking explicitly — these tests wire a StubReranker
+        // and assert the reranked scoring/threshold path; reranking is otherwise
+        // off by default.
+        rerank: Some(true),
         min_score,
         description_max_chars: Some(150),
     }
@@ -929,12 +996,13 @@ fn min_score_above_every_score_reports_no_match_with_signal() {
         out.corpus_size
     );
     // M-1 regression guard: the `scoring` wire field on the strict-empty path
-    // must match what a NON-empty MCP result reports. The MCP handler always
-    // supplies a reranker, so a non-empty result is always `reranked` — the
-    // strict-empty path must agree (it must NOT derive from `--no-rerank`).
+    // must match what a NON-empty MCP result reports for the SAME call. This call
+    // opted into reranking (`input_with_filters` sets `rerank: Some(true)`, #502),
+    // so a non-empty result would report `reranked` — the strict-empty path must
+    // agree (it must NOT derive from `--no-rerank`).
     assert_eq!(
         out.scoring, "reranked",
-        "strict-empty scoring must match the non-empty MCP path (reranker always present); got {:?}",
+        "strict-empty scoring must match the non-empty MCP path (reranking opted in); got {:?}",
         out.scoring
     );
 }

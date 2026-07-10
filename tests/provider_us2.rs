@@ -579,6 +579,7 @@ fn query_with_embedder_seed(
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: None,
