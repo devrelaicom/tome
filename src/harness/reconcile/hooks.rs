@@ -1909,6 +1909,19 @@ fn reconcile_dispatch_manifest(
             }
         }
     } else {
+        // Guard against symlink attacks before reading or writing (read/write
+        // parity: the remove branch above already guards at line 1884, and
+        // write_manifest → write_hook_file guards the write side; this closes
+        // the read-side gap so both the idempotence probe and the write share
+        // one upfront refusal).
+        if let Err(e) =
+            crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))
+        {
+            if first_error.is_none() {
+                *first_error = Some(e);
+            }
+            return Action::LeftAlone;
+        }
         let manifest = HookManifest {
             harness: name.to_string(),
             raw_event_passthrough,
