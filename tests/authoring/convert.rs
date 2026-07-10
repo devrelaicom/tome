@@ -1301,6 +1301,99 @@ fn json_convert_diagnostic_lines_carry_lint_finding_fields() {
 }
 
 // ---------------------------------------------------------------------------
+// M3 — round-trip: emitted agent file re-parses correctly through the real
+//       harness sync reader (CanonicalAgent::parse), catching any key-rename
+//       drift between the emitter and the reader (issue #525).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_frontmatter_round_trips_through_canonical_agent_parse() {
+    // Convert a CC agent fixture that carries model, tools, disallowedTools, and
+    // permissionMode.  Read the emitted `.md` back through the real harness sync
+    // reader (CanonicalAgent::parse) and assert that every field survives the
+    // trip — not just that the emitted text contains the right strings.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"roundtrip","version":"1.0.0","description":"round-trip test"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("agents")).unwrap();
+    // Use the camelCase `disallowedTools` spelling (the canonical CC form) to
+    // exercise the I2 fix: AGENT_META_KEYS must include "disallowedTools" so
+    // classify_dropped_frontmatter emits Info (not the agent-lossy fallback).
+    fs::write(
+        src.join("agents/helper.md"),
+        "---\nname: helper\ndescription: a helper agent\nmodel: claude-opus-4-5\ntools:\n  - Bash\n  - Read\ndisallowedTools:\n  - Write\npermissionMode: acceptEdits\n---\nBody text here.\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // Read the emitted file back through the real harness sync reader.
+    let emitted_path = target.join("agents/helper.md");
+    assert!(
+        emitted_path.exists(),
+        "emitted agent file must exist: {emitted_path:?}"
+    );
+    let emitted_text = fs::read_to_string(&emitted_path).unwrap();
+
+    let canonical = tome::harness::agents::CanonicalAgent::parse(
+        "roundtrip",
+        "roundtrip",
+        "helper",
+        &emitted_text,
+    )
+    .expect("emitted agent file must parse through CanonicalAgent::parse");
+
+    // Every field must round-trip without loss.
+    assert_eq!(
+        canonical.model.as_deref(),
+        Some("claude-opus-4-5"),
+        "model must round-trip; emitted file:\n{emitted_text}"
+    );
+    assert_eq!(
+        canonical.tools.as_deref(),
+        Some(&["Bash".to_owned(), "Read".to_owned()][..]),
+        "tools must round-trip; emitted file:\n{emitted_text}"
+    );
+    assert_eq!(
+        canonical.disallowed_tools.as_deref(),
+        Some(&["Write".to_owned()][..]),
+        "disallowedTools must round-trip; emitted file:\n{emitted_text}"
+    );
+    assert_eq!(
+        canonical.permission_mode.as_deref(),
+        Some("acceptEdits"),
+        "permissionMode must round-trip; emitted file:\n{emitted_text}"
+    );
+    assert!(
+        canonical.body.contains("Body text here."),
+        "body must survive the round-trip; emitted file:\n{emitted_text}"
+    );
+
+    // No agent-lossy diagnostic for disallowedTools must be a Warning —
+    // the I2 fix ensures it is downgraded to Info (preserved, not dropped).
+    let lossy_warnings: Vec<_> = outcome
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule_id == "convert/agent-lossy" && d.severity.as_str() == "warning")
+        .collect();
+    assert!(
+        lossy_warnings.is_empty(),
+        "no preserved agent-meta key should produce a Warning-severity agent-lossy diagnostic \
+         (I2: disallowedTools was incorrectly classified as non-preserved before this fix):\n\
+         {lossy_warnings:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // G4 — Agent frontmatter preserved through convert (issue #525)
 // ---------------------------------------------------------------------------
 

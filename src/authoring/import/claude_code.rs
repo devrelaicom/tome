@@ -64,11 +64,21 @@ const MODELLED_FRONTMATTER: &[&str] = &[
 /// [`AgentMeta`] (G4). These are NOT in [`MODELLED_FRONTMATTER`] (they are
 /// not `SkillFrontmatter` fields) but are preserved for agent entries so
 /// `harness sync` can translate them.
+///
+/// Every spelling accepted by `parse_agent_meta` must appear here so that
+/// `classify_dropped_frontmatter` recognises them as "preserved" (Info) rather
+/// than "dropped" (the agent-lossy fallback).  In particular, `disallowedTools`
+/// (camelCase — the canonical CC spelling) and `disallowed_tools` (snake alias)
+/// must be listed alongside the kebab form `disallowed-tools`, and similarly for
+/// `allowed_tools`.
 const AGENT_META_KEYS: &[&str] = &[
     "model",
     "tools",
     "allowed-tools",
+    "allowed_tools",
     "disallowed-tools",
+    "disallowedTools",
+    "disallowed_tools",
     "permissionMode",
     "permission_mode",
 ];
