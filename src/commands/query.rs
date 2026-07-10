@@ -42,10 +42,40 @@ const SCORING_SIMILARITY: &str = "embedding-similarity";
 /// here can't drift the shown default away from the effective one.
 pub const DEFAULT_TOP_K: u32 = 10;
 
-/// Built-in default for whether the reranker stage runs when neither
-/// `--no-rerank` nor `[query] rerank` is set. Single source of truth for the
-/// shown default (`tome config show`).
-pub const DEFAULT_RERANK: bool = true;
+/// Built-in default for whether the reranker stage runs when neither the
+/// `--rerank`/`--no-rerank` flags, `[query] rerank`, nor a configured
+/// `[reranker]` provider is present. Reranking is OFF by default (#502): the
+/// bundled `bge-reranker` is the single largest model Tome ships (~280 MB) and
+/// KNN + embeddings alone give a usable ranking, so the reranker is an opt-in
+/// quality boost rather than a default cost. Single source of truth for the
+/// shown default (`tome config show`) and the effective-rerank resolver
+/// ([`resolve_effective_rerank`]).
+pub const DEFAULT_RERANK: bool = false;
+
+/// Resolve whether the reranker stage is effectively ON, given the `[query]
+/// rerank` config value and whether a `[reranker]` provider (with model) is
+/// configured.
+///
+/// Precedence (highest to lowest), per #502:
+/// 1. Explicit `[query] rerank` (when `Some`) — the user's stated intent wins,
+///    in either direction.
+/// 2. Implicit enable — a configured `[reranker]` provider (with model) is a
+///    clear intent to rerank, so it turns reranking on even without `[query]
+///    rerank`.
+/// 3. The built-in default ([`DEFAULT_RERANK`], off).
+///
+/// Note: this resolves the CONFIG/implicit layer only. The per-invocation CLI
+/// flags (`--rerank` / `--no-rerank`) are applied on top of this in
+/// [`resolve_query_args`], where an explicit flag overrides everything.
+pub fn resolve_effective_rerank(
+    qcfg_rerank: Option<bool>,
+    reranker_provider_configured: bool,
+) -> bool {
+    match qcfg_rerank {
+        Some(explicit) => explicit,
+        None => reranker_provider_configured || DEFAULT_RERANK,
+    }
+}
 
 /// Inputs to [`run_with_deps`] — pre-built handles + scope context the
 /// caller has already paid for. Mirrors `LifecycleDeps` from the lifecycle
@@ -130,26 +160,45 @@ impl ScoringMode {
 }
 
 /// Resolve per-invocation query knobs: explicit flag → `[query]` config →
-/// built-in default.  Pure function so it can be tested independently of the
-/// `run()` path (which requires real ONNX models to be present on disk).
+/// implicit `[reranker]` enable → built-in default.  Pure function so it can be
+/// tested independently of the `run()` path (which requires real ONNX models to
+/// be present on disk).
 ///
 /// Priority (highest to lowest):
-/// 1. Explicit per-call flag (`args.top_k` / `args.no_rerank` / `args.min_score`).
+/// 1. Explicit per-call flag (`args.top_k` / `args.rerank` / `args.no_rerank` /
+///    `args.min_score`).
 /// 2. `[query]` section in `~/.tome/config.toml` (passed as `qcfg`).
-/// 3. Built-in default (`top_k = 10`, `rerank = true`, `strict_min_score = None`).
+/// 3. Implicit `[reranker]` enable (`reranker_provider_configured`) — a
+///    configured provider turns reranking on when `[query] rerank` is unset.
+/// 4. Built-in default (`top_k = 10`, `rerank = false`, `strict_min_score = None`).
 ///
-/// `no_rerank` semantics: if the caller explicitly passed `--no-rerank` that
-/// wins unconditionally.  Otherwise the *config* decides (`rerank = false` →
-/// reranker off; default or `rerank = true` → reranker on).
-pub fn resolve_query_args(args: QueryArgs, qcfg: &crate::config::QueryConfig) -> QueryArgs {
-    let effective_rerank = if args.no_rerank {
+/// `rerank` semantics (#502): the reranker is OFF by default. An explicit
+/// per-invocation flag wins unconditionally — `--rerank` forces it on,
+/// `--no-rerank` forces it off (clap makes them mutually exclusive). With
+/// neither flag, [`resolve_effective_rerank`] decides from `[query] rerank`
+/// (explicit config wins), then a configured `[reranker]` provider (implicit
+/// enable), then the built-in default (off).
+pub fn resolve_query_args(
+    args: QueryArgs,
+    qcfg: &crate::config::QueryConfig,
+    reranker_provider_configured: bool,
+) -> QueryArgs {
+    let effective_rerank = if args.rerank {
+        // Explicit `--rerank` forces the reranker on.
+        true
+    } else if args.no_rerank {
+        // Explicit `--no-rerank` forces the reranker off.
         false
     } else {
-        qcfg.rerank.unwrap_or(DEFAULT_RERANK)
+        // No per-invocation flag: config / implicit-enable / default decide.
+        resolve_effective_rerank(qcfg.rerank, reranker_provider_configured)
     };
     let effective_top_k: u32 = args.top_k.or(qcfg.top_k).unwrap_or(DEFAULT_TOP_K);
     QueryArgs {
         top_k: Some(effective_top_k),
+        // Downstream (`run`, `pipeline`) reads `no_rerank`, so collapse the
+        // resolved decision onto it and clear the now-consumed `rerank` flag.
+        rerank: false,
         no_rerank: !effective_rerank,
         min_score: args.min_score.or(qcfg.strict_min_score),
         ..args
@@ -194,11 +243,15 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
     // `QueryDeps.config` field still receives a `Config::default()` (FF2).
     let cfg = crate::config::load(&paths)?;
 
-    // Resolve per-invocation knobs: flag > config > built-in default.
-    // We compute this BEFORE the model-presence check so `--no-rerank`
-    // prevents a hard-fail on a missing reranker model when the flag is
-    // explicitly passed.
-    let args = resolve_query_args(args, &cfg.query);
+    // Resolve per-invocation knobs: flag > config > implicit `[reranker]`
+    // enable > built-in default (#502: reranking is off by default). We compute
+    // this BEFORE the model-presence check so `--no-rerank` (or the resolved
+    // default-off) prevents a hard-fail on a missing reranker model. The
+    // implicit-enable signal is a cheap struct read (a configured `[reranker]`
+    // provider with model); the full `provider::resolve` validation still runs
+    // below to surface a misconfigured provider as exit 93.
+    let reranker_provider_configured = cfg.reranker.is_provider_configured();
+    let args = resolve_query_args(args, &cfg.query, reranker_provider_configured);
 
     let config = Config::default();
 

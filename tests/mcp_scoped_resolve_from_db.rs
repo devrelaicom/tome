@@ -96,6 +96,7 @@ fn search_skills_catalog_filter_resolves_from_db_without_config() {
             catalog: Some(staged.catalog_name.clone()),
             plugin: None,
             kind: None,
+            rerank: None,
             min_score: None,
             description_max_chars: Some(150),
         })
@@ -122,6 +123,7 @@ fn search_skills_unknown_catalog_filter_still_errors_without_config() {
             catalog: Some("ghost-catalog".into()),
             plugin: None,
             kind: None,
+            rerank: None,
             min_score: None,
             description_max_chars: Some(150),
         })

@@ -139,6 +139,7 @@ fn show_default_config_is_all_default() {
 
     // Spot-check the corrected, single-sourced default VALUES (issue #286 #2/#3).
     assert_eq!(knobs["query.top_k"].value, "10");
+    assert_eq!(knobs["query.rerank"].value, "false"); // #502: reranking off by default
     assert_eq!(knobs["query.strict_min_score"].value, "none"); // #3: no floor
     assert_eq!(knobs["summariser.long_max_chars"].value, "2500"); // #2: was 4000
     assert_eq!(knobs["mcp.description_max_chars"].value, "150"); // #2: was 200
@@ -168,6 +169,39 @@ fn show_config_override_marks_config() {
     assert_eq!(knobs["doctor.verify_by_default"].source, "config");
     // A key NOT in the file stays default.
     assert_eq!(knobs["query.rerank"].source, "default");
+}
+
+#[test]
+fn show_query_rerank_reflects_explicit_config() {
+    // #502: an explicit `[query] rerank = true` shows `true` with source `config`.
+    let env = ToolEnv::new();
+    write_config(&env, "[query]\nrerank = true\n");
+    let knobs = show_json(&env);
+    assert_eq!(knobs["query.rerank"].value, "true");
+    assert_eq!(knobs["query.rerank"].source, "config");
+}
+
+#[test]
+fn show_query_rerank_reflects_implicit_reranker_provider() {
+    // #502: configuring a `[reranker]` provider (with model) implicitly enables
+    // reranking, so `config show` reports the effective `query.rerank` as `true`
+    // even though `[query] rerank` is unset (source stays `default` — the value
+    // is not in the `[query]` section of the raw doc).
+    let env = ToolEnv::new();
+    write_config(
+        &env,
+        "[providers.vp]\nkind = \"voyage\"\napi_key = \"k\"\n\
+         [reranker]\nprovider = \"vp\"\nmodel = \"rerank-2\"\n",
+    );
+    let knobs = show_json(&env);
+    assert_eq!(
+        knobs["query.rerank"].value, "true",
+        "a configured [reranker] provider must implicitly enable reranking in the shown effective value",
+    );
+    assert_eq!(
+        knobs["query.rerank"].source, "default",
+        "the source stays `default` — `[query] rerank` is not present in the raw doc",
+    );
 }
 
 #[test]

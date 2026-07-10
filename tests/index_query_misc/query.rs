@@ -330,6 +330,7 @@ fn args_for(text: &str, top_k: u32) -> QueryArgs {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: None,

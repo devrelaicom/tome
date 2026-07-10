@@ -86,6 +86,7 @@ fn query_with_reranker(
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: reranker.is_none(),
         strict: false,
         min_score: None,
@@ -216,9 +217,12 @@ fn unreachable_remote_reranker_is_94_on_cli() {
 
 #[test]
 fn unreachable_remote_reranker_is_94_on_mcp() {
-    // The MCP `search_skills` path reranks (config default `rerank = true`) via the
-    // injected RemoteReranker. An unreachable provider must surface a clear tool
-    // error mapped from ProviderRequestFailed/94, NEVER a degenerate unranked KNN.
+    // The MCP `search_skills` path reranks via the injected RemoteReranker. #502
+    // made reranking OFF by default, so the call explicitly opts in with
+    // `rerank: Some(true)` (mirroring an agent that requested reranking, or a
+    // workspace with a configured `[reranker]` provider). An unreachable provider
+    // must then surface a clear tool error mapped from ProviderRequestFailed/94,
+    // NEVER a degenerate unranked KNN.
     let ws = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
     let _g = set_transport_override(|_spec| {
         Ok(RawResponse {
@@ -229,8 +233,12 @@ fn unreachable_remote_reranker_is_94_on_mcp() {
     });
     let reranker: Arc<dyn Reranker> = Arc::new(RemoteReranker::new(resolved_reranker()));
     let harness = ws.harness_with_reranker(reranker);
+    let input = tome::mcp::tools::search_skills::Input {
+        rerank: Some(true),
+        ..common::mcp_harness::search_input("anything")
+    };
     let err = harness
-        .call_search_skills(common::mcp_harness::search_input("anything"))
+        .call_search_skills(input)
         .expect_err("MCP search must fail closed on an unreachable remote reranker");
     assert_eq!(
         mcp_error_exit_code(&err),

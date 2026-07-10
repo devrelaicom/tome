@@ -392,13 +392,13 @@ fn get_skill_info_kind_schema_description_names_all_valid_kinds() {
 }
 
 #[test]
-fn search_skills_input_schema_advertises_kind_and_min_score() {
-    // #320: the `search_skills` input schema (what `tools/list` exposes to an
-    // agent) must advertise the two new OPTIONAL filters so a client can
-    // discover them: `kind` (a closed enum skill/command/agent) and `min_score`
-    // (a number). Both carry `#[serde(default)]` ⇒ NEITHER is in `required`.
-    // A rename, type change, dropped enum variant, or accidental promotion to
-    // required flips this test red.
+fn search_skills_input_schema_advertises_kind_min_score_and_rerank() {
+    // #320 / #502: the `search_skills` input schema (what `tools/list` exposes to
+    // an agent) must advertise the OPTIONAL knobs so a client can discover them:
+    // `kind` (a closed enum skill/command/agent), `min_score` (a number), and
+    // `rerank` (a boolean — the #502 per-call reranking override). All carry
+    // `#[serde(default)]` ⇒ NONE is in `required`. A rename, type change, dropped
+    // enum variant, or accidental promotion to required flips this test red.
     let tools = Server::tool_router().list_all();
     let search = tools
         .iter()
@@ -457,7 +457,24 @@ fn search_skills_input_schema_advertises_kind_and_min_score() {
         "`min_score` must be a number in the input schema; got type: {types:?}",
     );
 
-    // -- `required`: only `query`; the two defaulted filters must NOT appear ---
+    // -- `rerank`: an optional boolean (#502) ----------------------------------
+    // schemars renders `Option<bool>` as `type: ["boolean", "null"]`. This is
+    // the per-call override that lets an agent turn reranking on/off now that
+    // reranking is off by default.
+    let rerank = properties
+        .get("rerank")
+        .expect("input schema advertises the `rerank` property (#502)");
+    let rerank_types: Vec<&str> = rerank
+        .get("type")
+        .and_then(|t| t.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .expect("`rerank` carries a `type` array");
+    assert!(
+        rerank_types.contains(&"boolean"),
+        "`rerank` must be a boolean in the input schema; got type: {rerank_types:?}",
+    );
+
+    // -- `required`: only `query`; the defaulted filters must NOT appear -------
     // Assert UNCONDITIONALLY (a future schemars change that dropped it must fail
     // here, not skip the check).
     let required: Vec<&str> = schema
@@ -471,7 +488,7 @@ fn search_skills_input_schema_advertises_kind_and_min_score() {
         required.contains(&"query"),
         "`query` must remain required; got: {required:?}",
     );
-    for defaulted in ["kind", "min_score"] {
+    for defaulted in ["kind", "min_score", "rerank"] {
         assert!(
             !required.contains(&defaulted),
             "`{defaulted}` is defaulted (optional) and must not be in `required`; got: {required:?}",
@@ -534,6 +551,7 @@ fn search_skills_rejects_top_k_out_of_range() {
                 catalog: None,
                 plugin: None,
                 kind: None,
+                rerank: None,
                 min_score: None,
                 description_max_chars: Some(150),
             },
@@ -555,6 +573,7 @@ fn search_skills_rejects_top_k_out_of_range() {
                 catalog: None,
                 plugin: None,
                 kind: None,
+                rerank: None,
                 min_score: None,
                 description_max_chars: Some(150),
             },
@@ -586,6 +605,7 @@ fn search_skills_rejects_plugin_without_catalog() {
                 catalog: None,
                 plugin: Some("writers".into()),
                 kind: None,
+                rerank: None,
                 min_score: None,
                 description_max_chars: Some(150),
             },
@@ -627,6 +647,7 @@ fn search_skills_returns_unknown_catalog_for_missing_name() {
                 catalog: Some("nonexistent".into()),
                 plugin: None,
                 kind: None,
+                rerank: None,
                 min_score: None,
                 description_max_chars: Some(150),
             },

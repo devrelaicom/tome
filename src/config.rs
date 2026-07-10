@@ -150,6 +150,20 @@ pub struct RerankerConfig {
     pub model: Option<String>,
 }
 
+impl RerankerConfig {
+    /// Whether a `[reranker]` provider (with model) is configured — the
+    /// "implicit enable" signal for reranking (#502). Configuring a reranker
+    /// backend is a clear intent to use one, so this turns reranking on even
+    /// when `[query] rerank` is unset. Requires BOTH `provider` and `model`;
+    /// a half-configured `[reranker]` (provider without model) does not flip
+    /// reranking on (and would surface as `ProviderConfigInvalid`/93 at resolve
+    /// time if actually used). SSOT for the CLI resolver, `tome config show`,
+    /// and the MCP `search_skills` default.
+    pub fn is_provider_configured(&self) -> bool {
+        self.provider.is_some() && self.model.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {

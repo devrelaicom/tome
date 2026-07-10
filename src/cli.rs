@@ -1342,7 +1342,17 @@ pub struct QueryArgs {
     #[arg(long, value_enum, action = clap::ArgAction::Append)]
     pub kind: Vec<TierKindArg>,
 
-    /// Skip the reranker stage; scores are cosine similarity.
+    /// Run the reranker stage for this query. Reranking is OFF by default
+    /// (#502) — pass this to enable it per-invocation (or set `[query] rerank
+    /// = true`, or configure a `[reranker]` provider). Mutually exclusive with
+    /// `--no-rerank`.
+    #[arg(long = "rerank", conflicts_with = "no_rerank")]
+    pub rerank: bool,
+
+    /// Skip the reranker stage; scores are cosine similarity. Only meaningful
+    /// when reranking would otherwise be on (via `[query] rerank = true` or a
+    /// configured `[reranker]` provider) — reranking is off by default.
+    /// Mutually exclusive with `--rerank`.
     #[arg(long = "no-rerank")]
     pub no_rerank: bool,
 
@@ -1351,7 +1361,8 @@ pub struct QueryArgs {
     pub strict: bool,
 
     /// Minimum score to retain a result (only enforced with `--strict`).
-    /// Default is 0.0 with the reranker on, 0.5 with `--no-rerank`.
+    /// Default is 0.5 (cosine similarity — the default path, reranker off), or
+    /// 0.0 when the reranker is on (`--rerank` / `[query] rerank`).
     #[arg(long = "min-score")]
     pub min_score: Option<f32>,
 }

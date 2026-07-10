@@ -424,6 +424,7 @@ fn harness_drives_search_skills_end_to_end() {
             catalog: None,
             plugin: None,
             kind: None,
+            rerank: None,
             min_score: None,
             description_max_chars: Some(150),
         })
@@ -472,6 +473,7 @@ fn search_skills_honors_query_top_k_from_config() {
             catalog: None,
             plugin: None,
             kind: None,
+            rerank: None,
             min_score: None,
             description_max_chars: Some(150),
         })
@@ -518,6 +520,7 @@ fn search_skills_honors_query_rerank_false_from_config() {
             catalog: None,
             plugin: None,
             kind: None,
+            rerank: None,
             min_score: None,
             description_max_chars: Some(150),
         })

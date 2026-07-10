@@ -19,7 +19,8 @@
 //!
 //! 1. Explicit per-invocation flag / `QueryArgs` field  (`Some(…)`)
 //! 2. `[query]` section in `~/.tome/config.toml`
-//! 3. Built-in default (top_k = 10 / rerank = true / no strict threshold)
+//! 3. Implicit `[reranker]` provider enable (rerank only, #502)
+//! 4. Built-in default (top_k = 10 / rerank = false / no strict threshold)
 
 use tome::cli::QueryArgs;
 use tome::commands::query::{QueryDeps, ScoringMode, resolve_query_args, run_with_deps};
@@ -127,6 +128,7 @@ fn base_args() -> QueryArgs {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: false,
         strict: false,
         min_score: None,
@@ -135,7 +137,7 @@ fn base_args() -> QueryArgs {
 
 #[test]
 fn resolve_top_k_none_falls_through_to_builtin_default() {
-    let resolved = resolve_query_args(base_args(), &QueryConfig::default());
+    let resolved = resolve_query_args(base_args(), &QueryConfig::default(), false);
     assert_eq!(
         resolved.top_k,
         Some(10),
@@ -149,7 +151,7 @@ fn resolve_top_k_from_config_wins_when_flag_absent() {
         top_k: Some(3),
         ..QueryConfig::default()
     };
-    let resolved = resolve_query_args(base_args(), &qcfg);
+    let resolved = resolve_query_args(base_args(), &qcfg, false);
     assert_eq!(
         resolved.top_k,
         Some(3),
@@ -167,7 +169,7 @@ fn resolve_top_k_flag_beats_config() {
         top_k: Some(7),
         ..base_args()
     };
-    let resolved = resolve_query_args(args, &qcfg);
+    let resolved = resolve_query_args(args, &qcfg, false);
     assert_eq!(
         resolved.top_k,
         Some(7),
@@ -175,12 +177,21 @@ fn resolve_top_k_flag_beats_config() {
     );
 }
 
+// ── rerank resolution (#502: OFF by default) ────────────────────────────────
+//
+// Precedence in `resolve_query_args`, highest to lowest:
+//   1. explicit per-invocation flag (`--rerank` / `--no-rerank`)
+//   2. `[query] rerank` config (explicit `Some`)
+//   3. implicit enable: a configured `[reranker]` provider (third arg = true)
+//   4. built-in default: OFF
+
 #[test]
-fn resolve_rerank_default_is_on() {
-    let resolved = resolve_query_args(base_args(), &QueryConfig::default());
+fn resolve_rerank_default_is_off() {
+    // #502: absent flag + absent config + no `[reranker]` provider → reranker OFF.
+    let resolved = resolve_query_args(base_args(), &QueryConfig::default(), false);
     assert!(
-        !resolved.no_rerank,
-        "absent flag + absent config → reranker ON (no_rerank = false)",
+        resolved.no_rerank,
+        "absent flag + absent config + no reranker provider → reranker OFF (no_rerank = true)",
     );
 }
 
@@ -190,7 +201,7 @@ fn resolve_rerank_config_false_disables_reranker() {
         rerank: Some(false),
         ..QueryConfig::default()
     };
-    let resolved = resolve_query_args(base_args(), &qcfg);
+    let resolved = resolve_query_args(base_args(), &qcfg, false);
     assert!(
         resolved.no_rerank,
         "config rerank = false must set no_rerank = true",
@@ -198,15 +209,60 @@ fn resolve_rerank_config_false_disables_reranker() {
 }
 
 #[test]
-fn resolve_rerank_config_true_keeps_reranker_on() {
+fn resolve_rerank_config_true_turns_reranker_on() {
+    // Explicit `[query] rerank = true` opts back in even though the default is off.
     let qcfg = QueryConfig {
         rerank: Some(true),
         ..QueryConfig::default()
     };
-    let resolved = resolve_query_args(base_args(), &qcfg);
+    let resolved = resolve_query_args(base_args(), &qcfg, false);
     assert!(
         !resolved.no_rerank,
-        "config rerank = true must keep no_rerank = false",
+        "config rerank = true must set no_rerank = false (reranker ON)",
+    );
+}
+
+#[test]
+fn resolve_rerank_implicit_enable_via_reranker_provider() {
+    // #502: a configured `[reranker]` provider (third arg = true) implicitly
+    // enables reranking even when `[query] rerank` is unset.
+    let resolved = resolve_query_args(base_args(), &QueryConfig::default(), true);
+    assert!(
+        !resolved.no_rerank,
+        "a configured [reranker] provider must implicitly enable reranking (no_rerank = false)",
+    );
+}
+
+#[test]
+fn resolve_rerank_config_wins_over_implicit_enable() {
+    // Explicit `[query] rerank = false` beats the implicit `[reranker]` enable:
+    // the user's stated intent (off) wins even with a provider configured.
+    let qcfg = QueryConfig {
+        rerank: Some(false),
+        ..QueryConfig::default()
+    };
+    let resolved = resolve_query_args(base_args(), &qcfg, true);
+    assert!(
+        resolved.no_rerank,
+        "explicit [query] rerank = false must beat the implicit [reranker] enable",
+    );
+}
+
+#[test]
+fn resolve_rerank_flag_forces_on_over_config_false() {
+    // Explicit `--rerank` forces reranking on even when config says off.
+    let qcfg = QueryConfig {
+        rerank: Some(false),
+        ..QueryConfig::default()
+    };
+    let args = QueryArgs {
+        rerank: true,
+        ..base_args()
+    };
+    let resolved = resolve_query_args(args, &qcfg, false);
+    assert!(
+        !resolved.no_rerank,
+        "--rerank flag must force reranking ON even when config says rerank = false",
     );
 }
 
@@ -220,7 +276,7 @@ fn resolve_no_rerank_flag_beats_config_true() {
         no_rerank: true,
         ..base_args()
     };
-    let resolved = resolve_query_args(args, &qcfg);
+    let resolved = resolve_query_args(args, &qcfg, false);
     assert!(
         resolved.no_rerank,
         "--no-rerank flag must force reranker off even when config says rerank = true",
@@ -228,8 +284,22 @@ fn resolve_no_rerank_flag_beats_config_true() {
 }
 
 #[test]
+fn resolve_no_rerank_flag_beats_implicit_enable() {
+    // #502: `--no-rerank` overrides even the implicit `[reranker]` enable.
+    let args = QueryArgs {
+        no_rerank: true,
+        ..base_args()
+    };
+    let resolved = resolve_query_args(args, &QueryConfig::default(), true);
+    assert!(
+        resolved.no_rerank,
+        "--no-rerank must force reranker off even when a [reranker] provider is configured",
+    );
+}
+
+#[test]
 fn resolve_strict_min_score_default_is_none() {
-    let resolved = resolve_query_args(base_args(), &QueryConfig::default());
+    let resolved = resolve_query_args(base_args(), &QueryConfig::default(), false);
     assert_eq!(
         resolved.min_score, None,
         "absent flag + absent config → min_score = None",
@@ -242,7 +312,7 @@ fn resolve_strict_min_score_from_config() {
         strict_min_score: Some(0.75),
         ..QueryConfig::default()
     };
-    let resolved = resolve_query_args(base_args(), &qcfg);
+    let resolved = resolve_query_args(base_args(), &qcfg, false);
     assert_eq!(
         resolved.min_score,
         Some(0.75),
@@ -260,7 +330,7 @@ fn resolve_strict_min_score_flag_beats_config() {
         min_score: Some(ALWAYS_PASS_THRESHOLD),
         ..base_args()
     };
-    let resolved = resolve_query_args(args, &qcfg);
+    let resolved = resolve_query_args(args, &qcfg, false);
     assert_eq!(
         resolved.min_score,
         Some(ALWAYS_PASS_THRESHOLD),
@@ -302,6 +372,7 @@ fn top_k_none_falls_through_to_builtin_default() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -345,6 +416,7 @@ fn top_k_some_caps_results_at_the_supplied_value() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -392,6 +464,7 @@ fn top_k_from_config_caps_results() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -438,6 +511,7 @@ fn explicit_top_k_flag_beats_config() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -492,6 +566,7 @@ fn no_rerank_flag_forces_reranker_off_regardless_of_config() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -519,7 +594,9 @@ fn config_rerank_false_disables_reranker_when_flag_absent() {
     };
 
     // Resolution: flag absent (no_rerank=false) → config (false) → reranker OFF.
-    let effective_rerank = config.query.rerank.unwrap_or(true); // = false
+    // #502: no `[reranker]` provider configured (implicit-enable = false).
+    let effective_rerank =
+        tome::commands::query::resolve_effective_rerank(config.query.rerank, false); // = false
     let reranker_ref: Option<&dyn Reranker> = if effective_rerank {
         Some(&reranker)
     } else {
@@ -543,6 +620,7 @@ fn config_rerank_false_disables_reranker_when_flag_absent() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: false,
         strict: false,
         min_score: None,
@@ -590,6 +668,7 @@ fn strict_min_score_from_config_is_applied_when_flag_absent() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: resolved_min_score,
@@ -635,6 +714,7 @@ fn explicit_min_score_flag_beats_config() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: resolved,
@@ -672,6 +752,7 @@ fn strict_min_score_defaults_to_mode_default_when_both_absent() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        rerank: false,
         no_rerank: true,
         strict: false,
         min_score: None,
@@ -837,4 +918,28 @@ fn existing_flags_still_parse_alongside_the_new_ones() {
     assert!(args.no_rerank);
     assert!(args.strict);
     assert_eq!(args.min_score, Some(0.25));
+}
+
+#[test]
+fn rerank_flag_parses() {
+    // #502: `--rerank` is the per-invocation enable counterpart to `--no-rerank`
+    // now that reranking is off by default.
+    let args = parse_query(&["tome", "query", "reset", "--rerank"]);
+    assert!(args.rerank, "--rerank must set the rerank flag");
+    assert!(!args.no_rerank, "--rerank must not set no_rerank");
+    // Absent by default.
+    let plain = parse_query(&["tome", "query", "reset"]);
+    assert!(!plain.rerank, "rerank flag defaults to false");
+    assert!(!plain.no_rerank, "no_rerank defaults to false");
+}
+
+#[test]
+fn rerank_and_no_rerank_are_mutually_exclusive() {
+    use clap::Parser;
+    // #502: passing both `--rerank` and `--no-rerank` is a clap conflict (exit 2).
+    let res = Cli::try_parse_from(["tome", "query", "reset", "--rerank", "--no-rerank"]);
+    assert!(
+        res.is_err(),
+        "--rerank and --no-rerank must be a parse conflict",
+    );
 }
