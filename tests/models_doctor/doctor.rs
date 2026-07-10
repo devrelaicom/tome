@@ -948,9 +948,14 @@ model = \"text-embedding-3-small\"
     let home = empty_home();
     let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
 
-    // Models are present, but the missing embedding credential escalates to
-    // Unhealthy (embedding is health-critical).
-    assert_eq!(report.embedder.state, "ok");
+    // Issue #499: with an embedding provider configured, the bundled embedder
+    // model row is `not_applicable` (the capability is provider-served, so the
+    // bundled model is genuinely unnecessary) — NOT the bundled `ok`/`missing`
+    // state, even though the model files were fabricated. The Unhealthy verdict
+    // here comes from the missing PROVIDER CREDENTIAL escalation
+    // (`apply_provider_credential_findings`, embedding is health-critical),
+    // which is orthogonal to the bundled-model row.
+    assert_eq!(report.embedder.state, "not_applicable");
     assert_eq!(
         report.overall,
         DoctorClassification::Unhealthy,
