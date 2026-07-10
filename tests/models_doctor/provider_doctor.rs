@@ -7,12 +7,41 @@
 //! cost-aware behaviour (bundled auto-reindex vs remote print-only) is asserted
 //! on the produced `SuggestedFix` records.
 
-use crate::common::{ToolEnv, fabricate_all_registry_models, paths_for};
+use crate::common::{
+    ToolEnv, fabricate_all_registry_models, fabricate_installed_models, paths_for,
+};
 use tempfile::TempDir;
 use tome::doctor;
+use tome::doctor::DoctorClassification;
+use tome::embedding::MODEL_REGISTRY;
 use tome::index::{self, OpenOptions};
 use tome::provider::http::{RawResponse, set_transport_override};
 use tome::workspace::{ResolvedScope, ScopeSource};
+
+/// Fabricate every registry model on disk EXCEPT the ones whose name matches
+/// `skip` — so the skipped capability's bundled model is genuinely absent and
+/// `check_model` would (without the issue-#499 provider-aware skip) report it
+/// `missing`. Used to prove that a provider-configured capability reads
+/// `not_applicable` even with no bundled model present, while the other two
+/// capabilities stay `ok`.
+fn fabricate_all_except(paths: &tome::paths::Paths, skip: &[&str]) {
+    let entries: Vec<&tome::embedding::ModelEntry> = MODEL_REGISTRY
+        .iter()
+        .filter(|e| !skip.contains(&e.name))
+        .collect();
+    fabricate_installed_models(paths, &entries);
+}
+
+/// The registry name of the active-default embedder / reranker / summariser
+/// (the entries `assemble_report` checks on a fresh install with no index DB).
+fn active_default_names() -> (&'static str, &'static str, &'static str) {
+    use tome::embedding::Profile;
+    (
+        tome::embedding::profile::embedder_for(Profile::DEFAULT).name,
+        tome::embedding::profile::reranker_for(Profile::DEFAULT).name,
+        tome::summarise::registry::summariser_entry().name,
+    )
+}
 
 fn global_scope() -> ResolvedScope {
     ResolvedScope {
@@ -322,5 +351,235 @@ fn corrupt_index_no_finding_when_no_meta_dim() {
             .iter()
             .all(|f| !f.diagnosis.contains("corrupt-remote-index")),
         "absent meta dim → not applicable, no finding"
+    );
+}
+
+// ---- Issue #499: provider-served capability → bundled model not_applicable --
+
+#[test]
+fn embedding_provider_makes_bundled_embedder_not_applicable() {
+    // A configured embedding provider means the bundled embedder is genuinely
+    // unnecessary. Leave the embedder absent (fabricate the other two) so the
+    // pre-fix behaviour would be `missing` → Unhealthy. After the fix the row
+    // must read `not_applicable`, `overall` must NOT be Unhealthy, and there
+    // must be no "download model" fix for the embedder.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    let (embedder_name, _rr, _s) = active_default_names();
+    fabricate_all_except(&paths, &[embedder_name]);
+    write_config(
+        &paths,
+        r#"
+[providers.openai]
+kind = "openai"
+api_key = "sk-inline-key"
+
+[embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+"#,
+    );
+    let home = empty_home();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+
+    assert_eq!(
+        report.embedder.state, "not_applicable",
+        "embedding provider configured → bundled embedder is not_applicable, not missing"
+    );
+    assert_ne!(
+        report.embedder.state, "missing",
+        "the unused bundled embedder must not be reported missing"
+    );
+    assert_ne!(
+        report.overall,
+        DoctorClassification::Unhealthy,
+        "a not_applicable embedder must not flip overall to unhealthy: {:?}",
+        report.overall,
+    );
+    assert!(
+        report
+            .suggested_fixes
+            .iter()
+            .all(|f| f.subsystem != "embedder"),
+        "no embedder download fix when a provider serves embedding",
+    );
+}
+
+#[test]
+fn reranker_provider_makes_bundled_reranker_not_applicable() {
+    // A configured reranker provider → the bundled reranker is unnecessary.
+    // Leave the reranker absent (fabricate the other two). Pre-fix this row
+    // would be `missing` → Degraded; post-fix it is `not_applicable` and does
+    // not degrade the verdict, with no download fix.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    let (_emb, reranker_name, _s) = active_default_names();
+    fabricate_all_except(&paths, &[reranker_name]);
+    write_config(
+        &paths,
+        r#"
+[providers.voyage]
+kind = "voyage"
+api_key = "vk"
+
+[reranker]
+provider = "voyage"
+model = "rerank-2"
+"#,
+    );
+    let home = empty_home();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+
+    assert_eq!(
+        report.reranker.state, "not_applicable",
+        "reranker provider configured → bundled reranker is not_applicable, not missing"
+    );
+    // Embedder + summariser are on disk → the only capability at risk is the
+    // reranker, which is now not_applicable → overall stays ok.
+    assert_eq!(
+        report.overall,
+        DoctorClassification::Ok,
+        "a not_applicable reranker (others healthy) leaves overall ok: {:?}",
+        report.overall,
+    );
+    assert!(
+        report
+            .suggested_fixes
+            .iter()
+            .all(|f| f.subsystem != "reranker"),
+        "no reranker download fix when a provider serves reranking",
+    );
+}
+
+#[test]
+fn summariser_provider_makes_bundled_summariser_not_applicable() {
+    // A configured summariser provider → the bundled summariser is
+    // unnecessary. Leave the summariser absent (fabricate the other two).
+    // Pre-fix this row would be `missing` → Degraded; post-fix it is
+    // `not_applicable` with no download fix and overall stays ok.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    let (_emb, _rr, summariser_name) = active_default_names();
+    fabricate_all_except(&paths, &[summariser_name]);
+    write_config(
+        &paths,
+        r#"
+[providers.openai]
+kind = "openai"
+api_key = "sk-inline-key"
+
+[summariser]
+provider = "openai"
+model = "gpt-4o-mini"
+"#,
+    );
+    let home = empty_home();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+
+    assert_eq!(
+        report.summariser.state, "not_applicable",
+        "summariser provider configured → bundled summariser is not_applicable, not missing"
+    );
+    assert_eq!(
+        report.overall,
+        DoctorClassification::Ok,
+        "a not_applicable summariser (others healthy) leaves overall ok: {:?}",
+        report.overall,
+    );
+    assert!(
+        report
+            .suggested_fixes
+            .iter()
+            .all(|f| f.subsystem != "summariser"),
+        "no summariser download fix when a provider serves summarisation",
+    );
+}
+
+#[test]
+fn all_capabilities_provider_served_with_no_bundled_models_is_ok() {
+    // Every capability points at a remote provider and NO bundled model is on
+    // disk. All three rows read `not_applicable`, no model download fixes are
+    // emitted, and overall is ok — the pure "BYOM everything" case.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    // Deliberately fabricate nothing.
+    write_config(
+        &paths,
+        r#"
+[providers.openai]
+kind = "openai"
+api_key = "sk-inline-key"
+
+[providers.voyage]
+kind = "voyage"
+api_key = "vk"
+
+[embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+
+[reranker]
+provider = "voyage"
+model = "rerank-2"
+
+[summariser]
+provider = "openai"
+model = "gpt-4o-mini"
+"#,
+    );
+    let home = empty_home();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+
+    assert_eq!(report.embedder.state, "not_applicable");
+    assert_eq!(report.reranker.state, "not_applicable");
+    assert_eq!(report.summariser.state, "not_applicable");
+    assert_eq!(
+        report.overall,
+        DoctorClassification::Ok,
+        "all capabilities provider-served, no bundled models → overall ok: {:?}",
+        report.overall,
+    );
+    for cap in ["embedder", "reranker", "summariser"] {
+        assert!(
+            report.suggested_fixes.iter().all(|f| f.subsystem != cap),
+            "no `{cap}` download fix when a provider serves it",
+        );
+    }
+}
+
+#[test]
+fn no_provider_still_reports_missing_bundled_model() {
+    // Regression guard: without any provider, the bundled-model check is
+    // unchanged — an absent embedder is still `missing` (→ Unhealthy) with a
+    // download fix. This pins that the #499 skip is provider-GATED, not a
+    // blanket suppression.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    let (embedder_name, _rr, _s) = active_default_names();
+    fabricate_all_except(&paths, &[embedder_name]);
+    // No config.toml → bundled everything.
+    let home = empty_home();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+
+    assert_eq!(
+        report.embedder.state, "missing",
+        "no provider → absent bundled embedder is still missing"
+    );
+    assert_eq!(
+        report.overall,
+        DoctorClassification::Unhealthy,
+        "a missing embedder (no provider) is still unhealthy"
+    );
+    assert!(
+        report
+            .suggested_fixes
+            .iter()
+            .any(|f| f.subsystem == "embedder"),
+        "a missing bundled embedder still gets a download fix",
     );
 }

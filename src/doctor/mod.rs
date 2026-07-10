@@ -58,6 +58,53 @@ fn active_models(
         ))
     }
 }
+
+/// The `ModelHealth.state` value for a capability served by a remote provider.
+/// Reuses the doctor health vocabulary's `not_applicable` string (the same token
+/// [`SubsystemHealth::NotApplicable`] serialises to), so `status` / `doctor`
+/// consumers already recognise it. `classify` treats it as a no-op and
+/// `model_fix` yields no fix for it.
+const MODEL_NOT_APPLICABLE: &str = "not_applicable";
+
+/// Whether a bundled-model `ModelHealth.state` should trip the
+/// Degraded/Unhealthy classification. `ok` is healthy; `not_applicable` (issue
+/// #499 — the capability is served by a configured remote provider, so the
+/// bundled model is genuinely unnecessary) is a no-op; every other state
+/// (`missing` / `corrupt` / `checksum_mismatched`) needs repair.
+fn model_state_needs_repair(state: &str) -> bool {
+    state != "ok" && state != MODEL_NOT_APPLICABLE
+}
+
+/// Issue #499: the bundled-model check, provider-aware.
+///
+/// When `capability` resolves to a configured remote provider, the bundled
+/// local model is genuinely unnecessary for that capability, so `check_model`
+/// is skipped entirely and the row is marked `not_applicable` (registry
+/// name/version retained for a legible row) rather than reporting the unused
+/// model as `missing`. Otherwise this is exactly `check_model`.
+///
+/// A resolve ERROR (a malformed `[providers]` reference / illegal kind — exit 93
+/// on the foreground path) is surfaced by the dedicated provider surfaces
+/// (`build_provider_report` / `apply_provider_credential_findings`); here it
+/// degrades to "treat as bundled" so the model row is never silently suppressed
+/// on a broken provider config. Doctor never crashes (FR-124).
+fn check_model_provider_aware(
+    paths: &Paths,
+    entry: &crate::embedding::registry::ModelEntry,
+    cfg: &crate::config::Config,
+    capability: crate::provider::Capability,
+    verify: bool,
+) -> Result<crate::commands::status::ModelHealth, TomeError> {
+    if matches!(crate::provider::resolve(cfg, capability), Ok(Some(_))) {
+        return Ok(crate::commands::status::ModelHealth {
+            name: entry.name.to_owned(),
+            version: entry.version.to_owned(),
+            state: MODEL_NOT_APPLICABLE.to_owned(),
+        });
+    }
+    check_model(paths, entry, verify)
+}
+
 use crate::workspace::ResolvedScope;
 
 pub use report::{
@@ -120,14 +167,49 @@ pub fn assemble_report(
         Err(e) => return Err(e),
     };
 
+    // Defensive config load (doctor never crashes on a malformed config —
+    // the foreground command surfaces the parse error; here a malformed
+    // config degrades to defaults so the rest of the report still renders).
+    // Loaded up-front because the provider-aware bundled-model check below
+    // (issue #499) needs it; also reused by the Phase 12 provider surfaces.
+    let cfg = crate::config::load_or_default(paths);
+
     // B4: the doctor checks only the ACTIVE profile's models (resolved from
     // the index `meta`; default profile on a fresh install). Reporting every
     // profile's models would surface spurious "missing" rows after Phase 2.
+    //
+    // Issue #499: the bundled-model check is provider-aware. When a capability
+    // is served by a configured remote provider (embedder → Embedding,
+    // reranker → Reranker, summariser → Summariser), its bundled local model is
+    // genuinely unnecessary — so skip `check_model` and mark the row
+    // `not_applicable` rather than running the check and (spuriously) yielding
+    // `missing`. A `not_applicable` row does not contribute to the
+    // Degraded/Unhealthy classification and generates no "download model" fix
+    // (see `classify` + `model_fix`), which also suppresses the `--fix`
+    // download of the unused model (fixes derive from the report state).
     let (embedder_e, reranker_e) = active_models(paths)?;
     let summariser_e = summariser_entry();
-    let embedder = check_model(paths, embedder_e, verify)?;
-    let reranker = check_model(paths, reranker_e, verify)?;
-    let summariser = check_model(paths, summariser_e, verify)?;
+    let embedder = check_model_provider_aware(
+        paths,
+        embedder_e,
+        &cfg,
+        crate::provider::Capability::Embedding,
+        verify,
+    )?;
+    let reranker = check_model_provider_aware(
+        paths,
+        reranker_e,
+        &cfg,
+        crate::provider::Capability::Reranker,
+        verify,
+    )?;
+    let summariser = check_model_provider_aware(
+        paths,
+        summariser_e,
+        &cfg,
+        crate::provider::Capability::Summariser,
+        verify,
+    )?;
 
     // C-M2 / FR-561: doctor never crashes. `check_index` can return
     // `SchemaTooNew` (exit 52) or `IndexIntegrityCheckFailure` (exit 51)
@@ -251,10 +333,7 @@ pub fn assemble_report(
 
     // ---- Phase 12 / US4 additions (read-only) -----------------------
     //
-    // Defensive config load (doctor never crashes on a malformed config —
-    // the foreground command surfaces the parse error; here a malformed
-    // config degrades to defaults so the rest of the report still renders).
-    let cfg = crate::config::load_or_default(paths);
+    // `cfg` was loaded up-front (see the provider-aware model check above).
 
     // Provider report (FR-018): one row per configured remote provider a
     // capability references. `--verify` performs one lightweight round-trip
@@ -1122,6 +1201,11 @@ pub(crate) fn build_suggested_fixes_pub(
 /// `NotApplicable` harness subsystems (empty effective list) do NOT
 /// affect overall classification (FR-561). `detected_uninstalled_harnesses`
 /// is informational only.
+///
+/// Issue #499: a bundled-model row with state `not_applicable` (the capability
+/// is served by a configured remote provider) is likewise a classification
+/// no-op — the unused bundled model can be missing without degrading the
+/// verdict.
 #[allow(clippy::too_many_arguments)]
 fn classify(
     embedder: &crate::commands::status::ModelHealth,
@@ -1134,7 +1218,7 @@ fn classify(
     harness_rules: &[HarnessSubsystemReport],
     harness_mcp: &[HarnessSubsystemReport],
 ) -> DoctorClassification {
-    if embedder.state != "ok" {
+    if model_state_needs_repair(&embedder.state) {
         return DoctorClassification::Unhealthy;
     }
     if index.present && !index.integrity_ok {
@@ -1153,12 +1237,12 @@ fn classify(
         return DoctorClassification::Unhealthy;
     }
 
-    if reranker.state != "ok" {
+    if model_state_needs_repair(&reranker.state) {
         return DoctorClassification::Degraded;
     }
     // #429: summariser failure is Degraded, not Unhealthy — see the rule
     // list above. Placed with its severity peers (the reranker rules).
-    if summariser.state != "ok" {
+    if model_state_needs_repair(&summariser.state) {
         return DoctorClassification::Degraded;
     }
     if matches!(drift, DriftStatus::RerankerDrift { .. }) {
@@ -1616,6 +1700,14 @@ mod tests {
         }
     }
 
+    fn model_with_state(state: &str) -> ModelHealth {
+        ModelHealth {
+            name: "m".to_owned(),
+            version: "1".to_owned(),
+            state: state.to_owned(),
+        }
+    }
+
     fn healthy_index(integrity_ok: bool) -> IndexHealth {
         IndexHealth {
             present: true,
@@ -1673,6 +1765,72 @@ mod tests {
             DoctorClassification::Ok,
             "with the corrupt-index extinguished the install must classify Ok (exit 0)",
         );
+    }
+
+    /// Issue #499: `model_state_needs_repair` treats `not_applicable` (a
+    /// provider-served capability) exactly like `ok` — a classification no-op —
+    /// while `missing` / `corrupt` / `checksum_mismatched` still need repair.
+    #[test]
+    fn not_applicable_model_state_is_a_classification_no_op() {
+        assert!(!model_state_needs_repair("ok"));
+        assert!(!model_state_needs_repair("not_applicable"));
+        assert!(model_state_needs_repair("missing"));
+        assert!(model_state_needs_repair("corrupt"));
+        assert!(model_state_needs_repair("checksum_mismatched"));
+    }
+
+    /// Issue #499: a `not_applicable` embedder (its capability is provider-
+    /// served, bundled model absent) must NOT flip `overall` to Unhealthy — the
+    /// unused bundled model is genuinely unnecessary.
+    #[test]
+    fn not_applicable_embedder_does_not_drive_unhealthy() {
+        let overall = classify(
+            &model_with_state("not_applicable"),
+            &ok_model(),
+            &ok_model(),
+            &healthy_index(/* integrity_ok = */ true),
+            &DriftStatus::None,
+            &[],
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            overall,
+            DoctorClassification::Ok,
+            "a not_applicable embedder (provider-served) must not degrade the verdict",
+        );
+    }
+
+    /// Issue #499: `not_applicable` reranker + summariser rows are likewise
+    /// classification no-ops (Degraded is reserved for genuinely broken bundled
+    /// models, not provider-served ones).
+    #[test]
+    fn not_applicable_reranker_and_summariser_do_not_degrade() {
+        let overall = classify(
+            &ok_model(),
+            &model_with_state("not_applicable"),
+            &model_with_state("not_applicable"),
+            &healthy_index(/* integrity_ok = */ true),
+            &DriftStatus::None,
+            &[],
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(overall, DoctorClassification::Ok);
+    }
+
+    /// Issue #499: `model_fix` yields no "download model" fix for a
+    /// `not_applicable` row, so `doctor --fix` never tries to download the
+    /// unused bundled model.
+    #[test]
+    fn model_fix_is_none_for_not_applicable_state() {
+        assert!(model_fix(Subsystem::Embedder, &model_with_state("not_applicable")).is_none());
+        assert!(model_fix(Subsystem::Reranker, &model_with_state("not_applicable")).is_none());
+        assert!(model_fix(Subsystem::Summariser, &model_with_state("not_applicable")).is_none());
+        // Sanity: a genuinely-missing bundled model still gets a fix.
+        assert!(model_fix(Subsystem::Embedder, &model_with_state("missing")).is_some());
     }
 
     /// Issue #283: a pristine install (no catalogs, no plugins, no harness)
