@@ -1027,11 +1027,34 @@ fn import_md_entry(
     diagnostics.extend(rewritten.diagnostics);
     let description = resolved_description(&parsed.frontmatter, &rewritten.text);
 
+    let agent_meta = if kind == EntryKind::Agent {
+        parse_agent_meta(&content)
+    } else {
+        None
+    };
+
+    if kind == EntryKind::Agent {
+        let body = &rewritten.text;
+        for token in UNRESOLVED_AGENT_TOKENS {
+            if body.contains(token) {
+                diagnostics.push(Diagnostic::warning(
+                    rule::AGENT_UNRESOLVED_TOKEN,
+                    format!(
+                        "`{token}` in agent body will not be substituted by harness sync — \
+                         this token is only resolved on the MCP-served path. Remove the token \
+                         or replace it with a static path before syncing to a native agent harness."
+                    ),
+                ));
+            }
+        }
+    }
+
     Ok(EntryIr {
         kind,
         name: resolved,
         description: Some(description),
         frontmatter: parsed.frontmatter,
+        agent_meta,
         body: rewritten.text,
         supporting_files: Vec::new(),
         source_path: root.resolve(rel_file)?,

@@ -356,11 +356,18 @@ fn is_strict_blocking(rule_id: &str) -> bool {
             | cc::AGENT_LOSSY
             | cc::TOOL_RESTRICTION_DROPPED
             | cc::SKIPPED_ENTRY
+            // A nested entry skipped due to an unsafe flat name or a collision
+            // is content loss (the entry is absent from the converted artifact).
+            | cc::NESTED_ENTRY_SKIPPED
             | cc::MALFORMED_MCP
             | cc::CODEX_UNSUPPORTED
             | cc::REMOTE_PLUGIN_SKIPPED
             | cc::REMOTE_PLUGIN_FETCH_FAILED
             | cc::HOOKS_UNREADABLE
+            // A `componentPaths` override pointing to a missing/non-directory path
+            // means the component is effectively empty — all entries from that
+            // component are silently absent (content loss).
+            | cc::COMPONENT_PATH_OVERRIDE_MISSING_DIR
     )
         // A valid-UTF-8/invalid-JSON hooks.json is strict-blocking at convert time
         // because it would hard-fail `harness sync` at exit 43 later. The rule is
@@ -390,6 +397,12 @@ mod tests {
         assert!(is_strict_blocking(cc::UNSUPPORTED_COMPONENT));
         assert!(is_strict_blocking(cc::TOOL_RESTRICTION_DROPPED));
         assert!(is_strict_blocking(cc::HOOKS_UNREADABLE));
+        // A nested entry skipped due to an unsafe flat name or collision is
+        // content loss — the entry is absent from the converted artifact.
+        assert!(is_strict_blocking(cc::NESTED_ENTRY_SKIPPED));
+        // A componentPaths override pointing to a missing/non-directory path
+        // makes that component effectively empty (all entries absent).
+        assert!(is_strict_blocking(cc::COMPONENT_PATH_OVERRIDE_MISSING_DIR));
         // Symmetry: valid-UTF-8/invalid-JSON hooks.json is also strict-blocking
         // (would hard-fail harness sync at exit 43).
         assert!(is_strict_blocking(
@@ -404,6 +417,11 @@ mod tests {
         assert!(!is_strict_blocking(cc::DROPPED_FRONTMATTER));
         assert!(!is_strict_blocking(
             crate::authoring::rewrite::rule::PLUGIN_ROOT
+        ));
+        // Info-only rules (no content loss) also do NOT block.
+        assert!(!is_strict_blocking(cc::NESTED_ENTRY_FLATTENED));
+        assert!(!is_strict_blocking(
+            cc::COMPONENT_PATH_OVERRIDE_UNRECOGNISED
         ));
     }
 

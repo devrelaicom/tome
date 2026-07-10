@@ -1620,7 +1620,6 @@ fn skill_body_with_tome_plugin_dir_token_does_not_emit_agent_unresolved_warning(
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // G3: nested commands/agents subdirectories
 // ---------------------------------------------------------------------------
