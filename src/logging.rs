@@ -208,6 +208,49 @@ mod tests {
     }
 
     #[test]
+    fn cli_default_directive_filters_llama_target_semantically() {
+        // Assert the *semantics*, not just the string: build the real
+        // `EnvFilter` from the default directive and confirm the hyphenated
+        // `llama-cpp-2` target actually resolves as intended. The hyphen is
+        // unusual for `EnvFilter`, so this guards against a silent regression
+        // if `tracing-subscriber`'s directive matching changes on upgrade.
+        use tracing::Level;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let subscriber = tracing_subscriber::registry().with(EnvFilter::new(DEFAULT_CLI_DIRECTIVE));
+
+        tracing::subscriber::with_default(subscriber, || {
+            // The benign llama.cpp chatter (WARN/INFO) on the `llama-cpp-2`
+            // target is suppressed — this is the whole point of issue #501.
+            assert!(
+                !tracing::enabled!(target: "llama-cpp-2", Level::WARN),
+                "llama-cpp-2 WARN must be filtered out at the default level"
+            );
+            assert!(
+                !tracing::enabled!(target: "llama-cpp-2", Level::INFO),
+                "llama-cpp-2 INFO must be filtered out at the default level"
+            );
+
+            // A genuine llama.cpp ERROR still surfaces.
+            assert!(
+                tracing::enabled!(target: "llama-cpp-2", Level::ERROR),
+                "llama-cpp-2 ERROR must still pass the default filter"
+            );
+
+            // Unrelated targets keep the global `warn` default: their WARN
+            // passes and their INFO does not.
+            assert!(
+                tracing::enabled!(target: "tome", Level::WARN),
+                "non-llama WARN must still pass at the default level"
+            );
+            assert!(
+                !tracing::enabled!(target: "tome", Level::INFO),
+                "non-llama INFO must be filtered out at the default level"
+            );
+        });
+    }
+
+    #[test]
     fn explicit_verbosity_overrides_llama_demotion() {
         // `-vv` must restore full verbosity for the llama.cpp target too: the
         // flag branch wins outright, so the demotion in the default drops out.
