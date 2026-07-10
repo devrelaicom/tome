@@ -2,10 +2,10 @@
 //! tractable without spawning a real `rmcp` handshake or loading the
 //! 345 MB BGE ONNX models:
 //!
-//! - The `ToolRouter` advertises exactly the three tools the contract names
-//!   (`search_skills`, `get_skill_info`, `get_skill`). Phase 5 / US4.a
-//!   widened the two-tool surface to three by adding the middle-tier
-//!   `get_skill_info` between discovery and full-body fetch.
+//! - The `ToolRouter` advertises exactly the read-only tools the contract
+//!   names (`search_skills`, `get_skill`, `list_plugins`, `list_catalogs`,
+//!   `status`) plus the write-capable `meta` (#497). `get_skill` consolidates
+//!   the former `get_skill` + `get_skill_info` behind a `metadata_only` flag.
 //! - The advertised descriptions match the contract's normative wording
 //!   and do NOT enumerate any specific catalog / plugin / skill name
 //!   that lives in the test fixture (FR-108 — "the description must not

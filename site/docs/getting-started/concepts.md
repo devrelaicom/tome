@@ -120,11 +120,13 @@ Separately from the index, Tome sends anonymous, opt-out usage telemetry
 ## MCP server
 
 `tome mcp` runs Tome as an [MCP](https://modelcontextprotocol.io) server. It
-exposes search and skill-loading tools (`search_skills`, `get_skill`,
-`get_skill_info`), a `meta` tool that installs Tome's bundled meta skills into
-the host harness, plus user-invocable entries as MCP prompts — so an agent can
-find and load only the skills it needs at runtime rather than holding everything
-in context. See the [MCP server](../using-tome/mcp-server.md) page for wiring.
+exposes five read-only tools — `search_skills`, `get_skill` (with a
+`metadata_only` middle tier), `list_plugins`, `list_catalogs`, and `status` —
+plus a `meta` tool that installs Tome's bundled meta skills into the host
+harness, and user-invocable entries as MCP prompts — so an agent can find and
+load only the skills it needs at runtime, browse its inventory, and introspect
+its environment rather than holding everything in context. See the
+[MCP server](../using-tome/mcp-server.md) page for wiring.
 
 ## Meta skill
 

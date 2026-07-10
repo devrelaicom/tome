@@ -27,7 +27,7 @@ JetBrains AI · Zed · Kiro · Devin · Junie · Antigravity · Pi · Crush · G
 - **Catalogs → plugins → index.** `tome catalog add` registers a git-hosted catalog; `tome plugin enable` indexes a plugin's skills and commands into a local SQLite + vector store. `tome query` runs semantic (KNN + reranker) search across everything enabled — entirely on your machine.
 - **Named workspaces.** Central storage lives under `~/.tome/workspaces/<name>/`; a project binds to a workspace with a tiny `.tome/config.toml` pointer, so different projects can see different sets of plugins.
 - **Integration across 17 harnesses.** Tome writes each harness's rules file and MCP-config entry, delivers a tiered skill-routing directive at session start (via a session-start hook or a Tome-shipped plugin shim where supported, otherwise the rules file), and propagates per-plugin guardrails, hooks, and agent translations where the harness supports them. See the [harness-support matrix](#harness-support).
-- **An MCP server.** `tome mcp` runs a stdio Model Context Protocol server backed by the resolved workspace's index, exposing `search_skills` / `get_skill_info` / `get_skill` plus a `meta` tool, and your enabled plugins' user-invocable commands as MCP prompts.
+- **An MCP server.** `tome mcp` runs a stdio Model Context Protocol server backed by the resolved workspace's index, exposing five read-only tools — `search_skills`, `get_skill` (with a `metadata_only` middle tier), `list_plugins`, `list_catalogs`, and `status` — plus a `meta` tool, and your enabled plugins' user-invocable commands as MCP prompts.
 - **Authoring & conversion.** `tome {catalog,plugin,skill} create` scaffolds a new lint-clean artifact; `… convert` brings a Claude Code marketplace/plugin/skill, a Codex project, or a native `SKILL.md` into the native Tome format; `… lint` validates an artifact for CI.
 
 ## Install
@@ -154,7 +154,7 @@ tome mcp                                    # stdio MCP server; launched by your
                                             # diagnostics → ~/.tome/logs/mcp.log (JSON-lines)
 ```
 
-The server exposes a search-then-load flow — `search_skills` → `get_skill_info` → `get_skill` — plus a `meta` tool (installs a bundled meta skill into the host harness) and your plugins' user-invocable commands as MCP prompts. You normally don't launch this by hand: `tome harness use` / `tome sync` writes the wiring for you.
+The server exposes a search-then-load flow — `search_skills` → `get_skill` (pass `metadata_only: true` first to confirm a match, then load the body) — plus read-only `list_plugins`, `list_catalogs`, and `status` (with an optional `include_doctor`) for browsing the inventory and introspecting the environment, a `meta` tool (installs a bundled meta skill into the host harness), and your plugins' user-invocable commands as MCP prompts. You normally don't launch this by hand: `tome harness use` / `tome sync` writes the wiring for you.
 
 ### Health and maintenance
 
