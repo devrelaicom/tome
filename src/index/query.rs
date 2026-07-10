@@ -129,6 +129,41 @@ pub fn knn(
 /// scalar in the SELECT list and the ORDER BY, so filtering is done at JOIN
 /// level before the LIMIT is applied — no over-fetch / widen loop needed.
 ///
+/// # Why exact scan, not vec0 ANN
+///
+/// `skill_embeddings` is a plain `(skill_id INTEGER PRIMARY KEY, embedding
+/// BLOB)` table introduced in schema v6 (migration `phase_p11_dimension_free_embeddings`).
+/// It intentionally replaced the former `vec0(embedding FLOAT[384])` virtual
+/// table for two compounding reasons:
+///
+/// 1. **Dimension freedom.** The `vec0` DDL bakes the vector length into the
+///    schema (`FLOAT[384]`). Switching embedder profiles (small/medium/large,
+///    different output dimensions) would require a destructive DDL migration.
+///    A plain BLOB carries any length; the embedder-drift→reindex invariant
+///    keeps it consistent without touching the schema.
+///
+/// 2. **Filter-before-LIMIT correctness.** The `vec0` virtual table applied
+///    its `k` limit BEFORE our JOIN to `workspace_skills`, `skills.searchable`,
+///    and the optional catalog/plugin filters. This produced silently-short
+///    results whenever filtered-out vectors consumed the top-k window.
+///    The old workaround was an over-fetch + geometric-widen loop
+///    (`OVER_FETCH_MULTIPLIER = 4`, `WIDEN_GROWTH = 4`). The scalar approach
+///    here moves distance computation to after the JOIN-level filters, so
+///    `LIMIT` is applied to the already-filtered set — the result is always
+///    exactly `min(top_k, matches)` with a single SQL pass.
+///
+/// # When to revisit
+///
+/// An exact linear scan is O(n) in `skill_embeddings` row count. For Tome's
+/// expected corpus — hundreds to low thousands of plugin skills — this is
+/// fast: a 384-dimensional cosine distance is a tiny SIMD operation, and
+/// SQLite's indexed `workspace_skills` JOIN prunes the scanned rows to the
+/// scope-enabled subset before the ORDER BY + LIMIT. A rough rule of thumb:
+/// the crossover where ANN index overhead pays off is around 50 000–100 000
+/// vectors. If Tome ever serves corpora at that scale, revisit whether to
+/// maintain a parallel `vec0` shadow table for the ANN path (the scalar
+/// fallback would remain for filtered queries).
+///
 /// LOCKSTEP INVARIANT: `knn` binds params in the exact same dimension order
 /// (catalogs → plugins → kinds). The two must be changed together.
 fn build_knn_sql(filters: &QueryFilters<'_>) -> String {
