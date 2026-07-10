@@ -144,6 +144,7 @@ pub fn assemble_report(
         Err(TomeError::WorkspaceNotFound { .. }) => {
             use crate::workspace::{ScopeKind, WorkspaceInfo};
             WorkspaceInfo {
+                name: scope.scope.name().as_str().to_owned(),
                 scope: if scope.scope.is_global() {
                     ScopeKind::Global
                 } else {
@@ -2260,6 +2261,7 @@ mod tests {
         DoctorReport {
             tome_version: "0".to_owned(),
             workspace: WorkspaceInfo {
+                name: "global".to_owned(),
                 scope: ScopeKind::Global,
                 path: None,
                 source: ScopeSource::GlobalFallback,

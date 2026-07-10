@@ -71,6 +71,35 @@ fn info_global_with_no_state_reports_zero_counts() {
 }
 
 #[test]
+fn info_global_populates_workspace_name() {
+    // Issue #500: the report must carry the workspace NAME distinct from
+    // the resolved project path. The global fallback resolves to the
+    // privileged `global` workspace.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+
+    let info = assemble(&global_scope(), &paths).expect("assemble");
+    assert_eq!(info.name, "global");
+}
+
+#[test]
+fn info_workspace_scope_populates_name_not_path() {
+    // Issue #500: for a named workspace scope, `name` is the workspace
+    // name while `path` carries the resolved project path — the two must
+    // never be conflated.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    let workspace_root = tmp.path().join("ws");
+    std::fs::create_dir_all(workspace_root.join(".tome")).unwrap();
+    let info = assemble(&workspace_scope(&workspace_root), &paths).expect("assemble");
+    // `workspace_scope` binds the "test-ws" name to `workspace_root`.
+    assert_eq!(info.name, "test-ws");
+    assert_eq!(info.path.as_deref(), Some(workspace_root.as_path()));
+    // The name is the workspace name, never the project path.
+    assert_ne!(info.name, workspace_root.display().to_string());
+}
+
+#[test]
 fn info_global_with_enabled_plugin_reports_populated_counts() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
@@ -138,7 +167,7 @@ fn info_json_shape_is_byte_stable_for_bootstrap_not_yet() {
     let json = serde_json::to_string(&info).expect("serialise");
     assert_eq!(
         json,
-        r#"{"scope":"global","path":null,"source":"global_fallback","catalogs":0,"plugins_total":0,"plugins_enabled":0,"skills_indexed":0,"schema_version":null,"embedder":null,"enrolled_catalogs":[],"enabled_plugins":[],"bound_projects":[],"summary_cache":null}"#,
+        r#"{"name":"global","scope":"global","path":null,"source":"global_fallback","catalogs":0,"plugins_total":0,"plugins_enabled":0,"skills_indexed":0,"schema_version":null,"embedder":null,"enrolled_catalogs":[],"enabled_plugins":[],"bound_projects":[],"summary_cache":null}"#,
     );
 }
 
@@ -201,8 +230,13 @@ fn cli_workspace_info_prints_and_exits_zero() {
         String::from_utf8_lossy(&output.stderr),
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
+    // Issue #500: the `Workspace:` line shows the workspace NAME (here the
+    // privileged `global` fallback), not the resolved project path.
     assert!(stdout.contains("Workspace:"), "stdout={stdout}");
-    assert!(stdout.contains("(global)"), "stdout={stdout}");
+    assert!(
+        stdout.contains("Workspace:       global"),
+        "expected the workspace name on the Workspace line; stdout={stdout}"
+    );
 }
 
 #[test]

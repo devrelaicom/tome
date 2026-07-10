@@ -95,6 +95,12 @@ pub struct PluginDetail {
 /// human-readable `serde_json::to_string` rendering is deterministic.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkspaceInfo {
+    /// The workspace name (e.g. `midnight`, or `global` for the
+    /// privileged scope). Distinct from `path` — the human emitter shows
+    /// this on the `Workspace:` line, matching `tome workspace current`
+    /// and the `workspace` key in `.tome/config.toml`. Populated from the
+    /// `name` argument threaded into `compute_info`.
+    pub name: String,
     pub scope: ScopeKind,
     pub path: Option<PathBuf>,
     pub source: ScopeSource,

@@ -100,6 +100,7 @@ fn compute_info(
     // fires.
     if !paths.index_db.is_file() {
         return Ok(WorkspaceInfo {
+            name: name.as_str().to_owned(),
             scope: scope_kind,
             path,
             source,
@@ -141,6 +142,7 @@ fn compute_info(
         && v < index::SCHEMA_VERSION
     {
         return Ok(WorkspaceInfo {
+            name: name.as_str().to_owned(),
             scope: scope_kind,
             path,
             source,
@@ -170,6 +172,7 @@ fn compute_info(
         // names, the workspace-not-found verdict is correct.
         if name.is_reserved() {
             return Ok(WorkspaceInfo {
+                name: name.as_str().to_owned(),
                 scope: scope_kind,
                 path,
                 source,
@@ -247,6 +250,7 @@ fn compute_info(
     };
 
     Ok(WorkspaceInfo {
+        name: name.as_str().to_owned(),
         scope: scope_kind,
         path,
         source,
@@ -436,12 +440,17 @@ fn emit(info: &WorkspaceInfo, mode: Mode) -> Result<(), TomeError> {
 
 fn emit_human(info: &WorkspaceInfo) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
-    let scope_label = match (info.scope, info.path.as_ref()) {
-        (ScopeKind::Global, _) => "(global)".to_owned(),
-        (ScopeKind::Workspace, Some(p)) => p.display().to_string(),
-        (ScopeKind::Workspace, None) => "(named)".to_owned(),
-    };
-    writeln!(out, "Workspace:       {scope_label}")?;
+    // The `Workspace:` line shows the workspace NAME (consistent with
+    // `tome workspace current` and the `workspace` key in
+    // `.tome/config.toml`), never the resolved project path — that lives
+    // under its own `project:` line below.
+    writeln!(out, "Workspace:       {}", info.name)?;
+    // For a workspace scope the resolved project path (if any) is useful
+    // context; surface it under a distinct label so it never masquerades
+    // as the workspace name. The global scope has no project path.
+    if let (ScopeKind::Workspace, Some(p)) = (info.scope, info.path.as_ref()) {
+        writeln!(out, "  project:       {}", p.display())?;
+    }
     writeln!(out, "  resolved via:  {}", source_label(info.source))?;
     writeln!(out, "  catalogs:      {}", info.catalogs)?;
     writeln!(
