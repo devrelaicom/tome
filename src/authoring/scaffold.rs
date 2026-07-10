@@ -374,6 +374,7 @@ fn scaffold_hooks_plugin(plugin_name: &str, params: &CreateParams) -> Result<Plu
             },
         ],
         hooks_json: Some(hooks_json),
+        mcp_json: None,
         provenance: Provenance::local("scaffold", std::path::PathBuf::from(plugin_name)),
         diagnostics: Vec::new(),
     })
@@ -445,6 +446,7 @@ fn scaffold_mcp_plugin(plugin_name: &str, params: &CreateParams) -> Result<Plugi
         mcp_servers,
         hooks_files: Vec::new(),
         hooks_json: None,
+        mcp_json: Some(mcp_json_body),
         provenance: Provenance::local("scaffold", std::path::PathBuf::from(plugin_name)),
         diagnostics: Vec::new(),
     })

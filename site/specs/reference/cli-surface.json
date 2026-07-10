@@ -93,9 +93,11 @@
           "--dry-run",
           "--force",
           "--into",
+          "--kind",
           "--output",
           "--template",
-          "--verbose"
+          "--verbose",
+          "--yes"
         ],
         "convert": [
           "--allow",
