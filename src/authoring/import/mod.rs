@@ -81,4 +81,14 @@ pub mod rule {
     /// fires on the MCP-served path and not in native agent files. Emitted as
     /// a Warning so the author knows the token will not be resolved at runtime.
     pub const AGENT_UNRESOLVED_TOKEN: &str = "convert/agent-unresolved-token";
+    /// A nested `.md` file inside a `commands/` or `agents/` subdirectory was
+    /// flattened to a top-level entry name (`<sub>-<stem>`). Info.
+    pub const NESTED_ENTRY_FLATTENED: &str = "convert/nested-entry-flattened";
+    /// A nested `.md` file was skipped — either its flat name is unsafe or it
+    /// collides with another flat name. Warn (content loss).
+    pub const NESTED_ENTRY_SKIPPED: &str = "convert/nested-entry-skipped";
+    /// A `componentPaths` override was found in `plugin.json` but refers to an
+    /// unrecognised component. Dropped with Info.
+    pub const COMPONENT_PATH_OVERRIDE_UNRECOGNISED: &str =
+        "convert/component-path-override-unrecognised";
 }

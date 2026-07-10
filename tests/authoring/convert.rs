@@ -1619,3 +1619,283 @@ fn skill_body_with_tome_plugin_dir_token_does_not_emit_agent_unresolved_warning(
         "skills must NOT get the agent-unresolved-token diagnostic: {unresolved:#?}"
     );
 }
+
+
+// ---------------------------------------------------------------------------
+// G3: nested commands/agents subdirectories
+// ---------------------------------------------------------------------------
+
+/// A CC plugin with a nested command in `commands/git/commit.md` should be
+/// flattened to `git-commit` in the output and emit an Info diagnostic.
+#[test]
+fn nested_command_is_flattened_to_hyphenated_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"nested-cmd","version":"1.0.0","description":"nested"}"#,
+    )
+    .unwrap();
+    // Top-level command — should still work.
+    fs::create_dir(src.join("commands")).unwrap();
+    fs::write(
+        src.join("commands/top.md"),
+        "---\nname: top\ndescription: top-level command\n---\nDo top\n",
+    )
+    .unwrap();
+    // Nested command: commands/git/commit.md
+    fs::create_dir(src.join("commands/git")).unwrap();
+    fs::write(
+        src.join("commands/git/commit.md"),
+        "---\nname: commit\ndescription: stage and commit\n---\ngit commit $1\n",
+    )
+    .unwrap();
+    // Nested command in another subdir: commands/ci/build.md
+    fs::create_dir(src.join("commands/ci")).unwrap();
+    fs::write(
+        src.join("commands/ci/build.md"),
+        "---\ndescription: run CI build\n---\nci build\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // Top-level command unaffected.
+    assert!(
+        target.join("commands/top.md").exists(),
+        "top-level command must be emitted: {:?}",
+        target.join("commands")
+    );
+    // Nested commands flattened.
+    assert!(
+        target.join("commands/git-commit.md").exists(),
+        "nested command git/commit.md must be flattened to git-commit.md"
+    );
+    assert!(
+        target.join("commands/ci-build.md").exists(),
+        "nested command ci/build.md must be flattened to ci-build.md"
+    );
+    // Legacy positional $1 rewritten to $0 in the nested command body.
+    let body = fs::read_to_string(target.join("commands/git-commit.md")).unwrap();
+    assert!(
+        body.contains("$0"),
+        "legacy positional in nested command must be rewritten: {body}"
+    );
+    // Info diagnostic for the flattening.
+    let has_flattened_diag = outcome
+        .report
+        .diagnostics
+        .iter()
+        .any(|d| d.rule_id == "convert/nested-entry-flattened");
+    assert!(
+        has_flattened_diag,
+        "must emit convert/nested-entry-flattened diagnostic: {:?}",
+        outcome.report.diagnostics
+    );
+}
+
+/// Two nested commands that would produce the same flat name produce a Warning
+/// and the second one is skipped (forward-progress).
+///
+/// Collision example: `commands/x/y-z.md` (sub="x", stem="y-z") → "x-y-z"
+///                    `commands/x-y/z.md`  (sub="x-y", stem="z") → "x-y-z"
+/// The separator can land at different positions across subdirectories, so
+/// collisions are possible even between unrelated paths.
+#[test]
+fn nested_command_collision_warns_and_skips_second() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"col","version":"1.0.0","description":"collision test"}"#,
+    )
+    .unwrap();
+    // commands/x/y-z.md   → flat name "x-y-z"
+    fs::create_dir_all(src.join("commands/x")).unwrap();
+    fs::write(
+        src.join("commands/x/y-z.md"),
+        "---\ndescription: first\n---\nfirst\n",
+    )
+    .unwrap();
+    // commands/x-y/z.md   → flat name "x-y-z" (collision!)
+    fs::create_dir_all(src.join("commands/x-y")).unwrap();
+    fs::write(
+        src.join("commands/x-y/z.md"),
+        "---\ndescription: second\n---\nsecond\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // The flat name "x-y-z" should have been emitted exactly once (first wins).
+    assert!(
+        target.join("commands/x-y-z.md").exists(),
+        "first entry wins"
+    );
+    // The collision diagnostic must be present.
+    let has_skip_diag = outcome
+        .report
+        .diagnostics
+        .iter()
+        .any(|d| d.rule_id == "convert/nested-entry-skipped");
+    assert!(
+        has_skip_diag,
+        "must emit convert/nested-entry-skipped on collision: {:?}",
+        outcome.report.diagnostics
+    );
+}
+
+/// Deeply nested (sub-sub-dir) `.md` files that cannot be reached by the one-
+/// level walk are not silently imported; no entries, no panic.
+#[test]
+fn sub_sub_dir_entries_are_not_imported_silently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"deep","version":"1.0.0","description":"deep"}"#,
+    )
+    .unwrap();
+    // Two levels deep — not picked up.
+    fs::create_dir_all(src.join("commands/a/b")).unwrap();
+    fs::write(
+        src.join("commands/a/b/deep.md"),
+        "---\ndescription: deep\n---\ndeep\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // No command emitted (the sub-sub-dir file is skipped at the first subdir
+    // level because `commands/a` IS a directory and `b` inside it is also a
+    // directory — the nested walk skips dirs).
+    assert!(
+        !target.join("commands").exists()
+            || fs::read_dir(target.join("commands"))
+                .map(|mut r| r.next().is_none())
+                .unwrap_or(true),
+        "sub-sub-dir entries must not be emitted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// G6: componentPaths overrides in plugin.json
+// ---------------------------------------------------------------------------
+
+/// A plugin with `componentPaths.commands` overriding the default `commands/`
+/// directory should import commands from the overridden path.
+#[test]
+fn component_path_commands_override_is_followed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"ovr","version":"1.0.0","description":"override","componentPaths":{"commands":"./src/commands"}}"#,
+    )
+    .unwrap();
+    // Commands live at the overridden path, not at `commands/`.
+    fs::create_dir_all(src.join("src/commands")).unwrap();
+    fs::write(
+        src.join("src/commands/deploy.md"),
+        "---\nname: deploy\ndescription: deploy it\n---\nDeploy\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // The overridden command must be present.
+    assert!(
+        target.join("commands/deploy.md").exists(),
+        "command from componentPaths.commands override must be imported"
+    );
+}
+
+/// A plugin with `componentPaths.hooks` pointing directly at a `hooks.json`
+/// file should read hooks from that file.
+#[test]
+fn component_path_hooks_json_override_is_followed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"hooksovr","version":"1.0.0","description":"hooks override","componentPaths":{"hooks":"./config/hooks.json"}}"#,
+    )
+    .unwrap();
+    // The overridden hooks.json lives at ./config/hooks.json.
+    fs::create_dir(src.join("config")).unwrap();
+    fs::write(
+        src.join("config/hooks.json"),
+        br#"{"PreToolUse":[{"hooks":[{"type":"command","command":"echo pre"}]}]}"#,
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // The hooks.json must be present under hooks/ in the output.
+    assert!(
+        target.join("hooks/hooks.json").exists(),
+        "hooks.json from componentPaths.hooks override must be emitted"
+    );
+    // The hooks.json text is carried in the IR (hooks_json is Some).
+    // Since the hooks text was valid, no HOOKS_UNREADABLE warning should appear.
+    let has_unreadable_warn = outcome
+        .report
+        .diagnostics
+        .iter()
+        .any(|d| d.rule_id == "convert/hooks-unreadable");
+    assert!(
+        !has_unreadable_warn,
+        "valid hooks.json at override path must not produce hooks-unreadable: {:?}",
+        outcome.report.diagnostics
+    );
+}
+
+/// An unrecognised `componentPaths` key (e.g. `componentPaths.mcpServers`)
+/// produces an Info diagnostic and is otherwise harmlessly dropped.
+#[test]
+fn unrecognised_component_path_key_produces_info_diagnostic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"unk","version":"1.0.0","description":"unknown key","componentPaths":{"mcpServers":"./custom-mcp"}}"#,
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+
+    let has_info = outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/component-path-override-unrecognised"
+            && d.message.contains("mcpServers")
+    });
+    assert!(
+        has_info,
+        "unrecognised componentPaths key must produce convert/component-path-override-unrecognised: {:?}",
+        outcome.report.diagnostics
+    );
+    // Conversion still succeeds.
+    assert!(out.join(&outcome.final_name).exists());
+}
