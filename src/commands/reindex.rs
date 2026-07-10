@@ -121,6 +121,28 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
         // enrolled-but-empty catalog, or the whole-index form on a fresh
         // install). A glob that matched zero already errored in
         // `resolve_selection` (Usage/2), so this branch is only the benign case.
+        //
+        // Issue #498: on a WHOLE-INDEX empty reindex we must still adopt the
+        // active embedder as the baseline before returning — otherwise a model
+        // change on an empty index (no plugins enabled yet) is a dead end: the
+        // drift guard (`guard_embedder_drift`, 41/42) refuses `plugin enable`
+        // and directs the user to reindex, but a whole-index reindex on an empty
+        // corpus hits THIS branch and returns before the meta stamp below (the
+        // sole drift resolver), so the drift never clears. There are zero
+        // vectors to regenerate, but the global `meta` embedder identity +
+        // `embedder_dimension` are reconciled to the active embedder so the
+        // stored baseline matches the configured one and the drift clears. An
+        // empty index has no stored vectors that could mismatch the new
+        // embedder, so adopting it as the baseline is always safe.
+        //
+        // This is GATED on `whole_index`: a SCOPED empty selection (e.g. an
+        // enrolled-but-empty catalog) keeps the current no-stamp behaviour, per
+        // the "never stamp after a partial re-embed" invariant — stamping a
+        // global dimension after a partial run advertises a dimension the
+        // out-of-scope rows may not carry.
+        if whole_index {
+            stamp_active_embedder_on_empty_index(&paths, &cfg)?;
+        }
         // Exit 0 with a small notice so the user knows this wasn't a silent
         // failure.
         if mode == Mode::Human {
@@ -225,6 +247,61 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
     }
 
     emit_label(&label, &aggregate, mode)
+}
+
+/// Issue #498: adopt the active embedder as the global `meta` baseline on a
+/// WHOLE-INDEX reindex whose corpus is empty (no enabled plugins). This is the
+/// empty-corpus analogue of the stamp + dimension reconcile the non-empty
+/// whole-index path performs after its embed loop (see `run_inner`) — the sole
+/// resolver for embedder drift when the index has no vectors yet.
+///
+/// There is nothing to re-embed, so no [`Embedder`](crate::embedding::Embedder)
+/// is constructed (avoiding a model download/load just to stamp identity). Only
+/// three inputs are needed: the configured active-embedder identity, whether the
+/// active embedder is remote, and the pinned `[embedding] dimensions` (the
+/// established-from-first-embed dimension is necessarily unknown here — nothing
+/// was embedded — so it contributes `None`).
+///
+/// The caller GATES this on `whole_index`; it must never run after a scoped
+/// selection. On an empty corpus stamping is unconditionally safe (there are no
+/// stored vectors that could mismatch the adopted identity or dimension), so —
+/// unlike the non-empty path's `whole_index && force` stamp gate — the stamp is
+/// applied whenever this is reached, ensuring the drift clears even without an
+/// explicit `--force`.
+fn stamp_active_embedder_on_empty_index(
+    paths: &Paths,
+    cfg: &crate::config::Config,
+) -> Result<(), TomeError> {
+    let policy_conn = {
+        let (e_seed, r_seed, s_seed) = registry_seeds();
+        index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: e_seed,
+                reranker: r_seed,
+                summariser: s_seed,
+                profile: None,
+            },
+        )?
+    };
+    let configured = meta::active_embedder(&policy_conn)?;
+    let active_embedder_seed = crate::embedding::embedder_seed(cfg, configured)?;
+    let configured_ident = ModelIdent {
+        name: active_embedder_seed.name.clone(),
+        version: active_embedder_seed.version.clone(),
+    };
+    let remote_embedding =
+        crate::provider::resolve(cfg, crate::provider::Capability::Embedding)?.is_some();
+
+    stamp_embedder_after_whole_index(&policy_conn, &configured_ident)?;
+
+    // No embed happened, so there is no established dimension; only a pinned
+    // `[embedding] dimensions` contributes. `reconcile_embedder_dimension`
+    // persists it on the remote path (or leaves any prior value untouched when
+    // unset) and deletes any stale remote value on the bundled path.
+    let persisted_dim = cfg.embedding.dimensions.map(|d| d as usize);
+    reconcile_embedder_dimension(&policy_conn, remote_embedding, persisted_dim)?;
+    Ok(())
 }
 
 /// Resolved scope. `Catalog`s and `Plugin`s carry strings rather than
