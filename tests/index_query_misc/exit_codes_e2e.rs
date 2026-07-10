@@ -397,9 +397,8 @@ fn workspace_use_harness_clash_exits_19_without_force() {
     let project = env.home_path().join("project");
     fs::create_dir_all(&project).expect("create project");
 
-    // User-owned `tome` entry in .claude/settings.json.
-    let claude_dir = project.join(".claude");
-    fs::create_dir_all(&claude_dir).expect("create .claude");
+    // User-owned `tome` entry in .mcp.json (claude-code's MCP config path
+    // since issue #496; previously .claude/settings.json).
     let conflict = serde_json::json!({
         "mcpServers": {
             "tome": {
@@ -409,7 +408,7 @@ fn workspace_use_harness_clash_exits_19_without_force() {
         }
     });
     fs::write(
-        claude_dir.join("settings.json"),
+        project.join(".mcp.json"),
         serde_json::to_string_pretty(&conflict).unwrap(),
     )
     .expect("write conflict");
@@ -564,9 +563,8 @@ fn doctor_fix_user_owned_mcp_exits_75() {
         .expect("insert workspace_projects row");
     }
 
-    // Pre-populate a user-owned `tome` entry in .claude/settings.json.
-    let claude_dir = project.join(".claude");
-    fs::create_dir_all(&claude_dir).expect("create .claude");
+    // Pre-populate a user-owned `tome` entry in .mcp.json (claude-code's
+    // MCP config path since issue #496).
     let conflict = serde_json::json!({
         "mcpServers": {
             "tome": {
@@ -576,7 +574,7 @@ fn doctor_fix_user_owned_mcp_exits_75() {
         }
     });
     fs::write(
-        claude_dir.join("settings.json"),
+        project.join(".mcp.json"),
         serde_json::to_string_pretty(&conflict).unwrap(),
     )
     .expect("write conflict");
@@ -600,7 +598,7 @@ fn doctor_fix_user_owned_mcp_exits_75() {
     );
 
     // The user-owned entry MUST survive a non-forced --fix.
-    let after = fs::read_to_string(claude_dir.join("settings.json")).expect("read settings.json");
+    let after = fs::read_to_string(project.join(".mcp.json")).expect("read .mcp.json");
     assert!(
         after.contains("\"evil\""),
         "user-owned `evil` command must survive non-forced --fix; got: {after}",
@@ -664,8 +662,8 @@ fn doctor_fix_force_user_owned_mcp_exits_0() {
         .expect("insert workspace_projects row");
     }
 
-    let claude_dir = project.join(".claude");
-    fs::create_dir_all(&claude_dir).expect("create .claude");
+    // Pre-populate a user-owned `tome` entry in .mcp.json (claude-code's
+    // MCP config path since issue #496).
     let conflict = serde_json::json!({
         "mcpServers": {
             "tome": {
@@ -675,7 +673,7 @@ fn doctor_fix_force_user_owned_mcp_exits_0() {
         }
     });
     fs::write(
-        claude_dir.join("settings.json"),
+        project.join(".mcp.json"),
         serde_json::to_string_pretty(&conflict).unwrap(),
     )
     .expect("write conflict");
@@ -696,7 +694,8 @@ fn doctor_fix_force_user_owned_mcp_exits_0() {
         String::from_utf8_lossy(&out.stderr),
     );
 
-    let after = fs::read_to_string(claude_dir.join("settings.json")).expect("read settings.json");
+    // Issue #496: the MCP entry is now in .mcp.json, not .claude/settings.json.
+    let after = fs::read_to_string(project.join(".mcp.json")).expect("read .mcp.json");
     assert!(
         !after.contains("\"evil\""),
         "user-owned `evil` command must be replaced; got: {after}",

@@ -24,12 +24,12 @@ fn harness_bare_entry_serialises_byte_stable() {
         description: "Claude Code".to_string(),
         detected: true,
         rules_file: Some(PathBuf::from("/proj/CLAUDE.md")),
-        mcp_config: PathBuf::from("/home/u/.claude/settings.json"),
+        mcp_config: PathBuf::from("/proj/.mcp.json"),
     };
     let json = serde_json::to_string(&entry).expect("serialise");
     assert_eq!(
         json,
-        r#"{"name":"claude-code","description":"Claude Code","detected":true,"rules_file":"/proj/CLAUDE.md","mcp_config":"/home/u/.claude/settings.json"}"#,
+        r#"{"name":"claude-code","description":"Claude Code","detected":true,"rules_file":"/proj/CLAUDE.md","mcp_config":"/proj/.mcp.json"}"#,
         "HarnessBareEntry wire shape drift",
     );
 }

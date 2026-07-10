@@ -127,11 +127,13 @@ mod claude_code_tests {
     }
 
     #[test]
-    fn mcp_config_path_is_project_dot_claude_settings_json() {
+    fn mcp_config_path_is_project_dot_mcp_json() {
+        // Issue #496: Claude Code 2.x reads .mcp.json at the project root,
+        // not mcpServers inside .claude/settings.json.
         let project = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         let path = CLAUDE_CODE.mcp_config_path(project.path(), home.path());
-        assert_eq!(path, project.path().join(".claude/settings.json"));
+        assert_eq!(path, project.path().join(".mcp.json"));
         assert!(
             !path.starts_with(home.path()),
             "claude-code MCP config is per-project — must NOT live under home"

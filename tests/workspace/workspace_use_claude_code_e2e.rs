@@ -59,7 +59,7 @@ impl Fixture {
 
     /// Variant that pre-creates files under the project root before
     /// binding — used to verify "preserve surrounding content" behaviour
-    /// for AGENTS.md / `.claude/settings.json`.
+    /// for AGENTS.md / `.mcp.json` / `.claude/settings.json` (legacy).
     fn build_with_existing(workspace_name: &str, files: &[(&str, &str)]) -> Self {
         let home = TempDir::new().expect("home tempdir");
         let project = TempDir::new().expect("project tempdir");
@@ -214,8 +214,9 @@ fn bind_then_sync_writes_claude_code_artefacts() {
         "AGENTS.md must NOT be created for claude-code (Phase 6 correction)"
     );
 
-    // 4. .claude/settings.json carries the canonical Tome MCP entry.
-    let settings = fx.project_path.join(".claude/settings.json");
+    // 4. .mcp.json at project root carries the canonical Tome MCP entry
+    //    (issue #496: Claude Code 2.x reads .mcp.json, not .claude/settings.json).
+    let settings = fx.project_path.join(".mcp.json");
     let parsed = read_json(&settings);
     let tome_entry = parsed
         .get("mcpServers")
@@ -283,7 +284,7 @@ fn rebind_to_different_workspace_updates_mcp_args() {
     .expect("sync after rebind");
 
     // MCP args reflect the new workspace.
-    let settings = fx.project_path.join(".claude/settings.json");
+    let settings = fx.project_path.join(".mcp.json");
     let parsed = read_json(&settings);
     let args = parsed["mcpServers"]["tome"]["args"]
         .as_array()
@@ -338,12 +339,13 @@ fn existing_claude_md_preserves_surrounding_content() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Pre-existing .claude/settings.json: other MCP entries preserved,
-//    Tome entry added; insertion order preserved.
+// 4. Pre-existing .mcp.json: other MCP entries preserved, Tome entry
+//    added; insertion order preserved. (Issue #496: MCP config moved from
+//    .claude/settings.json to .mcp.json.)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn existing_claude_settings_json_preserves_other_entries() {
+fn existing_mcp_json_preserves_other_entries() {
     let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -355,11 +357,11 @@ fn existing_claude_settings_json_preserves_other_entries() {
     }
   }
 }"#;
-    let fx = Fixture::build_with_existing("test-ws", &[(".claude/settings.json", prior)]);
+    let fx = Fixture::build_with_existing("test-ws", &[(".mcp.json", prior)]);
     fx.bind_then_sync();
 
-    let settings = fx.project_path.join(".claude/settings.json");
-    let parsed = read_json(&settings);
+    let mcp_json = fx.project_path.join(".mcp.json");
+    let parsed = read_json(&mcp_json);
     let servers = parsed.get("mcpServers").expect("mcpServers");
 
     // The user-owned `other` entry must survive.
@@ -386,8 +388,62 @@ fn existing_claude_settings_json_preserves_other_entries() {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. Legacy migration: a pre-#496 .claude/settings.json Tome entry is
+//     cleaned up on the first sync under Tome ≥ next; non-Tome entries in
+//     that file are left alone.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn legacy_claude_settings_json_tome_entry_removed_on_sync() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Simulate what Tome ≤ 0.7.16 wrote: a Tome-owned entry inside
+    // .claude/settings.json alongside a user-owned `other` entry.
+    let legacy_settings = r#"{
+  "mcpServers": {
+    "other": {
+      "command": "elsewhere",
+      "args": []
+    },
+    "tome": {
+      "command": "tome",
+      "args": ["mcp", "--workspace", "test-ws", "--harness", "claude-code"]
+    }
+  }
+}"#;
+    let fx = Fixture::build_with_existing("test-ws", &[(".claude/settings.json", legacy_settings)]);
+    fx.bind_then_sync();
+
+    // The Tome entry must now live in .mcp.json.
+    let mcp_json = fx.project_path.join(".mcp.json");
+    let parsed = read_json(&mcp_json);
+    assert!(
+        tome::harness::launcher::looks_like_tome_launcher(
+            parsed["mcpServers"]["tome"]["command"].as_str().unwrap()
+        ),
+        ".mcp.json must contain the Tome entry after migration",
+    );
+
+    // The legacy .claude/settings.json Tome entry must have been cleaned up;
+    // the non-Tome `other` entry is preserved.
+    let old_settings = fx.project_path.join(".claude/settings.json");
+    let old_parsed = read_json(&old_settings);
+    assert!(
+        old_parsed["mcpServers"]["tome"].is_null(),
+        "legacy .claude/settings.json must not contain the Tome entry after migration; \
+         got: {}",
+        old_parsed,
+    );
+    assert_eq!(
+        old_parsed["mcpServers"]["other"]["command"], "elsewhere",
+        "non-Tome entries in .claude/settings.json must survive migration",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 5. Idempotent re-sync: a second sync (no bind) leaves CLAUDE.md and
-//    .claude/settings.json mtimes unchanged (FR-525).
+//    .mcp.json mtimes unchanged (FR-525). (Issue #496: was .claude/settings.json)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -399,10 +455,10 @@ fn idempotent_resync_no_disk_changes() {
     fx.bind_then_sync();
 
     let claude_md = fx.project_path.join("CLAUDE.md");
-    let settings = fx.project_path.join(".claude/settings.json");
+    let mcp_json = fx.project_path.join(".mcp.json");
 
     let agents_mtime_1 = mtime(&claude_md);
-    let settings_mtime_1 = mtime(&settings);
+    let settings_mtime_1 = mtime(&mcp_json);
 
     // Wait long enough for mtime granularity (HFS+/APFS = 1s; ext4 = ms).
     std::thread::sleep(Duration::from_millis(1500));
@@ -433,24 +489,27 @@ fn idempotent_resync_no_disk_changes() {
         "CLAUDE.md mtime must not advance on idempotent re-sync"
     );
     assert_eq!(
-        mtime(&settings),
+        mtime(&mcp_json),
         settings_mtime_1,
-        ".claude/settings.json mtime must not advance on idempotent re-sync"
+        ".mcp.json mtime must not advance on idempotent re-sync"
     );
 }
 
 // ---------------------------------------------------------------------------
-// 5b. Phase 9 / US3 (FR-030): a pre-P9 Tome-owned MCP entry without the
-//     `--harness` stamp re-stamps EXACTLY ONCE on the next sync (Updated), then
-//     is idempotent (LeftAlone) — the upgrade/round-trip path.
+// 5b. Issue #496 migration + Phase 9 / US3 (FR-030): a pre-P9 Tome-owned
+//     MCP entry that lived in the old .claude/settings.json location is
+//     migrated to .mcp.json on the first sync. The canonical 5-element form
+//     (with --harness stamp) is written to the new location and the legacy
+//     entry is cleaned up. A subsequent re-sync is idempotent (LeftAlone).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn legacy_mcp_entry_restamps_harness_once_then_idempotent() {
+fn legacy_mcp_entry_migrates_to_new_path_then_idempotent() {
     let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    // A pre-P9 Tome-owned entry: marker present, but no `--harness` stamp.
+    // A pre-P9 Tome-owned entry in the OLD location: marker present, but no
+    // `--harness` stamp AND stored in .claude/settings.json.
     let legacy = r#"{
   "mcpServers": {
     "tome": {
@@ -462,7 +521,8 @@ fn legacy_mcp_entry_restamps_harness_once_then_idempotent() {
     let fx = Fixture::build_with_existing("test-ws", &[(".claude/settings.json", legacy)]);
     fx.bind_then_sync();
 
-    let settings = fx.project_path.join(".claude/settings.json");
+    // After migration: the canonical entry lives at .mcp.json.
+    let mcp_json = fx.project_path.join(".mcp.json");
     let read_args = |path: &Path| -> Vec<String> {
         read_json(path)["mcpServers"]["tome"]["args"]
             .as_array()
@@ -472,30 +532,42 @@ fn legacy_mcp_entry_restamps_harness_once_then_idempotent() {
             .collect()
     };
 
-    let args = read_args(&settings);
+    let args = read_args(&mcp_json);
     assert_eq!(
         args,
         vec!["mcp", "--workspace", "test-ws", "--harness", "claude-code"],
-        "legacy entry re-stamped to the canonical 5-element form",
+        "migrated entry must carry the canonical 5-element form",
     );
     assert_eq!(
         args.iter().filter(|a| *a == "--harness").count(),
         1,
-        "exactly one --harness (no duplicate on re-stamp)",
+        "exactly one --harness after migration",
     );
     assert_eq!(args[0], "mcp", "ownership marker preserved");
 
-    // A subsequent re-sync (no bind) is idempotent — the re-stamped entry is
+    // The legacy location must have had its Tome entry cleaned up.
+    let old_settings = fx.project_path.join(".claude/settings.json");
+    if old_settings.exists() {
+        let old_parsed = read_json(&old_settings);
+        assert!(
+            old_parsed["mcpServers"]["tome"].is_null(),
+            "legacy .claude/settings.json Tome entry must be gone after migration; \
+             got: {}",
+            old_parsed,
+        );
+    }
+
+    // A subsequent re-sync (no bind) is idempotent — the migrated entry is
     // LeftAlone, the stamp not duplicated.
     let outcome =
         sync::sync_project(&fx.project_path, &fx.sync_deps(false)).expect("re-sync must succeed");
     assert!(
         outcome.updated.is_empty(),
-        "re-stamped entry is LeftAlone on re-sync; got {:?}",
+        "migrated entry is LeftAlone on re-sync; got {:?}",
         outcome.updated,
     );
     assert_eq!(
-        read_args(&settings)
+        read_args(&mcp_json)
             .iter()
             .filter(|a| *a == "--harness")
             .count(),

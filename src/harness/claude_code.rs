@@ -9,8 +9,11 @@
 //!   `AGENTS.md` is no longer a candidate — its rules-include block (and
 //!   guardrails region) land in `CLAUDE.md`.
 //! - Strategy: `BlockInExistingFile`, body style `AtInclude`.
-//! - MCP config: `<project>/.claude/settings.json` (per-project).
+//! - MCP config: `<project>/.mcp.json` (per-project, root-level).
 //! - Parent key: `"mcpServers"`.
+//! - Legacy path (cleaned up by sync): `<project>/.claude/settings.json`
+//!   (written by Tome ≤ 0.7.16; Claude Code 2.x reads `.mcp.json` at the
+//!   project root, not `mcpServers` inside `settings.json`).
 
 use std::path::{Path, PathBuf};
 
@@ -80,7 +83,17 @@ impl HarnessModule for ClaudeCode {
     }
 
     fn mcp_config_path(&self, project_root: &Path, _home: &Path) -> PathBuf {
-        project_root.join(".claude/settings.json")
+        // Issue #496: Claude Code 2.x reads `.mcp.json` at the project root,
+        // NOT `mcpServers` inside `.claude/settings.json`. The legacy path is
+        // cleaned up by `legacy_mcp_config_paths` below.
+        project_root.join(".mcp.json")
+    }
+
+    /// Clean up the legacy `.claude/settings.json` MCP entry written by
+    /// Tome ≤ 0.7.16. Sync removes any Tome-owned entry found there so the
+    /// user is not left with a stale, non-functional `mcpServers` block.
+    fn legacy_mcp_config_paths(&self, project_root: &Path, _home: &Path) -> Vec<PathBuf> {
+        vec![project_root.join(".claude/settings.json")]
     }
 
     // MCP dialect: the trait default ([`McpDialect::LEGACY`] — JSON
