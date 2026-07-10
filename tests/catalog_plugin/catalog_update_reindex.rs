@@ -14,7 +14,8 @@ use crate::common::{
 use tempfile::TempDir;
 use tome::commands::catalog::update::reindex_catalog_plugins;
 use tome::embedding::stub::StubEmbedder;
-use tome::index::{OpenOptions, enabled_plugins_for_catalog};
+use tome::error::TomeError;
+use tome::index::{OpenOptions, acquire_lock, enabled_plugins_for_catalog};
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
 
@@ -243,5 +244,76 @@ fn reindex_pass_unchanged_skills_does_no_embed_work() {
         embedder.call_count(),
         baseline,
         "no embed call should fire when nothing changed",
+    );
+}
+
+/// Regression test for issue #512: `reindex_catalog_plugins` must NOT be
+/// called while the advisory lock is held externally.
+///
+/// The original buggy fix for #512 held `acquire_lock` across the entire
+/// `refresh_one` + reindex span in `update::run`. But `reindex_catalog_plugins`
+/// → `lifecycle::reindex_plugin_with_entry_bar` → `lifecycle::reindex_plugin`
+/// each call `acquire_lock` internally on the same lockfile. Because the lock is
+/// non-reentrant (`File::try_lock`, per-fd semantics), a second `acquire_lock`
+/// while the outer lock is held returns `WouldBlock` → `TomeError::IndexBusy`
+/// (exit 50).
+///
+/// This test makes the invariant explicit: it FIRST acquires the lock, then
+/// calls `reindex_catalog_plugins`, and asserts the nested acquire returns
+/// `IndexBusy`. It then releases the outer lock and verifies the same call
+/// succeeds — proving that the outer lock must be released before the reindex
+/// call, which is exactly what the corrected `update::run` does.
+#[test]
+fn reindex_catalog_plugins_must_not_be_called_under_outer_lock() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
+
+    let embedder = StubEmbedder::new();
+    enable_alpha(&paths, &config, &embedder);
+
+    let deps = LifecycleDeps {
+        paths: &paths,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+        config: &config,
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
+        allow_model_download: false,
+    };
+    let enabled = vec!["plugin-alpha".to_owned()];
+
+    // --- Part 1: holding the outer lock → reindex returns IndexBusy (exit 50).
+    //
+    // This mirrors what the PRE-FIX `update::run` would have done: acquire the
+    // lock before `refresh_one` and hold it through the reindex call.
+    {
+        let _outer = acquire_lock(&paths.index_lock).expect("acquire outer lock");
+        let err = reindex_catalog_plugins("sample-plugin-catalog", &enabled, &deps)
+            .expect_err("expected IndexBusy when outer lock is held");
+        assert!(
+            matches!(err, TomeError::IndexBusy),
+            "expected IndexBusy (exit 50) but got: {err:?}",
+        );
+        // `_outer` is released here when the block ends.
+    }
+
+    // --- Part 2: WITHOUT the outer lock → reindex succeeds.
+    //
+    // This mirrors the POST-FIX `update::run`: the lock is released before
+    // calling `reindex_catalog_plugins`, so the internal per-plugin lock
+    // acquisition in `lifecycle::reindex_plugin` succeeds.
+    let outcome = reindex_catalog_plugins("sample-plugin-catalog", &enabled, &deps)
+        .expect("reindex must succeed once the outer lock is released");
+    assert_eq!(outcome.plugins.len(), 1, "plugin-alpha was reindexed");
+    assert!(
+        outcome.plugins[0].auto_disabled.is_none(),
+        "plugin-alpha must not be auto-disabled",
     );
 }
