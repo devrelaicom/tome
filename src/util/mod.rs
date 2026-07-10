@@ -13,6 +13,7 @@
 pub mod atomic_dir;
 pub mod env;
 pub mod io;
+pub mod str;
 pub mod symlink_safe;
 pub mod time;
 
@@ -22,5 +23,6 @@ pub use io::{
     ENTRY_BODY_MAX, HARNESS_MCP_MAX, HARNESS_RULES_MAX, PLUGIN_MANIFEST_MAX, TOME_CONFIG_MAX,
     bounded_read, bounded_read_to_string,
 };
+pub use str::truncate_at_chars;
 pub use symlink_safe::refuse_symlinked_component;
 pub use time::relative_time;
