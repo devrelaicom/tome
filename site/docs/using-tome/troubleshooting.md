@@ -77,7 +77,7 @@ The report starts with the same information as `status`, in more detail:
 
 Tome:            0.7.16
 
-Workspace:       (global)
+Workspace:       global
   resolved via:  global fallback
   catalogs:      1
   plugins:       1 total, 1 enabled
@@ -95,6 +95,11 @@ Drift:           none
 
 …and continues through catalog caches and detected harnesses before the
 overall verdict (`Overall: [ok] healthy` when everything is healthy).
+
+When a model capability is served by an external
+[provider](../reference/config.md#model-providers-byokbyom), its bundled local
+model row reads `not_applicable` rather than `missing`, and `--fix` does not
+download it — the provider supplies that capability instead.
 
 `--fix` re-runs the same idempotent reconcilers the normal commands use, so a
 repair inherits all their safety (marker-bounded edits, structural-match-only
