@@ -120,7 +120,21 @@ fn generate_meta_skill_manifest() {
         let mut entries: Vec<PathBuf> = fs::read_dir(&assets_root)
             .unwrap_or_else(|e| panic!("read assets/meta-skills/: {e}"))
             .map(|e| e.expect("dir entry").path())
-            .filter(|p| p.is_dir())
+            .filter(|p| {
+                // Use symlink_metadata() to inspect the entry itself, not its
+                // target, so a symlinked directory does not sneak in as a skill.
+                let ft = fs::symlink_metadata(p)
+                    .unwrap_or_else(|e| panic!("stat {}: {e}", p.display()))
+                    .file_type();
+                if ft.is_symlink() {
+                    panic!(
+                        "build.rs: symlink found in assets/meta-skills/: {}; \
+                         symlinks are not permitted in embedded assets",
+                        p.display()
+                    );
+                }
+                ft.is_dir()
+            })
             .collect();
         entries.sort();
         for skill_dir in entries {
@@ -200,6 +214,9 @@ fn load_skill(skill_dir: &Path) -> ManifestSkill {
 
 /// Recursively collect every file under `dir`, recording its path relative to
 /// `root` (POSIX `/` separators). Rejects any non-`Normal` / absolute rel path.
+///
+/// Panics at build time if a symlink is encountered anywhere in the asset tree,
+/// consistent with the project's symlink-refusal standard.
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<ManifestFile>) {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
@@ -207,9 +224,19 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<ManifestFile>) {
         .collect();
     entries.sort();
     for path in entries {
-        if path.is_dir() {
+        // Use symlink_metadata() so we inspect the entry itself, not its target.
+        let ft = fs::symlink_metadata(&path)
+            .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+            .file_type();
+        if ft.is_symlink() {
+            panic!(
+                "build.rs: symlink found in asset tree: {}; \
+                 symlinks are not permitted in embedded assets",
+                path.display()
+            );
+        } else if ft.is_dir() {
             collect_files(root, &path, out);
-        } else if path.is_file() {
+        } else if ft.is_file() {
             let rel = path
                 .strip_prefix(root)
                 .expect("path is under root by construction");
@@ -265,6 +292,9 @@ fn content_revision(files: &[ManifestFile]) -> String {
 /// `---`-delimited YAML block. Authored embedded skills keep these keys on one
 /// line by convention (the lint gate + a meta.rs test enforce the rest);
 /// surrounding single/double quotes are stripped. Returns `None` if absent.
+///
+/// Panics at build time if the same key appears more than once in the
+/// frontmatter block (duplicate keys are a sign of a mis-authored skill).
 fn frontmatter_value(content: &str, key: &str) -> Option<String> {
     let mut lines = content.lines();
     // First non-empty line must be the opening `---`.
@@ -272,13 +302,14 @@ fn frontmatter_value(content: &str, key: &str) -> Option<String> {
     if opened.map(str::trim) != Some("---") {
         return None;
     }
+    let prefix = format!("{}:", key);
+    let mut found: Vec<String> = Vec::new();
     for line in lines {
         if line.trim() == "---" {
             break; // end of frontmatter
         }
-        if let Some(rest) = line.trim_start().strip_prefix(key)
-            && let Some(value) = rest.strip_prefix(':')
-        {
+        // Anchor the match to `key:` so a key like `id` cannot match `identifier:`.
+        if let Some(value) = line.trim_start().strip_prefix(&prefix) {
             let v = value.trim();
             let v = v
                 .strip_prefix('"')
@@ -287,11 +318,18 @@ fn frontmatter_value(content: &str, key: &str) -> Option<String> {
                 .unwrap_or(v)
                 .trim();
             if !v.is_empty() {
-                return Some(v.to_owned());
+                found.push(v.to_owned());
             }
         }
     }
-    None
+    if found.len() > 1 {
+        panic!(
+            "build.rs: duplicate frontmatter key `{key}` ({} occurrences); \
+             embedded SKILL.md files must not repeat keys",
+            found.len()
+        );
+    }
+    found.into_iter().next()
 }
 
 /// A safe single path segment: non-empty, none of `/ \ NUL . ..`, no leading dot.
@@ -388,7 +426,21 @@ fn generate_harness_plugin_manifest() {
         let mut entries: Vec<PathBuf> = fs::read_dir(&assets_root)
             .unwrap_or_else(|e| panic!("read assets/harness-plugins/: {e}"))
             .map(|e| e.expect("dir entry").path())
-            .filter(|p| p.is_dir())
+            .filter(|p| {
+                // Use symlink_metadata() to inspect the entry itself, not its
+                // target, so a symlinked directory does not sneak in as a plugin.
+                let ft = fs::symlink_metadata(p)
+                    .unwrap_or_else(|e| panic!("stat {}: {e}", p.display()))
+                    .file_type();
+                if ft.is_symlink() {
+                    panic!(
+                        "build.rs: symlink found in assets/harness-plugins/: {}; \
+                         symlinks are not permitted in embedded assets",
+                        p.display()
+                    );
+                }
+                ft.is_dir()
+            })
             .collect();
         entries.sort();
         for plugin_dir in entries {
