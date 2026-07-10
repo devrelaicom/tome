@@ -26,7 +26,7 @@ use crate::workspace::WorkspaceName;
 /// recovery instruction (the `tome harness use` / `info` steps) is preserved
 /// verbatim for the genuinely-absent case — it is only made conditional in
 /// wording, not gutted.
-pub const SELF_HEAL_PREAMBLE: &str = "If the Tome MCP tools (search_skills, get_skill, get_skill_info) are available, proceed normally.\nOnly if they are ABSENT: tell the user to run `tome harness use <their harness>` (or `tome harness info <their harness>` for the MCP config to paste in), restart the session, and skip the skill routing below until they are present.";
+pub const SELF_HEAL_PREAMBLE: &str = "If the Tome MCP tools (search_skills, get_skill) are available, proceed normally.\nOnly if they are ABSENT: tell the user to run `tome harness use <their harness>` (or `tome harness info <their harness>` for the MCP config to paste in), restart the session, and skip the skill routing below until they are present.";
 
 /// Soft character budget for the Tier-3 workspace summary substituted into the
 /// directive (#294). The directive is injected on every sink, every session,
@@ -210,8 +210,8 @@ pub fn build_directive(
     }
     s.push_str(
         "Before any task in these areas, call search_skills(query=\"<the task>\"), then \
-         get_skill_info the top hit for details, then get_skill it for the full body \
-         (or, for a command result, invoke its prompt_name).\n",
+         get_skill(metadata_only=true) the top hit for details, then get_skill it for the \
+         full body (or, for a command result, invoke its prompt_name).\n",
     );
 
     s
@@ -591,10 +591,11 @@ mod tests {
     }
 
     #[test]
-    fn tier3_routing_tail_names_get_skill_info_as_middle_step() {
-        // #295: the Tier-3 routing tail must insert get_skill_info as the middle
-        // step between search_skills and get_skill, so an agent inspects metadata
-        // before paying the full-body cost. It must keep BOTH ends of the flow.
+    fn tier3_routing_tail_names_get_skill_metadata_as_middle_step() {
+        // #295/#497: the Tier-3 routing tail must insert the metadata-only
+        // `get_skill` call as the middle step between search_skills and the
+        // full-body get_skill, so an agent inspects metadata before paying the
+        // full-body cost. It must keep BOTH ends of the flow.
         let e = vec![entry("notes", true, 3, "Release notes")];
         let out = build_directive(&e, None, &PromptRegistry::default());
         assert!(
@@ -602,8 +603,8 @@ mod tests {
             "Tier-3 tail must still start at search_skills; got:\n{out}",
         );
         assert!(
-            out.contains("get_skill_info the top hit"),
-            "Tier-3 tail must name get_skill_info as the middle step; got:\n{out}",
+            out.contains("get_skill(metadata_only=true) the top hit"),
+            "Tier-3 tail must name the metadata-only get_skill as the middle step; got:\n{out}",
         );
         assert!(
             out.contains("get_skill it for the full body"),
@@ -618,19 +619,15 @@ mod tests {
 
     #[test]
     fn tier3_routing_tail_stayed_tight() {
-        // #295: the middle-step insertion must be MINIMAL — #294 slimmed this
-        // directive, so guard against re-inflation. The whole Tier-3 routing
-        // tail is one sentence on a single line; pin it to that shape so a
-        // future edit that pads it with extra prose trips this test.
+        // #295/#497: the middle-step insertion must be MINIMAL — #294 slimmed
+        // this directive, so guard against re-inflation. The whole Tier-3
+        // routing tail is one sentence on a single line; pin it to that shape.
         let e = vec![entry("notes", true, 3, "Release notes")];
         let out = build_directive(&e, None, &PromptRegistry::default());
         let tail_line = out
             .lines()
-            .find(|l| l.contains("get_skill_info the top hit"))
+            .find(|l| l.contains("get_skill(metadata_only=true) the top hit"))
             .expect("Tier-3 routing tail line present");
-        // A single, tight instruction sentence — one leading "Before any task"
-        // clause, ending with the prompt_name fallback. Bound its length so a
-        // padded rewrite is caught (the current line is ~200 chars).
         assert!(
             tail_line.starts_with("Before any task in these areas"),
             "the tail must remain the single 'Before any task' sentence; got:\n{tail_line}",
@@ -638,7 +635,7 @@ mod tests {
         assert!(
             tail_line.chars().count() <= 240,
             "Tier-3 routing tail must stay tight (#294 slimmed it) — the \
-             get_skill_info insertion must be minimal; {} chars:\n{tail_line}",
+             metadata-only insertion must be minimal; {} chars:\n{tail_line}",
             tail_line.chars().count(),
         );
     }

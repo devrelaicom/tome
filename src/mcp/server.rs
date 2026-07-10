@@ -31,7 +31,7 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler,
 
 use crate::mcp::prompts;
 use crate::mcp::state::McpState;
-use crate::mcp::tools::{get_skill, get_skill_info, meta, search_skills};
+use crate::mcp::tools::{get_skill, list_catalogs, list_plugins, meta, search_skills, status};
 
 #[derive(Clone)]
 pub struct Server {
@@ -164,7 +164,7 @@ impl Server {
             .map(Json)
     }
 
-    /// Fetch the body of one skill by `(catalog, plugin, name)` — typically a triple returned by a prior `search_skills` call. Returns the skill body with frontmatter stripped, plus the absolute paths of every sibling resource file in the skill's directory. Pass `raw: true` to receive the body with literal `${TOME_*}` substitution tokens preserved — for authoring/conversion workflows. Pass `include_resource_bodies: true` to also inline the contents of small text resources as `{ path, content }` (byte-capped per-file and in total), avoiding an extra file read per resource.
+    /// Fetch one entry by `(catalog, plugin, name)` — typically a triple returned by a prior `search_skills` call. By default returns the entry body with frontmatter stripped and `${TOME_*}` substitutions applied, plus the absolute paths of every sibling resource file. Pass `metadata_only: true` for the cheap middle tier — full description, `when_to_use` guidance, plugin version, user-invocable flag, and (for skills) a capped enumeration of adjacent files — WITHOUT reading or rendering the body. Use `kind` to disambiguate a name shared across skill/command/agent; `name` accepts a `*` wildcard that resolves a unique match (the error lists the available `(name, kind)` entries if it resolves nothing). In body mode, pass `raw: true` to preserve literal `${TOME_*}` tokens (for authoring/conversion) and `include_resource_bodies: true` to inline small text resources as `{ path, content }` (byte-capped per-file and in total).
     #[tool(name = "get_skill")]
     async fn get_skill(
         &self,
@@ -173,15 +173,35 @@ impl Server {
         get_skill::handle(self.state.clone(), input).await.map(Json)
     }
 
-    /// Inspect one entry without loading its full body: full description, `when_to_use` guidance, plugin version, user-invocable flag, absolute path, and (for skills) a capped enumeration of adjacent files and subdirectories. The middle tier between `search_skills` (ranked discovery) and `get_skill` (full body). Use this to decide whether to load the body or to surface the description to a user. `name` accepts a `*` wildcard that resolves a unique match; if the name resolves nothing the error lists the available `(name, kind)` entries so you needn't re-search.
-    #[tool(name = "get_skill_info")]
-    async fn get_skill_info(
+    /// Enumerate the enabled plugins in the resolved workspace and their contents — the skills, commands, and agents each plugin ships, with per-entry index + invocability status. This is the "browse my full toolbox" surface: unlike `search_skills` (ranked semantic discovery), it lists everything available so you can plan against it. Optional filters: `catalog` (restrict to one catalog), `enabled_only` (default true — omit plugins with nothing enabled), `kind` (restrict the listed entries to `skill`/`command`/`agent`). Read-only.
+    #[tool(name = "list_plugins")]
+    async fn list_plugins(
         &self,
-        Parameters(input): Parameters<get_skill_info::Input>,
-    ) -> Result<Json<get_skill_info::SkillInfo>, McpError> {
-        get_skill_info::handle(self.state.clone(), input)
+        Parameters(input): Parameters<list_plugins::Input>,
+    ) -> Result<Json<list_plugins::Output>, McpError> {
+        list_plugins::handle(self.state.clone(), input)
             .await
             .map(Json)
+    }
+
+    /// List the catalogs enrolled in the resolved workspace and their metadata — name, source URL, pinned ref, plugin count, and last-synced time. Pair with `list_plugins` to see what each catalog contributes. Read-only.
+    #[tool(name = "list_catalogs")]
+    async fn list_catalogs(
+        &self,
+        Parameters(input): Parameters<list_catalogs::Input>,
+    ) -> Result<Json<list_catalogs::Output>, McpError> {
+        list_catalogs::handle(self.state.clone(), input)
+            .await
+            .map(Json)
+    }
+
+    /// Snapshot of this Tome environment: active workspace, entry counts (skills/commands/agents), models on disk, index freshness, and per-harness MCP integration state. Use it to understand your context or self-diagnose "why did search return nothing" (e.g. an empty index or a drifted embedder). Pass `include_doctor: true` to also fold in the READ-ONLY doctor diagnostic (per-subsystem health + suggested fixes); this never applies any repair. Read-only.
+    #[tool(name = "status")]
+    async fn status(
+        &self,
+        Parameters(input): Parameters<status::Input>,
+    ) -> Result<Json<status::Output>, McpError> {
+        status::handle(self.state.clone(), input).await.map(Json)
     }
 
     /// Install one of Tome's bundled "meta skills" (native `SKILL.md` guides that teach an agent how to use Tome) into the harness hosting this server, so it persists for future sessions. Currently supports `{ "action": "install", "skill_id": "convert-marketplace" }`. Use this when the user wants to convert a Claude Code marketplace into Tome's native format — install `convert-marketplace`, then follow the now-installed skill.
@@ -213,12 +233,16 @@ impl ServerHandler for Server {
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("tome", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Discover and load locally-indexed agent skills in three steps: \
-                 `search_skills` with a natural-language task to retrieve ranked \
-                 candidates, then `get_skill_info` on a candidate to inspect its \
-                 metadata and `when_to_use` guidance without loading the full body, \
-                 then `get_skill` to fetch the body and resource paths once you've \
-                 confirmed the match.",
+                "Discover and load locally-indexed agent skills: `search_skills` \
+                 with a natural-language task retrieves ranked candidates, then \
+                 `get_skill` fetches a candidate — call it with `metadata_only: \
+                 true` first to inspect the description and `when_to_use` guidance \
+                 without loading the full body, then again (default) to fetch the \
+                 body and resource paths once you've confirmed the match. To browse \
+                 the full inventory instead of searching, use `list_plugins` (skills \
+                 / commands / agents per plugin) and `list_catalogs`; use `status` \
+                 to inspect the environment or self-diagnose why a search returned \
+                 nothing.",
             )
     }
 

@@ -36,6 +36,7 @@ use tome::mcp::prompts::PromptRegistry;
 use tome::mcp::server::Server;
 use tome::mcp::state::McpState;
 use tome::mcp::tools::{get_skill, search_skills};
+use tome::plugin::identity::EntryKind;
 use tome::workspace::ResolvedScope;
 
 /// Build a minimal `McpState` rooted in an isolated `ToolEnv`. The
@@ -64,11 +65,11 @@ fn build_state(env: &ToolEnv) -> Arc<McpState> {
 }
 
 #[test]
-fn router_advertises_exactly_four_tools() {
-    // Phase 5 / US4.a: `get_skill_info` joins `search_skills` + `get_skill`.
-    // Phase 9 / US3: the built-in `meta` tool joins them. The ToolRouter's
-    // `list_all()` returns tools in registration order; the assertion sorts both
-    // sides to keep the check insensitive to that detail.
+fn router_advertises_exactly_the_expected_tools() {
+    // #497: `get_skill_info` folded into `get_skill` (behind `metadata_only`);
+    // `list_plugins` / `list_catalogs` / `status` joined the read-only surface.
+    // The ToolRouter's `list_all()` returns tools in registration order; the
+    // assertion sorts both sides to keep the check insensitive to that detail.
     let mut names: Vec<String> = Server::tool_router()
         .list_all()
         .into_iter()
@@ -79,37 +80,50 @@ fn router_advertises_exactly_four_tools() {
         names,
         vec![
             "get_skill".to_string(),
-            "get_skill_info".to_string(),
+            "list_catalogs".to_string(),
+            "list_plugins".to_string(),
             "meta".to_string(),
             "search_skills".to_string(),
+            "status".to_string(),
         ],
-        "expected exactly the four contract-required tools, got {:?}",
+        "expected exactly the six contract-required tools (#497), got {:?}",
         names,
     );
 }
 
 #[test]
-fn instructions_describe_the_three_step_flow() {
-    // #295: the server instructions must name the canonical THREE-step flow
-    // (search_skills → get_skill_info → get_skill), so an agent uses the
-    // cheaper middle tier before paying the full-body cost — not the pre-#295
-    // two-step flow that omitted get_skill_info entirely.
+fn instructions_describe_the_discovery_flow() {
+    // #497: the server instructions must name the canonical flow
+    // (search_skills → get_skill metadata_only → get_skill full body), and the
+    // inventory-browse + status surfaces the consolidation added.
     let env = ToolEnv::new();
     let state = build_state(&env);
     let info = Server::new(state).get_info();
     let instructions = info.instructions.expect("server advertises instructions");
 
-    for tool in ["search_skills", "get_skill_info", "get_skill"] {
+    for tool in [
+        "search_skills",
+        "get_skill",
+        "metadata_only",
+        "list_plugins",
+        "list_catalogs",
+        "status",
+    ] {
         assert!(
             instructions.contains(tool),
-            "instructions must name the middle tier + both ends of the flow; \
+            "instructions must name the flow + browse/status surfaces; \
              missing `{tool}` in:\n{instructions}",
         );
     }
     // The middle tier must be framed as avoiding the full body (its whole point).
     assert!(
         instructions.contains("without loading the full body"),
-        "instructions must explain get_skill_info avoids the full body; got:\n{instructions}",
+        "instructions must explain metadata_only avoids the full body; got:\n{instructions}",
+    );
+    // #497: `get_skill_info` is gone — it must not be named.
+    assert!(
+        !instructions.contains("get_skill_info"),
+        "instructions must not reference the removed get_skill_info tool; got:\n{instructions}",
     );
 }
 
@@ -137,27 +151,42 @@ fn descriptions_match_contract_wording() {
         .expect("get_skill advertised");
     let get_desc = get.description.as_deref().unwrap_or("");
     assert!(
-        get_desc.contains("body of one skill"),
-        "get_skill description must reference 'body of one skill'; got: {get_desc}",
-    );
-    assert!(
         get_desc.contains("frontmatter stripped"),
         "get_skill description must reference frontmatter stripping; got: {get_desc}",
     );
+    // #497: the consolidated description must name the metadata-only middle
+    // tier + when_to_use guidance (formerly the get_skill_info description).
+    assert!(
+        get_desc.contains("metadata_only"),
+        "get_skill description must reference the metadata_only mode; got: {get_desc}",
+    );
+    assert!(
+        get_desc.contains("when_to_use"),
+        "get_skill description must reference when_to_use guidance; got: {get_desc}",
+    );
 
-    let info = tools
-        .iter()
-        .find(|t| t.name == "get_skill_info")
-        .expect("get_skill_info advertised");
-    let info_desc = info.description.as_deref().unwrap_or("");
+    // #497: `get_skill_info` is no longer advertised.
     assert!(
-        info_desc.contains("without loading its full body"),
-        "get_skill_info description must explain it's the middle-tier (avoids full body); got: {info_desc}",
+        !tools.iter().any(|t| t.name == "get_skill_info"),
+        "get_skill_info tool must be removed from the surface",
     );
-    assert!(
-        info_desc.contains("when_to_use"),
-        "get_skill_info description must reference when_to_use guidance; got: {info_desc}",
-    );
+
+    // The three new read-only tools are advertised with behaviour-only wording.
+    for (name, needle) in [
+        ("list_plugins", "enabled plugins"),
+        ("list_catalogs", "catalogs enrolled"),
+        ("status", "Snapshot of this Tome environment"),
+    ] {
+        let t = tools
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} advertised"));
+        let desc = t.description.as_deref().unwrap_or("");
+        assert!(
+            desc.contains(needle),
+            "{name} description must reference `{needle}`; got: {desc}",
+        );
+    }
 }
 
 #[test]
@@ -360,18 +389,18 @@ fn resolve_ref<'a>(
 }
 
 #[test]
-fn get_skill_info_kind_schema_description_names_all_valid_kinds() {
-    // #332: the `get_skill_info` input schema's `kind` property description
-    // (what `tools/list` exposes to an agent) must enumerate the valid values
-    // so a caller knows `command` / `agent` are selectable, not only the
-    // defaulted `skill`. Positive pin on the reworded description.
+fn get_skill_kind_schema_description_names_all_valid_kinds() {
+    // #332/#497: the consolidated `get_skill` input schema's `kind` property
+    // description (what `tools/list` exposes to an agent) must enumerate the
+    // valid values so a caller knows `command` / `agent` are selectable, not
+    // only the defaulted `skill`.
     let tools = Server::tool_router().list_all();
-    let info = tools
+    let get = tools
         .iter()
-        .find(|t| t.name == "get_skill_info")
-        .expect("get_skill_info advertised");
+        .find(|t| t.name == "get_skill")
+        .expect("get_skill advertised");
 
-    let properties = info
+    let properties = get
         .input_schema
         .get("properties")
         .and_then(|p| p.as_object())
@@ -389,6 +418,44 @@ fn get_skill_info_kind_schema_description_names_all_valid_kinds() {
             "the `kind` description must name the `{value}` value; got: {description:?}",
         );
     }
+}
+
+#[test]
+fn get_skill_input_schema_advertises_metadata_only_boolean() {
+    // #497: the consolidated `get_skill` input schema must advertise the
+    // optional `metadata_only` boolean so a client can discover the middle
+    // tier. It carries `#[serde(default)]` ⇒ NOT in `required`.
+    let tools = Server::tool_router().list_all();
+    let get = tools
+        .iter()
+        .find(|t| t.name == "get_skill")
+        .expect("get_skill advertised");
+    let schema = &get.input_schema;
+
+    let properties = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("input schema has a `properties` object");
+    let flag = properties
+        .get("metadata_only")
+        .expect("input schema advertises the `metadata_only` property (#497)");
+    assert_eq!(
+        flag.get("type").and_then(|t| t.as_str()),
+        Some("boolean"),
+        "`metadata_only` must be a boolean; got: {flag}",
+    );
+
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .expect("get_skill input schema has a `required` array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        !required.contains(&"metadata_only"),
+        "`metadata_only` is defaulted (optional) and must not be required; got: {required:?}",
+    );
 }
 
 #[test]
@@ -692,6 +759,8 @@ fn get_skill_returns_unknown_catalog_for_missing_name() {
                 catalog: "nonexistent".into(),
                 plugin: "p".into(),
                 name: "s".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
             },
@@ -723,6 +792,8 @@ fn get_skill_rejects_empty_fields() {
                 catalog: "".into(),
                 plugin: "p".into(),
                 name: "s".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
             },

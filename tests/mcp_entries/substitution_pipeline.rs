@@ -40,6 +40,7 @@ use tome::mcp::prompts::{self, PromptRegistry};
 use tome::mcp::state::McpState;
 use tome::mcp::tools::get_skill;
 use tome::plugin::PluginId;
+use tome::plugin::identity::EntryKind;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
 use tome::substitution::{self, SubstitutionContext, SubstitutionContextBuilder};
 use tome::workspace::{ResolvedScope, WorkspaceName};
@@ -253,13 +254,15 @@ fn mcp_get_skill_runs_builtins_and_env() {
                 catalog: "acme".to_string(),
                 plugin: "plug".to_string(),
                 name: "pipe-skill".to_string(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
             },
         ))
         .expect("get_skill ok");
 
-    let text = output.content;
+    let text = output.content.unwrap();
     assert!(
         text.contains("cat=acme"),
         "Stage 1 built-in not substituted in get_skill output: {text:?}",

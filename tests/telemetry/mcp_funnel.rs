@@ -14,7 +14,7 @@
 //!
 //! What this asserts:
 //! - `search_skills` → `tome.search` (`surface = "mcp"`) lands on the queue.
-//! - a following `get_skill` / `get_skill_info` → the funnel event
+//! - a following `get_skill` (body or metadata_only) → the funnel event
 //!   (`tome.entry_invoked` / `tome.entry_info`) carries the EXACT integer `rank`
 //!   for the just-ranked entry.
 //! - `calling_harness` on the MCP events reflects the host harness.
@@ -34,7 +34,7 @@ use tome::embedding::stub::{StubEmbedder, StubReranker};
 use tome::index::{self, OpenOptions};
 use tome::mcp::prompts::PromptRegistry;
 use tome::mcp::state::McpState;
-use tome::mcp::tools::{get_skill, get_skill_info, search_skills};
+use tome::mcp::tools::{get_skill, search_skills};
 use tome::paths::Paths;
 use tome::plugin::PluginId;
 use tome::plugin::identity::EntryKind;
@@ -290,6 +290,8 @@ fn search_then_get_skill_emits_funnel_with_rank() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: top_entry.clone(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
             },
@@ -327,7 +329,7 @@ fn search_then_get_skill_emits_funnel_with_rank() {
 }
 
 #[test]
-fn get_skill_info_emits_entry_info_with_rank() {
+fn get_skill_metadata_emits_entry_info_with_rank() {
     let home = TempDir::new().unwrap();
     let _home_guard = HomeGuard::install(home.path());
     let _env = EnvForce::install();
@@ -361,16 +363,19 @@ fn get_skill_info_emits_entry_info_with_rank() {
     let top_entry = search_out.matches[0].name.clone();
 
     let _ = rt
-        .block_on(get_skill_info::handle(
+        .block_on(get_skill::handle(
             state.clone(),
-            get_skill_info::Input {
+            get_skill::Input {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: top_entry,
                 kind: EntryKind::Skill,
+                metadata_only: true,
+                raw: false,
+                include_resource_bodies: false,
             },
         ))
-        .expect("get_skill_info ok");
+        .expect("get_skill (metadata_only) ok");
 
     let events = queue_events(&paths);
     let info = first_named(&events, "tome.entry_info").expect("tome.entry_info enqueued");
@@ -407,6 +412,8 @@ fn get_skill_without_preceding_search_has_zero_rank() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "alpha".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
             },
@@ -611,6 +618,8 @@ fn post_resolution_get_skill_failure_on_allowlisted_entry_emits_attributed_error
             catalog: "acme".into(),
             plugin: "plug".into(),
             name: "alpha".into(),
+            kind: EntryKind::Skill,
+            metadata_only: false,
             raw: false,
             include_resource_bodies: false,
         },

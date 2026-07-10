@@ -80,6 +80,8 @@ mod mcp_get_skill_json_shape;
 mod mcp_input_length_caps;
 #[path = "mcp_entries/mcp_lifecycle.rs"]
 mod mcp_lifecycle;
+#[path = "mcp_entries/mcp_list_and_status.rs"]
+mod mcp_list_and_status;
 #[path = "mcp_entries/mcp_log_format.rs"]
 mod mcp_log_format;
 #[path = "mcp_entries/mcp_prompts.rs"]

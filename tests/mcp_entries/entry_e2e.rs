@@ -32,7 +32,7 @@ use tome::embedding::stub::{StubEmbedder, StubReranker};
 use tome::index::{self, OpenOptions};
 use tome::mcp::prompts::{self, PromptRegistry};
 use tome::mcp::state::McpState;
-use tome::mcp::tools::{get_skill, get_skill_info, search_skills};
+use tome::mcp::tools::{get_skill, search_skills};
 use tome::plugin::PluginId;
 use tome::plugin::identity::EntryKind;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
@@ -344,6 +344,8 @@ fn enable_search_get_skill_with_substitution() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "pipe-skill".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
             },
@@ -351,20 +353,18 @@ fn enable_search_get_skill_with_substitution() {
         .expect("get_skill ok");
 
     // (3) Body rendered through the substitution pipeline.
+    let content = output.content.as_deref().unwrap();
     assert!(
-        output.content.contains("name=pipe-skill"),
-        "TOME_SKILL_NAME (Stage 1) substituted; got: {:?}",
-        output.content,
+        content.contains("name=pipe-skill"),
+        "TOME_SKILL_NAME (Stage 1) substituted; got: {content:?}",
     );
     assert!(
-        output.content.contains("cat=acme"),
-        "TOME_CATALOG_NAME (Stage 1) substituted; got: {:?}",
-        output.content,
+        content.contains("cat=acme"),
+        "TOME_CATALOG_NAME (Stage 1) substituted; got: {content:?}",
     );
     assert!(
-        !output.content.contains("${TOME_SKILL_NAME}"),
-        "no Stage-1 references must survive in the rendered body; got: {:?}",
-        output.content,
+        !content.contains("${TOME_SKILL_NAME}"),
+        "no Stage-1 references must survive in the rendered body; got: {content:?}",
     );
 }
 
@@ -405,25 +405,26 @@ fn get_skill_raw_mode_preserves_tokens_default_mode_substitutes() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "raw-skill".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
             },
         ))
         .expect("get_skill (rendered) ok");
 
+    let rendered_content = rendered.content.as_deref().unwrap();
     assert!(
-        rendered.substitutions_applied,
+        rendered.substitutions_applied.unwrap(),
         "default mode must report substitutions_applied = true",
     );
     assert!(
-        rendered.content.contains("name=raw-skill"),
-        "default mode must substitute ${{TOME_SKILL_NAME}}; got: {:?}",
-        rendered.content,
+        rendered_content.contains("name=raw-skill"),
+        "default mode must substitute ${{TOME_SKILL_NAME}}; got: {rendered_content:?}",
     );
     assert!(
-        !rendered.content.contains("${TOME_SKILL_NAME}"),
-        "default mode must leave NO literal token behind; got: {:?}",
-        rendered.content,
+        !rendered_content.contains("${TOME_SKILL_NAME}"),
+        "default mode must leave NO literal token behind; got: {rendered_content:?}",
     );
 
     // (2) Raw mode: substitution SKIPPED, literal token preserved.
@@ -434,25 +435,26 @@ fn get_skill_raw_mode_preserves_tokens_default_mode_substitutes() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "raw-skill".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: true,
                 include_resource_bodies: false,
             },
         ))
         .expect("get_skill (raw) ok");
 
+    let raw_content = raw.content.as_deref().unwrap();
     assert!(
-        !raw.substitutions_applied,
+        !raw.substitutions_applied.unwrap(),
         "raw mode must report substitutions_applied = false",
     );
     assert!(
-        raw.content.contains("${TOME_SKILL_NAME}"),
-        "raw mode must preserve the literal ${{TOME_SKILL_NAME}} token; got: {:?}",
-        raw.content,
+        raw_content.contains("${TOME_SKILL_NAME}"),
+        "raw mode must preserve the literal ${{TOME_SKILL_NAME}} token; got: {raw_content:?}",
     );
     assert!(
-        !raw.content.contains("name=raw-skill"),
-        "raw mode must NOT substitute the token; got: {:?}",
-        raw.content,
+        !raw_content.contains("name=raw-skill"),
+        "raw mode must NOT substitute the token; got: {raw_content:?}",
     );
 
     // Both modes resolve the SAME entry — raw only skips the render.
@@ -528,8 +530,8 @@ fn enable_command_invocable_via_prompts_get() {
 
 /// #289: a command entry is reachable through `get_skill` (it returns the
 /// command body, the resolved `kind: command`, and the MCP `prompt_name`)
-/// instead of the pre-#289 `unknown_skill` dead end; `get_skill_info` and
-/// `search_skills` surface the same `prompt_name`; AND — the central promise —
+/// instead of the pre-#289 `unknown_skill` dead end; `get_skill` metadata-only
+/// mode and `search_skills` surface the same `prompt_name`; AND — the central promise —
 /// every surfaced `prompt_name` is fed BACK into the real `prompts/get` path
 /// (`prompts::handle_get`) and resolves to THIS command's body. Driving the
 /// surfaced name (never a hardcoded literal) through the live prompt router
@@ -566,16 +568,18 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "deploy".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
             },
         ))
         .expect("get_skill must resolve the command, not return unknown_skill");
 
+    let output_content = output.content.as_deref().unwrap();
     assert!(
-        output.content.contains(body_marker),
-        "get_skill returns the command body; got: {:?}",
-        output.content,
+        output_content.contains(body_marker),
+        "get_skill returns the command body; got: {output_content:?}",
     );
     assert_eq!(
         output.kind,
@@ -586,30 +590,32 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
         .prompt_name
         .clone()
         .expect("get_skill must surface a prompt_name for a user-invocable command");
+    let output_resources = output.resources_paths.as_deref().unwrap();
     assert!(
-        output.resources.is_empty(),
-        "a command has no sibling-resource enumeration; got: {:?}",
-        output.resources,
+        output_resources.is_empty(),
+        "a command has no sibling-resource enumeration; got: {output_resources:?}",
     );
 
-    // (2) get_skill_info, through the production handler against the REAL
-    // registry, surfaces the same prompt_name (item 4 — not just the unit
+    // (2) get_skill (metadata_only), through the production handler against the
+    // REAL registry, surfaces the same prompt_name (item 4 — not just the unit
     // wire-pin with a literal).
     let info = rt
-        .block_on(get_skill_info::handle(
+        .block_on(get_skill::handle(
             build_state(&paths, build_registry(&paths)),
-            get_skill_info::Input {
+            get_skill::Input {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "deploy".into(),
                 kind: EntryKind::Command,
+                metadata_only: true,
+                raw: false,
+                include_resource_bodies: false,
             },
         ))
-        .expect("get_skill_info ok for the command");
-    let info_prompt = info
-        .prompt_name
-        .clone()
-        .expect("get_skill_info must surface a prompt_name for a user-invocable command");
+        .expect("get_skill (metadata_only) ok for the command");
+    let info_prompt = info.prompt_name.clone().expect(
+        "get_skill (metadata_only) must surface a prompt_name for a user-invocable command",
+    );
 
     // (3) search_skills surfaces the command with its prompt_name so the
     // ranked result is immediately actionable.
@@ -642,7 +648,7 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
     // All three read surfaces must agree on the SAME prompt name (the SSOT).
     assert_eq!(
         get_skill_prompt, info_prompt,
-        "get_skill and get_skill_info must surface the identical prompt_name",
+        "get_skill (body) and get_skill (metadata_only) must surface the identical prompt_name",
     );
     assert_eq!(
         get_skill_prompt, search_prompt,
@@ -1013,6 +1019,8 @@ fn get_skill_inlines_small_text_resources_and_skips_binary() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "res-skill".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
             },
@@ -1024,8 +1032,9 @@ fn get_skill_inlines_small_text_resources_and_skips_binary() {
         off.resource_bodies,
     );
     // Both files enumerated in `resources` regardless of the flag.
-    assert!(off.resources.iter().any(|p| p.ends_with("notes.txt")));
-    assert!(off.resources.iter().any(|p| p.ends_with("blob.bin")));
+    let off_resources = off.resources_paths.as_deref().unwrap();
+    assert!(off_resources.iter().any(|p| p.ends_with("notes.txt")));
+    assert!(off_resources.iter().any(|p| p.ends_with("blob.bin")));
 
     // Flag on → the text resource is inlined; the binary one is skipped.
     let on = rt
@@ -1035,6 +1044,8 @@ fn get_skill_inlines_small_text_resources_and_skips_binary() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "res-skill".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: true,
             },
@@ -1042,8 +1053,9 @@ fn get_skill_inlines_small_text_resources_and_skips_binary() {
         .expect("get_skill (flag on) ok");
 
     // `resources` still lists BOTH files (resource_bodies is a parallel view).
-    assert!(on.resources.iter().any(|p| p.ends_with("notes.txt")));
-    assert!(on.resources.iter().any(|p| p.ends_with("blob.bin")));
+    let on_resources = on.resources_paths.as_deref().unwrap();
+    assert!(on_resources.iter().any(|p| p.ends_with("notes.txt")));
+    assert!(on_resources.iter().any(|p| p.ends_with("blob.bin")));
 
     let bodies = on
         .resource_bodies
@@ -1088,6 +1100,8 @@ fn get_skill_skips_resource_over_per_file_cap() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "big-res".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: true,
             },
@@ -1095,7 +1109,13 @@ fn get_skill_skips_resource_over_per_file_cap() {
         .expect("get_skill ok");
 
     // Both still enumerated in `resources`.
-    assert!(out.resources.iter().any(|p| p.ends_with("huge.txt")));
+    assert!(
+        out.resources_paths
+            .as_deref()
+            .unwrap()
+            .iter()
+            .any(|p| p.ends_with("huge.txt"))
+    );
 
     let bodies = out.resource_bodies.expect("resource_bodies present");
     assert_eq!(
@@ -1145,6 +1165,8 @@ fn get_skill_total_budget_caps_inlined_set() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "many-res".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: true,
             },
@@ -1152,7 +1174,11 @@ fn get_skill_total_budget_caps_inlined_set() {
         .expect("get_skill ok");
 
     // All 40 files are enumerated in `resources` (the walk isn't budget-gated).
-    assert_eq!(out.resources.len(), 40, "all resources enumerated");
+    assert_eq!(
+        out.resources_paths.as_deref().unwrap().len(),
+        40,
+        "all resources enumerated"
+    );
 
     let bodies = out.resource_bodies.expect("resource_bodies present");
     // The budget stops inlining before all 40 — a strict prefix is inlined.
@@ -1198,6 +1224,8 @@ fn get_skill_command_omits_resource_bodies() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "run-it".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: true,
             },
@@ -1205,7 +1233,10 @@ fn get_skill_command_omits_resource_bodies() {
         .expect("get_skill ok for command");
 
     assert_eq!(out.kind, EntryKind::Command);
-    assert!(out.resources.is_empty(), "command has no resources");
+    assert!(
+        out.resources_paths.as_deref().unwrap().is_empty(),
+        "command has no resources"
+    );
     assert!(
         out.resource_bodies.is_none(),
         "command must omit resource_bodies even with the flag set; got: {:?}",
@@ -1214,7 +1245,7 @@ fn get_skill_command_omits_resource_bodies() {
 }
 
 /// #333 symlink-omission parity (mirrors
-/// `get_skill_info::walk_resources_skips_symlinks`): a symlinked resource is
+/// `get_skill::walk_resources_skips_symlinks`): a symlinked resource is
 /// NEVER enumerated by `walk_dir` (lstat-refused), so it CANNOT be inlined by
 /// the new `include_resource_bodies` read path — it appears in neither
 /// `resources` nor `resource_bodies`, while the real sibling file is inlined.
@@ -1249,6 +1280,8 @@ fn get_skill_inline_omits_symlinked_resource() {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
                 name: "link-res".into(),
+                kind: EntryKind::Skill,
+                metadata_only: false,
                 raw: false,
                 include_resource_bodies: true,
             },
@@ -1256,13 +1289,13 @@ fn get_skill_inline_omits_symlinked_resource() {
         .expect("get_skill ok");
 
     // The symlink is enumerated by neither the path list nor the inline view.
+    let out_resources = out.resources_paths.as_deref().unwrap();
     assert!(
-        !out.resources.iter().any(|p| p.ends_with("link.txt")),
-        "symlinked resource must not be enumerated in `resources`; got: {:?}",
-        out.resources,
+        !out_resources.iter().any(|p| p.ends_with("link.txt")),
+        "symlinked resource must not be enumerated in `resources`; got: {out_resources:?}",
     );
     assert!(
-        out.resources.iter().any(|p| p.ends_with("real.txt")),
+        out_resources.iter().any(|p| p.ends_with("real.txt")),
         "the real sibling resource must be enumerated",
     );
 

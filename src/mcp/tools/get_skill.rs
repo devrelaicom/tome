@@ -1,7 +1,25 @@
 //! `get_skill` MCP tool — input/output schemas + handler.
 //!
+//! Consolidated (issue #497): a single `get_skill` tool with a
+//! `metadata_only: bool` flag replaces the historical `get_skill` +
+//! `get_skill_info` pair.
+//!
+//! * `metadata_only: false` (default) — the full-body fetch: the SKILL.md /
+//!   command body (frontmatter stripped, substitution-rendered unless `raw`),
+//!   the flat list of sibling-resource paths, and (with
+//!   `include_resource_bodies`) the byte-capped inlined resource contents.
+//! * `metadata_only: true` — the middle-tier introspection: full description +
+//!   `when_to_use` guidance + `plugin_version` + `user_invocable` + a capped
+//!   resource enumeration, WITHOUT reading or rendering the body.
+//!
+//! Both modes share the same lookup: the `kind` disambiguator, the `*` wildcard
+//! `name` resolution, and the `available: [...]` / `candidates: [...]` payloads
+//! on the not-found / ambiguous-glob error envelopes (all inherited from the
+//! former `get_skill_info`).
+//!
 //! Contract: [`mcp-tools.md` §get_skill](../../../specs/003-phase-3-mcp-workspaces/contracts/mcp-tools.md).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,7 +36,18 @@ use crate::index::skills;
 use crate::mcp::state::McpState;
 use crate::mcp::tools::common::{error_data, error_data_with_code};
 use crate::plugin::frontmatter;
+use crate::plugin::identity::EntryKind;
 use crate::substitution::{self, SubstitutionContext, SubstitutionError};
+
+/// Resource enumeration cap (metadata-only mode). Top-level files and each
+/// subdirectory's listing are clipped to this many entries; the overflow is
+/// collapsed into the sentinel `"and N more"` string appended to the array.
+/// (Inherited from the former `get_skill_info`.)
+const PER_DIRECTORY_CAP: usize = 5;
+
+fn default_kind() -> EntryKind {
+    EntryKind::Skill
+}
 
 /// The tool description per `mcp-tools.md` §get_skill lives on the
 /// `#[tool]`-decorated method in `mcp::server` as a doc comment.
@@ -30,12 +59,38 @@ pub struct Input {
     /// The plugin name within the catalog, as returned by `search_skills`
     /// (e.g. `compact-core`). Plugin name only, NOT `<catalog>/<plugin>`.
     pub plugin: String,
-    /// The skill `name` field as returned by `search_skills`.
+    /// The entry `name` field as returned by `search_skills`. Also accepts a
+    /// `*` wildcard that resolves a unique match within `(catalog, plugin)` of
+    /// the requested `kind`; if the pattern matches more than one entry the
+    /// error lists the candidates, and if it matches none the error lists the
+    /// available `(name, kind)` entries so you needn't re-search.
     pub name: String,
+    /// Disambiguator when a plugin ships entries with the same name across
+    /// kinds. One of `skill` (the default), `command`, or `agent`. Defaults to
+    /// `skill`.
+    #[serde(default = "default_kind")]
+    pub kind: EntryKind,
+    /// Return metadata ONLY — description, `when_to_use`, resource listing,
+    /// kind, version, and `user_invocable` — without fetching or rendering the
+    /// entry body. This is the cheap middle tier between `search_skills`
+    /// (ranked discovery) and the default full-body fetch. Default false.
+    ///
+    /// The first line is a clean, complete summary because schemars lifts it
+    /// into the generated JSON-schema `title` that `tools/list` shows to an
+    /// agent.
+    ///
+    /// When `true` the body-mode inputs `raw` / `include_resource_bodies` are
+    /// ignored (no body is read), and the response carries the metadata shape
+    /// (`description` / `when_to_use` / `resources` enumeration) rather than
+    /// `content`. `#[serde(default)]` keeps existing callers (who omit
+    /// `metadata_only`) parsing to `false` under `deny_unknown_fields`.
+    #[serde(default)]
+    pub metadata_only: bool,
     /// Return the body WITHOUT running the substitution pipeline — literal
     /// `${TOME_*}` tokens are preserved. Use this when authoring/converting a
     /// skill (you want the source tokens, not the resolved values). Default
-    /// false (substitutions are applied). (#331)
+    /// false (substitutions are applied). Ignored when `metadata_only` is true.
+    /// (#331)
     ///
     /// The first line is a clean, complete summary because schemars lifts it
     /// into the generated JSON-schema `title` that `tools/list` shows to an
@@ -47,7 +102,8 @@ pub struct Input {
     pub raw: bool,
     /// Inline the contents of small text resource files alongside their paths,
     /// so the agent avoids an N+1 file read per resource (and works even when
-    /// the host's file tool can't reach a path). Default false.
+    /// the host's file tool can't reach a path). Default false. Ignored when
+    /// `metadata_only` is true.
     ///
     /// The first line is a clean, complete summary because schemars lifts it
     /// into the generated JSON-schema `title` that `tools/list` shows to an
@@ -79,66 +135,131 @@ pub struct ResourceBody {
     pub content: String,
 }
 
+/// Per-entry resource enumeration for the metadata-only mode (inherited from
+/// the former `get_skill_info`). `files` carries top-level files in the entry's
+/// parent directory (excluding the entry body itself); `directories` carries
+/// each immediate subdirectory keyed by name with the alphabetised list of
+/// children. Both axes are capped at [`PER_DIRECTORY_CAP`] entries; overflow
+/// collapses into the sentinel string `"and {N} more"` appended to the array.
+///
+/// The `directories` map uses [`BTreeMap`] so JSON serialisation produces
+/// alphabetical key order — the contract pins this for byte-stability.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ResourceEnumeration {
+    pub files: Vec<String>,
+    pub directories: BTreeMap<String, Vec<String>>,
+}
+
+/// The consolidated `get_skill` response.
+///
+/// The shape is mode-dependent, but every mode-specific field is
+/// `skip_serializing_if`-gated so the two wire shapes stay clean:
+///
+/// * Full-body mode (`metadata_only: false`) — `content`,
+///   `resources_paths` (serialised as `resources`), `substitutions_applied`,
+///   and optionally `resource_bodies`. This is byte-identical to the pre-#497
+///   `get_skill` output.
+/// * Metadata-only mode (`metadata_only: true`) — `description`, `when_to_use`,
+///   `plugin_version`, `user_invocable`, and (for skills) `resources`
+///   enumeration. This is byte-identical to the pre-#497 `get_skill_info`
+///   output modulo the fixed field ORDER (both surfaces now serialise through
+///   this one struct).
+///
+/// The always-present fields (`catalog` / `plugin` / `name` / `kind` / `path` /
+/// `prompt_name`) are shared by both modes.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
-    /// SKILL.md body with YAML frontmatter stripped, then
-    /// substitution-rendered (built-ins + env passthrough) — UNLESS the
-    /// caller passed `raw: true`, in which case the literal `${TOME_*}`
-    /// tokens are preserved and no substitution runs. Otherwise the body is
-    /// verbatim — no normalisation, no rewrites, no path-relative-to-
-    /// absolute resolution in code blocks. See `substitutions_applied` for
-    /// which mode produced this value.
-    pub content: String,
+    /// The entry's catalog.
+    pub catalog: String,
+    /// The entry's plugin.
+    pub plugin: String,
+    /// The RESOLVED concrete entry name (equals the input `name` for an exact
+    /// match; the matched entry's real name for a `*` wildcard).
+    pub name: String,
+    /// The resolved entry kind (`skill` | `command`).
+    pub kind: EntryKind,
     /// Absolute path to the entry body file (a skill's `SKILL.md` or a
     /// command's `<name>.md`).
     pub path: String,
+
+    // ---- Full-body mode fields (metadata_only == false) --------------------
+    /// SKILL.md / command body with YAML frontmatter stripped, then
+    /// substitution-rendered (built-ins + env passthrough) — UNLESS the
+    /// caller passed `raw: true`, in which case the literal `${TOME_*}`
+    /// tokens are preserved and no substitution runs. Absent in metadata-only
+    /// mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     /// Absolute paths of every OTHER file in the skill's directory
     /// (recursive). The agent may load any of them via its own
-    /// file-reading tools. Empty for command-kind entries (commands live as
-    /// a single `<plugin>/commands/<name>.md` file, not a per-entry
-    /// directory).
-    pub resources: Vec<String>,
-    /// #289: the resolved entry kind (`skill` | `command`). `get_skill` no
-    /// longer hardcodes `skill` — it resolves commands too, so a caller that
-    /// hands it a command name returned by `search_skills` gets the command
-    /// body, not an `unknown_skill` dead end. Appended after `resources`, so
-    /// it never reorders the pre-#289 fields. NOTE: `kind` is non-`Option`,
-    /// so EVERY result (skill-kind included) now additively carries a `"kind"`
-    /// key — the pre-#289 skill `Output` is NOT byte-identical, it gains this
-    /// one additive key. The output is an emit-only record with no
-    /// `additionalProperties: false` on the wire, so adding a key is a
-    /// backward-compatible additive change.
-    pub kind: crate::plugin::identity::EntryKind,
-    /// #289: the MCP prompt name this entry is also reachable under (a
-    /// command can be both read here AND invoked-with-arguments via
-    /// `prompts/get`). `<plugin>__<entry>` form, post-override and
-    /// post-collision-suffix, resolved from the live `PromptRegistry` (the
-    /// SSOT). Absent (`skip_serializing_if`) when the entry has no prompt —
-    /// so a non-invocable skill omits this key entirely (only the `kind` key
-    /// above is added for it).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_name: Option<String>,
+    /// file-reading tools. Empty for command-kind entries. Serialised as
+    /// `resources`. Absent in metadata-only mode (which uses the structured
+    /// `resources` enumeration below instead).
+    #[serde(rename = "resources", skip_serializing_if = "Option::is_none")]
+    pub resources_paths: Option<Vec<String>>,
     /// #331: whether the substitution pipeline was applied to `content`.
-    /// `false` only when the caller passed `raw: true` (literal `${TOME_*}`
-    /// tokens preserved); `true` in the default rendered mode. Always
-    /// present — the output is an emit-only record with no
-    /// `additionalProperties: false`, so adding this key is a
-    /// backward-compatible additive change (same precedent as the #289
-    /// `kind` key). Appended LAST, after `prompt_name`, so it never
-    /// reorders the pre-#331 fields.
-    pub substitutions_applied: bool,
+    /// `false` only when the caller passed `raw: true`. Absent in
+    /// metadata-only mode (no body was rendered).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub substitutions_applied: Option<bool>,
     /// #333: the inlined subset of `resources`, present only when the caller
     /// passed `include_resource_bodies: true` AND at least one resource fit the
-    /// byte budgets. Each `{ path, content }` element's `path` matches an entry
-    /// in `resources` (the additive `resource_bodies` is a parallel VIEW — every
-    /// resource still appears in `resources`; a binary / over-cap / budget-
-    /// exceeding / unreadable resource is simply omitted here). Absent (via
-    /// `skip_serializing_if`) when `include_resource_bodies` is false OR the
-    /// entry is a command (commands have no resource directory) — so with the
-    /// flag off the wire shape is byte-identical to pre-#333. Appended LAST,
-    /// after `substitutions_applied`, so it never reorders the earlier fields.
+    /// byte budgets. Absent otherwise (and always in metadata-only mode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_bodies: Option<Vec<ResourceBody>>,
+
+    // ---- Metadata-only mode fields (metadata_only == true) -----------------
+    /// Full frontmatter `description` (NOT truncated — that's `search_skills`'
+    /// job). Present only in metadata-only mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional `when_to_use` guidance text. Present only in metadata-only
+    /// mode (serialised even when `null` there, matching the former
+    /// `get_skill_info` wire shape).
+    #[serde(skip_serializing_if = "MetaWhenToUse::is_absent")]
+    pub when_to_use: MetaWhenToUse,
+    /// The entry's `plugin_version`. Present only in metadata-only mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_version: Option<String>,
+    /// The resolved `user_invocable` flag. Present only in metadata-only mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_invocable: Option<bool>,
+    /// Structured resource enumeration. Present only in metadata-only mode for
+    /// skill-kind entries (omitted for commands and in full-body mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceEnumeration>,
+
+    // ---- Shared trailing field ---------------------------------------------
+    /// The MCP prompt name this entry is reachable under via `prompts/list` /
+    /// `prompts/get` (`<plugin>__<entry>` form, post-override and
+    /// post-collision-suffix). Present for any user-invocable entry; absent
+    /// otherwise. Resolved from the live `PromptRegistry` (the SSOT). Appended
+    /// LAST.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_name: Option<String>,
+}
+
+/// Tri-state for the metadata-only `when_to_use` field, so it can serialise as
+/// `null` (present, no guidance) in metadata mode yet be entirely OMITTED in
+/// full-body mode. A plain `Option<String>` cannot distinguish "absent" from
+/// "present-but-null"; this three-way enum does, matching the former
+/// `get_skill_info` wire shape (which emitted `"when_to_use":null`).
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum MetaWhenToUse {
+    /// The field is entirely absent (full-body mode) — `skip_serializing_if`
+    /// elides it.
+    Absent,
+    /// Metadata mode with guidance text (`"when_to_use":"..."`).
+    Present(String),
+    /// Metadata mode without guidance (`"when_to_use":null`).
+    Null,
+}
+
+impl MetaWhenToUse {
+    fn is_absent(&self) -> bool {
+        matches!(self, MetaWhenToUse::Absent)
+    }
 }
 
 /// #333: per-file cap for an inlined resource (64 KiB). A resource whose
@@ -156,16 +277,17 @@ const MAX_INLINE_TOTAL_BYTES: u64 = 1024 * 1024;
 
 /// Pipeline:
 ///
-/// 1. Verify the resolved scope's `workspace_catalogs` DB enrolment has
-///    the named catalog (`unknown_catalog` per contract).
-/// 2. Look up `(catalog, plugin, name)` in the index. Distinguish
-///    `unknown_plugin` (no rows for that catalog+plugin pair) from
-///    `unknown_skill` (no row, or row exists but `enabled = 0`).
-/// 3. Read SKILL.md, strip frontmatter via `plugin::frontmatter` (the
-///    same parser the enable pipeline uses).
-/// 4. Walk the SKILL.md's parent directory recursively, gather every
-///    other file's absolute path, sort lexicographically.
-/// 5. Return.
+/// 1. Validate non-empty `catalog` / `plugin` / `name`.
+/// 2. Resolve `(catalog, plugin, kind, name)` — exact or `*` wildcard — to an
+///    enabled entry. A miss is classified via the shared
+///    [`common::classify_not_found`] SSOT into `unknown_catalog` /
+///    `unknown_plugin` / `unknown_skill`; an `unknown_skill` (or zero-match
+///    wildcard) carries the enabled `available` list; a multi-match wildcard is
+///    an `ambiguous_name` error listing the candidates.
+/// 3. `metadata_only: true` → build the metadata response (description +
+///    `when_to_use` + resource enumeration; no body read).
+///    `metadata_only: false` → read + strip + optionally render the body, walk
+///    sibling resources, and optionally inline them.
 pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpError> {
     let started = Instant::now();
 
@@ -176,52 +298,39 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         ));
     }
 
-    // FF3: catalog existence is resolved from the `workspace_catalogs` DB
-    // (inside `lookup_skill`, below), not `config.toml [catalogs]` — the
-    // latter is never written in production (`tome catalog add` enrols only
-    // into the DB), so reading it here returned `unknown_catalog` for every
-    // enrolled catalog on a fresh install.
-    //
-    // The index read needs the resolved scope's DB. Run inside a
-    // `spawn_blocking` so rusqlite doesn't block the runtime.
     let paths = state.paths.clone();
     let scope = state.scope.scope.clone();
     let catalog = input.catalog.clone();
     let plugin = input.plugin.clone();
     let name = input.name.clone();
+    let kind = input.kind;
 
-    let lookup =
-        tokio::task::spawn_blocking(move || lookup_skill(&paths, &scope, &catalog, &plugin, &name))
-            .await
-            .map_err(|e| {
-                internal(
-                    &input,
-                    started,
-                    format!("lookup join: {e}"),
-                    ErrorCategory::Internal,
-                )
-            })?
-            .map_err(|e| {
-                // C-L1: best-effort MCP-surface `tome.error` (closed category
-                // only), with this session's `calling_harness`. Never alters the
-                // returned `McpError`. This is the one `TomeError`→`McpError`
-                // conversion in this handler (the other error arms are non-`TomeError`
-                // lookup/read outcomes already shaped to the contract codes).
-                crate::mcp::enqueue_tool_error(&state, e.category());
-                // US4 deferral: no clean plugin context at this error boundary.
-                // The attributed `catalog.<id>.error` requires a (non-optional)
-                // `plugin_version`, but a *lookup* failure here means the entry
-                // row was never resolved — there is no trustworthy version to
-                // attribute, and the catalog/plugin may not even resolve to an
-                // allowlisted source. Fabricating a version would be worse than
-                // the anonymous-only `tome.error` already emitted above, so the
-                // attributed error stays deferred at this boundary.
-                internal(&input, started, e.to_string(), e.category())
-            })?;
+    let lookup = tokio::task::spawn_blocking(move || {
+        lookup_entry(&paths, &scope, &catalog, &plugin, kind, &name)
+    })
+    .await
+    .map_err(|e| {
+        internal(
+            &input,
+            started,
+            format!("lookup join: {e}"),
+            ErrorCategory::Internal,
+        )
+    })?
+    .map_err(|e| {
+        // C-L1: best-effort MCP-surface `tome.error` (closed category only),
+        // with this session's `calling_harness`. Never alters the returned
+        // `McpError`.
+        crate::mcp::enqueue_tool_error(&state, e.category());
+        internal(&input, started, e.to_string(), e.category())
+    })?;
 
     let hit = match lookup {
         LookupOutcome::Found(hit) => hit,
-        LookupOutcome::UnknownCatalog => {
+        LookupOutcome::NotFound {
+            which: crate::mcp::tools::common::NotFound::UnknownCatalog,
+            ..
+        } => {
             return Err(emit_error(
                 &input,
                 started,
@@ -239,7 +348,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 ),
             ));
         }
-        LookupOutcome::UnknownPlugin => {
+        LookupOutcome::NotFound {
+            which: crate::mcp::tools::common::NotFound::UnknownPlugin,
+            ..
+        } => {
             return Err(emit_error(
                 &input,
                 started,
@@ -260,7 +372,13 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 ),
             ));
         }
-        LookupOutcome::UnknownSkill => {
+        LookupOutcome::NotFound {
+            which: crate::mcp::tools::common::NotFound::UnknownSkill,
+            available,
+        } => {
+            // #333: catalog + plugin resolved but the entry name did not (a
+            // mistyped exact name OR a glob that matched zero). ENRICH `data`
+            // with the enabled `(name, kind)` list for `(catalog, plugin)`.
             return Err(emit_error(
                 &input,
                 started,
@@ -277,6 +395,33 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                             ("catalog", json!(input.catalog)),
                             ("plugin", json!(input.plugin)),
                             ("name", json!(input.name)),
+                            ("available", available_json(&available)),
+                        ],
+                    )),
+                ),
+            ));
+        }
+        LookupOutcome::AmbiguousGlob { candidates } => {
+            return Err(emit_error(
+                &input,
+                started,
+                "ambiguous_name",
+                McpError::invalid_params(
+                    format!(
+                        "name pattern `{}` matched {} entries in `{}/{}`; pick one",
+                        input.name,
+                        candidates.len(),
+                        input.catalog,
+                        input.plugin,
+                    ),
+                    Some(error_data_with_code(
+                        "ambiguous_name",
+                        ErrorCategory::EntryNotFound,
+                        &[
+                            ("catalog", json!(input.catalog)),
+                            ("plugin", json!(input.plugin)),
+                            ("name", json!(input.name)),
+                            ("candidates", available_json(&candidates)),
                         ],
                     )),
                 ),
@@ -284,10 +429,132 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     };
 
+    if input.metadata_only {
+        handle_metadata(state, input, started, hit).await
+    } else {
+        handle_body(state, input, started, hit).await
+    }
+}
+
+/// Metadata-only path (former `get_skill_info` behaviour): return description +
+/// `when_to_use` + resource enumeration, without reading the body.
+async fn handle_metadata(
+    state: Arc<McpState>,
+    input: Input,
+    started: Instant,
+    hit: LookupHit,
+) -> Result<Output, McpError> {
     let LookupHit {
         body_path,
-        plugin_version,
         kind: resolved_kind,
+        name: resolved_name,
+        description,
+        when_to_use,
+        plugin_version,
+        user_invocable,
+    } = hit;
+
+    // Per FR-083 the resource enumeration is skill-only.
+    let resources = if matches!(resolved_kind, EntryKind::Skill) {
+        let body_path_for_walk = body_path.clone();
+        let walked = tokio::task::spawn_blocking(move || walk_resources(&body_path_for_walk))
+            .await
+            .map_err(|e| {
+                internal(
+                    &input,
+                    started,
+                    format!("walk join: {e}"),
+                    ErrorCategory::Internal,
+                )
+            })?;
+        match walked {
+            Ok(r) => Some(r),
+            Err(err) => {
+                return Err(emit_error(
+                    &input,
+                    started,
+                    "resource_enum_failed",
+                    McpError::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("resource enumeration failed: {err}"),
+                        Some(error_data_with_code(
+                            "resource_enum_failed",
+                            ErrorCategory::Io,
+                            &[("path", json!(body_path.display().to_string()))],
+                        )),
+                    ),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    info!(
+        target: "tome::mcp::tools::get_skill",
+        catalog = input.catalog,
+        plugin = input.plugin,
+        name = resolved_name,
+        kind = resolved_kind.as_str(),
+        metadata_only = true,
+        result = "ok",
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "call",
+    );
+
+    // FR-027/FR-028: `tome.entry_info` for the middle-tier lookup.
+    crate::telemetry::emit(crate::telemetry::event::EntryInfo {
+        rank: crate::mcp::rank_for(&state, &resolved_name),
+        calling_harness: crate::mcp::calling_harness(&state),
+    });
+
+    let prompt_name = state
+        .prompt_registry
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .prompt_name_for(&input.catalog, &input.plugin, resolved_kind, &resolved_name)
+        .map(str::to_owned);
+
+    let when_to_use = match when_to_use {
+        Some(text) => MetaWhenToUse::Present(text),
+        None => MetaWhenToUse::Null,
+    };
+
+    Ok(Output {
+        catalog: input.catalog,
+        plugin: input.plugin,
+        name: resolved_name,
+        kind: resolved_kind,
+        path: body_path.display().to_string(),
+        // Full-body-mode fields are absent in metadata mode.
+        content: None,
+        resources_paths: None,
+        substitutions_applied: None,
+        resource_bodies: None,
+        // Metadata-mode fields.
+        description: Some(description),
+        when_to_use,
+        plugin_version: Some(plugin_version),
+        user_invocable: Some(user_invocable),
+        resources,
+        prompt_name,
+    })
+}
+
+/// Full-body path (historical `get_skill` behaviour): read + strip + optionally
+/// render the body, walk the sibling resources, and optionally inline them.
+async fn handle_body(
+    state: Arc<McpState>,
+    input: Input,
+    started: Instant,
+    hit: LookupHit,
+) -> Result<Output, McpError> {
+    let LookupHit {
+        body_path,
+        kind: resolved_kind,
+        name: resolved_name,
+        plugin_version,
+        ..
     } = hit;
     let skill_path = body_path;
     // Capture the version before it is moved into the substitution closure
@@ -295,16 +562,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // PUBLISHED manifest value (the FR-059 carve-out), not a secret.
     let attributed_plugin_version = plugin_version.clone();
 
-    // The actual file read + frontmatter strip + sibling walk is all
-    // synchronous I/O; do it on the blocking pool. #289: only skill-kind
-    // entries enumerate sibling resources — a command is a single
-    // `<plugin>/commands/<name>.md` file whose parent (`commands/`) holds every
-    // OTHER command, not this one's resources, so the walk would wrongly list
-    // unrelated command files. Mirrors `get_skill_info`'s skill-only resource
-    // enumeration (FR-083).
+    // #289: only skill-kind entries enumerate sibling resources.
     let read_input = input.clone_for_log();
     let read_path = skill_path.clone();
-    let walk_resources = matches!(resolved_kind, crate::plugin::identity::EntryKind::Skill);
+    let walk_resources = matches!(resolved_kind, EntryKind::Skill);
     let read_result =
         tokio::task::spawn_blocking(move || read_skill_and_resources(&read_path, walk_resources))
             .await
@@ -320,11 +581,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let body_and_resources = match read_result {
         Ok(v) => v,
         Err(e) => {
-            // Co-M1: a POST-resolution read failure — the entry row resolved, so
-            // `attributed_plugin_version` + the entry/plugin names are in hand.
-            // Map the read error to its closed `ErrorCategory` AND the contract
-            // `McpError`, emit the anonymous + attributed error telemetry, then
-            // return the McpError unchanged.
             let (category, err) = match e {
                 ReadError::SkillFileMissing(p) => (
                     crate::error::ErrorCategory::Io,
@@ -379,39 +635,20 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let (raw_content, resources) = body_and_resources;
 
     // #331: `raw: true` returns the frontmatter-stripped body verbatim,
-    // skipping the substitution pipeline entirely (literal `${TOME_*}` tokens
-    // preserved — what an authoring/converting agent needs). Raw mode is a
-    // pure read: no substitution context is built, so none of the render
-    // block's data-dir side-effects or substitution-failure error arms are
-    // reachable and it cannot fail on substitution. The default (`raw:
-    // false`) runs the pipeline exactly as before.
-    //
-    // Telemetry (the anonymous `tome.entry_invoked`, the attributed
-    // `catalog.<id>.entry_invoked`, the info log) and `prompt_name`
-    // resolution below STILL fire in both modes — raw mode is still an
-    // entry fetch. Only the render is conditional.
+    // skipping the substitution pipeline entirely.
     let (content, substitutions_applied) = if input.raw {
         (raw_content, false)
     } else {
-        // Phase 5 / US2.c (FR-101): run the substitution pipeline over the
-        // frontmatter-stripped body so callers see Stage 1 (built-ins) +
-        // Stage 2 (env passthrough) values. `get_skill` never receives args
-        // (it's the read-side; Stage 3 + Stage 4 are exercised via the
-        // `prompts/get` MCP surface in `mcp::prompts`), so `args = None`
-        // and `declared_args = []`.
-        //
-        // Build + render are pure compute (built-ins read context fields;
-        // env reads `std::env::var`; the data-dir built-ins call
-        // `create_dir_all` which is sync). Run on the blocking pool to keep
-        // the runtime responsive per the sync-boundary discipline.
         let ctx_state = state.clone();
         let ctx_input = input.clone_for_log();
         let ctx_skill_path = skill_path.clone();
         let ctx_plugin_version = plugin_version;
+        let ctx_resolved_name = resolved_name.clone();
         let rendered_result = tokio::task::spawn_blocking(move || {
             let ctx = build_substitution_context(
                 &ctx_state,
                 &ctx_input,
+                &ctx_resolved_name,
                 &ctx_skill_path,
                 ctx_plugin_version,
             )?;
@@ -430,11 +667,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         match rendered_result {
             Ok(s) => (s, true),
             Err((code, err)) => {
-                // Co-M1: a POST-resolution substitution/render failure — the
-                // entry resolved, so the version + names are in hand. Map the
-                // contract `code` slug back to its closed `ErrorCategory`, emit
-                // anonymous + attributed error telemetry, then return the
-                // McpError unchanged.
                 let category = substitution_code_to_category(code);
                 let err = emit_error(&input, started, code, err);
                 emit_post_resolution_error_telemetry(
@@ -453,7 +685,9 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         target: "tome::mcp::tools::get_skill",
         catalog = input.catalog,
         plugin = input.plugin,
-        name = input.name,
+        name = resolved_name,
+        kind = resolved_kind.as_str(),
+        metadata_only = false,
         result = "ok",
         body_bytes = content.len(),
         resource_count = resources.len(),
@@ -461,38 +695,18 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         "call",
     );
 
-    // FR-027/FR-028: `tome.entry_invoked` once the entry body is fetched. The
-    // `entry_kind` is the kind the row resolved to (#289: `get_skill` now
-    // resolves commands too, not only skills, so this is no longer hardcoded
-    // `Skill`). The `rank_bucket` is THIS entry's position in the preceding
-    // search this session (the funnel join; `None` when no search ranked it).
-    // Best-effort enqueue — a sub-ms local append that never blocks the tool
-    // call or flushes.
+    // FR-027/FR-028: `tome.entry_invoked` once the entry body is fetched.
     crate::telemetry::emit(crate::telemetry::event::EntryInvoked {
         entry_kind: resolved_kind.into(),
-        rank: crate::mcp::rank_for(&state, &input.name),
+        rank: crate::mcp::rank_for(&state, &resolved_name),
         calling_harness: crate::mcp::calling_harness(&state),
     });
 
-    // FR-052: ALONGSIDE the anonymous `tome.entry_invoked`, emit the attributed
-    // `catalog.<id>.entry_invoked` ONLY when this entry's catalog resolves — by
-    // SOURCE, at emit time — to an allowlisted catalog. The attribution read
-    // opens the index read-only with no lock (NFR-009); `None` ⇒ anonymous only.
-    // The artefact names (entry/plugin name + version) are PUBLISHED values
-    // (FR-059), never secrets. Best-effort — never alters the tool result.
-    //
-    // Sec-M1 / R-L1 (cross-sink parity): `resolve_attribution` does a SYNC
-    // SQLite open+query (5s busy_timeout). The sibling `search_skills` success
-    // path and this file's POST-resolution error helper already fold it into a
-    // `spawn_blocking`; the SUCCESS path here was the one that still ran it
-    // inline on the single-threaded MCP reactor. Fold the resolution + the
-    // attributed `enqueue_attributed` into ONE blocking task (snapshot the
-    // owned values the closure needs; ignore a join error — best-effort). The
-    // anonymous `entry_invoked` emit + the funnel `rank_bucket` above stay on
-    // the reactor (sub-µs, no DB read).
+    // FR-052: attributed `catalog.<id>.entry_invoked`, folded into ONE blocking
+    // task (the sync SQLite open+query must not run on the reactor).
     let attribution_scope = state.scope.clone();
     let attribution_catalog = input.catalog.clone();
-    let attribution_entry_name = input.name.clone();
+    let attribution_entry_name = resolved_name.clone();
     let attribution_plugin_name = input.plugin.clone();
     let attribution_harness = crate::mcp::calling_harness(&state);
     let _ = tokio::task::spawn_blocking(move || {
@@ -502,8 +716,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             crate::telemetry::emit(crate::telemetry::event::AttributedEntryInvoked {
                 catalog: catalog_id,
                 entry_name: attribution_entry_name,
-                // #289: the kind the row resolved to (skill OR command), not a
-                // hardcoded `Skill`.
                 entry_kind: resolved_kind.into(),
                 plugin_name: attribution_plugin_name,
                 plugin_version: attributed_plugin_version,
@@ -513,195 +725,243 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     })
     .await;
 
-    // The `Output.path` field is documented as the absolute path to the
-    // skill body (see the `Output` struct's doc comment) — emit the
-    // resolved `skill_path` (which is absolute) rather than the row's
-    // catalog-relative stored form. Pre-US1.c this returned the raw row
-    // value, which only happened to be correct when absolute-path
-    // legacy data was indexed.
-    //
-    // R-M5 (US1.d reviewer pass): the boxed `SkillRecord` carried on
-    // `LookupHit` was dropped — it was kept as a "future extensions"
-    // placeholder but never read here, costing an Arc-equivalent heap
-    // allocation per call.
-    // #289: resolve the entry's MCP prompt name from the live registry (the
-    // SSOT). A command is reachable BOTH here (full body) and via `prompts/get`
-    // (invoke-with-arguments); surfacing the name makes the alternate path
-    // discoverable. `None` for an entry that isn't user-invocable. Sub-µs
-    // in-memory scan (no DB I/O), safe on the reactor.
     let prompt_name = state
         .prompt_registry
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .prompt_name_for(&input.catalog, &input.plugin, resolved_kind, &input.name)
+        .prompt_name_for(&input.catalog, &input.plugin, resolved_kind, &resolved_name)
         .map(str::to_owned);
 
-    // #333: when the caller opted in AND this is a skill (commands have no
-    // resource directory, so `resources` is empty and `resource_bodies` stays
-    // `None`), inline the byte-capped subset of `resources`. The reads are
-    // synchronous file I/O bounded per-file + in total, so run them on the
-    // blocking pool per the sync-boundary discipline.
-    //
-    // Symlink caveat (accepted-risk TOCTOU): `walk_dir` lstat-refuses symlinks
-    // at ENUMERATION time, so no symlink lands in `resources` in the common
-    // case. But `inline_resource_bodies` then RE-OPENS each already-enumerated
-    // path (`bounded_read_to_string` → `File::open`, which FOLLOWS symlinks) in
-    // a later `spawn_blocking`. A hostile concurrent `rename(2)` swapping an
-    // enumerated regular file for a symlink between the two blocking tasks would
-    // let the reader follow it — and because #333 now returns file *content*,
-    // that escalates the residual window from path-disclosure (enumeration-only)
-    // to content-disclosure. This is the SAME accepted-risk trust model that
-    // governs `get_skill_info::walk_resources` (the US4.d C-1 note there,
-    // lstat-then-`read_dir` TOCTOU): the walked directory is inside a catalog
-    // clone the user EXPLICITLY enabled — trusted-on-enrol, not trusted-on-read.
-    // Closing it would need per-FD `O_NOFOLLOW`/`cap-std`, a new dependency the
-    // project avoids; deferred until a real threat materialises. NOT a new
-    // unguarded read path — it reuses the shared bounded-read guard.
-    let resource_bodies = if input.include_resource_bodies
-        && matches!(resolved_kind, crate::plugin::identity::EntryKind::Skill)
-    {
-        let resources_for_inline = resources.clone();
-        let bodies =
-            tokio::task::spawn_blocking(move || inline_resource_bodies(&resources_for_inline))
-                .await
-                .map_err(|e| {
-                    internal(
-                        &input,
-                        started,
-                        format!("inline join: {e}"),
-                        ErrorCategory::Internal,
-                    )
-                })?;
-        Some(bodies)
-    } else {
-        None
-    };
+    // #333: when the caller opted in AND this is a skill, inline the byte-capped
+    // subset of `resources`.
+    let resource_bodies =
+        if input.include_resource_bodies && matches!(resolved_kind, EntryKind::Skill) {
+            let resources_for_inline = resources.clone();
+            let bodies =
+                tokio::task::spawn_blocking(move || inline_resource_bodies(&resources_for_inline))
+                    .await
+                    .map_err(|e| {
+                        internal(
+                            &input,
+                            started,
+                            format!("inline join: {e}"),
+                            ErrorCategory::Internal,
+                        )
+                    })?;
+            Some(bodies)
+        } else {
+            None
+        };
 
     Ok(Output {
-        content,
-        path: skill_path.display().to_string(),
-        resources,
+        catalog: input.catalog,
+        plugin: input.plugin,
+        name: resolved_name,
         kind: resolved_kind,
-        prompt_name,
-        substitutions_applied,
+        path: skill_path.display().to_string(),
+        content: Some(content),
+        resources_paths: Some(resources),
+        substitutions_applied: Some(substitutions_applied),
         resource_bodies,
+        // Metadata-mode fields are absent in full-body mode.
+        description: None,
+        when_to_use: MetaWhenToUse::Absent,
+        plugin_version: None,
+        user_invocable: None,
+        resources: None,
+        prompt_name,
     })
 }
 
-/// Lookup outcome carrying the resolved absolute body path so the read
-/// step doesn't have to open the DB a second time.
-///
-/// The `body_path` is computed via
-/// [`skills::resolve_entry_body_path`] — `skills.path` stores the
-/// **relative** path under the plugin's catalog directory; resolving it
-/// in the same `spawn_blocking` as the row lookup keeps the read path
-/// honest. (Pre-US1.c this module used `PathBuf::from(&row.path)`
-/// directly, which only worked when the index was populated via a
-/// codepath that happened to store an absolute string — never the case
-/// post-F11b. The bug was latent because no in-tree integration test
-/// exercised the file-read branch.)
-///
-/// R-M5 (US1.d reviewer pass): the boxed `SkillRecord` field was
-/// removed; it was a "future extensions" placeholder costing a heap
-/// allocation per call with no read site.
-///
-/// US2.c (Phase 5): re-added `plugin_version` as a single scalar field
-/// (not the whole `SkillRecord`) so the substitution context can be
-/// built without a second DB read. Mirrors the registry-cached
-/// `PromptEntry.plugin_version` shape in `mcp::prompts`.
+/// Serialise an available-entries / candidate list to the error-`data` JSON
+/// array `[ { "name": ..., "kind": ... }, ... ]`.
+fn available_json(entries: &[AvailableEntry]) -> serde_json::Value {
+    serde_json::Value::Array(
+        entries
+            .iter()
+            .map(|e| json!({ "name": e.name, "kind": e.kind.as_str() }))
+            .collect(),
+    )
+}
+
+/// A resolved entry hit carrying every field both modes need.
 struct LookupHit {
     body_path: PathBuf,
+    kind: EntryKind,
+    /// The resolved concrete name. Equals `input.name` for the exact-match
+    /// path; for a glob it is the single matched candidate's name.
+    name: String,
+    description: String,
+    when_to_use: Option<String>,
     plugin_version: String,
-    /// #289: the kind the row resolved to (`Skill` or `Command`).
-    /// `lookup_skill` tries `Skill` first, then `Command`, so this records
-    /// which one actually matched — surfaced on `Output.kind` and used to
-    /// resolve the prompt name + the entry-invoked telemetry kind.
-    kind: crate::plugin::identity::EntryKind,
+    user_invocable: bool,
+}
+
+/// One `(name, kind)` pair for the available-entries / candidate lists.
+///
+/// Intentional kind-scope asymmetry (do NOT unify the two uses): the
+/// `unknown_skill` `available` list is deliberately kind-AGNOSTIC — it lists
+/// EVERY enabled entry the caller could ask for. The `AmbiguousGlob`
+/// `candidates` list is deliberately kind-SCOPED — only entries of the
+/// requested `kind` that the glob matched.
+struct AvailableEntry {
+    name: String,
+    kind: EntryKind,
 }
 
 enum LookupOutcome {
-    UnknownCatalog,
     Found(LookupHit),
-    UnknownPlugin,
-    UnknownSkill,
+    NotFound {
+        which: crate::mcp::tools::common::NotFound,
+        available: Vec<AvailableEntry>,
+    },
+    AmbiguousGlob {
+        candidates: Vec<AvailableEntry>,
+    },
 }
 
-fn lookup_skill(
+/// Build the enabled `(name, kind)` list for `(catalog, plugin)` — every
+/// enabled entry of any kind, in `list_for_plugin`'s `(kind, name)` order.
+fn available_entries(
+    conn: &rusqlite::Connection,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+) -> Result<Vec<AvailableEntry>, TomeError> {
+    Ok(
+        skills::list_for_plugin(conn, workspace_name, catalog, plugin)?
+            .into_iter()
+            .filter(|row| row.enabled)
+            .map(|row| AvailableEntry {
+                name: row.name,
+                kind: row.kind,
+            })
+            .collect(),
+    )
+}
+
+/// Resolve `(catalog, plugin, kind, name)` to an enabled entry.
+///
+/// * `get_skill` (full-body) historically tried `Skill` then `Command` when no
+///   `kind` was passed; the consolidated tool keeps that fallback ONLY for an
+///   exact name at the DEFAULT `kind` (Skill), so a caller that hands it a
+///   command name returned by `search_skills` still gets the command body. When
+///   the caller passes an explicit non-default `kind`, or uses a wildcard, only
+///   that `kind` is considered (the former `get_skill_info` semantics).
+fn lookup_entry(
     paths: &crate::paths::Paths,
     scope: &crate::workspace::Scope,
     catalog: &str,
     plugin: &str,
+    kind: EntryKind,
     name: &str,
 ) -> Result<LookupOutcome, TomeError> {
-    let db_path = paths.index_db.clone();
-    let conn = crate::index::db::open_read_only(&db_path)?;
+    let conn = crate::index::db::open_read_only(&paths.index_db)?;
     let workspace_name = scope.name().as_str();
-    // FF3: catalog existence resolves from `workspace_catalogs`, not
-    // `config.toml`. Checked FIRST so an unknown catalog takes precedence
-    // over unknown_plugin/unknown_skill — preserving the contract ordering
-    // the old `config.catalogs.contains_key` gate enforced before the
-    // index lookup. The guard is the shared `common::catalog_enrolled` SSOT
-    // (#295) — `get_skill_info` uses the same one, so the two surfaces can't
-    // drift on what "unknown catalog" means.
-    if !crate::mcp::tools::common::catalog_enrolled(&conn, workspace_name, catalog)? {
-        return Ok(LookupOutcome::UnknownCatalog);
+
+    // A `name` containing `*` is a glob — resolve it against the enabled
+    // entries of the requested `kind` for `(catalog, plugin)`.
+    if crate::plugin::selector::is_glob(name) {
+        let mut matches: Vec<skills::SkillRecord> =
+            skills::list_for_plugin(&conn, workspace_name, catalog, plugin)?
+                .into_iter()
+                .filter(|row| row.enabled && row.kind == kind)
+                .filter(|row| crate::plugin::selector::glob_match(name, &row.name))
+                .collect();
+        match matches.len() {
+            1 => {
+                let row = matches.remove(0);
+                return Ok(LookupOutcome::Found(hit_from_row(
+                    &conn,
+                    paths,
+                    workspace_name,
+                    catalog,
+                    plugin,
+                    row,
+                )?));
+            }
+            0 => {
+                // Fall through to the shared not-found classification below.
+            }
+            _ => {
+                let candidates = matches
+                    .into_iter()
+                    .map(|row| AvailableEntry {
+                        name: row.name,
+                        kind: row.kind,
+                    })
+                    .collect();
+                return Ok(LookupOutcome::AmbiguousGlob { candidates });
+            }
+        }
+        let which =
+            crate::mcp::tools::common::classify_not_found(&conn, workspace_name, catalog, plugin)?;
+        let available = if which == crate::mcp::tools::common::NotFound::UnknownSkill {
+            available_entries(&conn, workspace_name, catalog, plugin)?
+        } else {
+            Vec::new()
+        };
+        return Ok(LookupOutcome::NotFound { which, available });
     }
-    // #289: `get_skill` resolves BOTH `skill` and `command` entries — the
-    // directive instructs an agent to `get_skill(...)` Tier-1/Tier-2 entries,
-    // and `search_skills` ranks commands alongside skills, so hardcoding
-    // `EntryKind::Skill` (the pre-#289 FR-084 behaviour) returned
-    // `unknown_skill` for a real command — a guaranteed dead end. We try
-    // `Skill` first (so the historical default kind still wins when a plugin
-    // ships a skill and a command of the same name) then fall back to
-    // `Command`. Agents are never user-readable here (they are exposed only as
-    // optional personas) so they are intentionally NOT resolved.
-    use crate::plugin::identity::EntryKind;
-    for kind in [EntryKind::Skill, EntryKind::Command] {
-        if let Some(row) = skills::find(&conn, workspace_name, catalog, plugin, kind, name)? {
+
+    // Exact name. Try the requested kind first; when it is the DEFAULT (Skill),
+    // fall back to Command so a command name resolves through the full-body path
+    // (the pre-#497 `get_skill` behaviour). An explicit non-default kind is not
+    // widened (the former `get_skill_info` exactness).
+    let kinds: &[EntryKind] = if kind == EntryKind::Skill {
+        &[EntryKind::Skill, EntryKind::Command]
+    } else {
+        std::slice::from_ref(&kind)
+    };
+    for &try_kind in kinds {
+        if let Some(row) = skills::find(&conn, workspace_name, catalog, plugin, try_kind, name)? {
             if !row.enabled {
                 // A disabled row of this kind: keep looking (a sibling kind may
                 // be enabled) before collapsing to `unknown_skill` below.
                 continue;
             }
-            // Resolve the row's stored relative path to an absolute
-            // body path via the shared helper. A failure here means the
-            // catalog enrolment exists but the on-disk plugin directory
-            // is gone (cache evicted, manifest drift, …); we surface
-            // this through the existing `skill_file_missing` envelope
-            // downstream rather than `unknown_skill` because the
-            // index entry is real — the filesystem isn't.
-            let body_path = skills::resolve_entry_body_path(
+            return Ok(LookupOutcome::Found(hit_from_row(
                 &conn,
                 paths,
                 workspace_name,
                 catalog,
                 plugin,
-                &row.path,
-            )?;
-            return Ok(LookupOutcome::Found(LookupHit {
-                body_path,
-                plugin_version: row.plugin_version,
-                kind,
-            }));
+                row,
+            )?));
         }
     }
-    // No enabled skill- or command-kind row matched. Distinguish "plugin not
-    // enabled at all" from "plugin enabled but doesn't have this entry name"
-    // (or has it only as a disabled row) via the shared `common::classify_not_found`
-    // SSOT (#295): zero `(catalog, plugin)` rows ⇒ `unknown_plugin`, otherwise
-    // `unknown_skill`. The catalog was already gated to enrolled above, so the
-    // classifier's `UnknownCatalog` arm is unreachable here — map it to
-    // `UnknownCatalog` anyway for exhaustiveness (a future catalog-drop-mid-
-    // lookup would then surface correctly).
-    use crate::mcp::tools::common::NotFound;
-    Ok(
-        match crate::mcp::tools::common::classify_not_found(&conn, workspace_name, catalog, plugin)?
-        {
-            NotFound::UnknownCatalog => LookupOutcome::UnknownCatalog,
-            NotFound::UnknownPlugin => LookupOutcome::UnknownPlugin,
-            NotFound::UnknownSkill => LookupOutcome::UnknownSkill,
-        },
-    )
+
+    let which =
+        crate::mcp::tools::common::classify_not_found(&conn, workspace_name, catalog, plugin)?;
+    let available = if which == crate::mcp::tools::common::NotFound::UnknownSkill {
+        available_entries(&conn, workspace_name, catalog, plugin)?
+    } else {
+        Vec::new()
+    };
+    Ok(LookupOutcome::NotFound { which, available })
+}
+
+/// Build a [`LookupHit`] from a resolved `SkillRecord`, resolving its stored
+/// relative path to an absolute body path.
+fn hit_from_row(
+    conn: &rusqlite::Connection,
+    paths: &crate::paths::Paths,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+    row: skills::SkillRecord,
+) -> Result<LookupHit, TomeError> {
+    let body_path =
+        skills::resolve_entry_body_path(conn, paths, workspace_name, catalog, plugin, &row.path)?;
+    Ok(LookupHit {
+        body_path,
+        kind: row.kind,
+        name: row.name,
+        description: row.description,
+        when_to_use: row.when_to_use,
+        plugin_version: row.plugin_version,
+        user_invocable: row.user_invocable,
+    })
 }
 
 enum ReadError {
@@ -711,10 +971,7 @@ enum ReadError {
 }
 
 /// Read the entry body (frontmatter stripped) and, for skill-kind entries,
-/// the sibling resource paths. `walk_resources` is `false` for command-kind
-/// entries (#289): a command lives as a single `<plugin>/commands/<name>.md`
-/// file and its parent directory holds OTHER commands, so enumerating siblings
-/// would surface unrelated files — `resources` is left empty instead.
+/// the sibling resource paths.
 fn read_skill_and_resources(
     skill_path: &Path,
     walk_resources: bool,
@@ -723,12 +980,8 @@ fn read_skill_and_resources(
         return Err(ReadError::SkillFileMissing(skill_path.to_path_buf()));
     }
 
-    let parsed = frontmatter::parse_skill_frontmatter(skill_path).map_err(|e| {
-        // The enable pipeline rejects entries whose frontmatter is
-        // unparsable, so this branch is genuinely unreachable for an
-        // indexed entry — but the contract names it so we surface it.
-        ReadError::FrontmatterStripFailed(e.to_string())
-    })?;
+    let parsed = frontmatter::parse_skill_frontmatter(skill_path)
+        .map_err(|e| ReadError::FrontmatterStripFailed(e.to_string()))?;
 
     let mut resources: Vec<String> = Vec::new();
     if walk_resources {
@@ -742,26 +995,16 @@ fn read_skill_and_resources(
     Ok((parsed.body, resources))
 }
 
-/// FR-S-02: walk the skill's directory tree and collect every file
-/// path, but **reject symlinks** outright. A hostile catalog author can
-/// commit `skills/foo/credentials -> ~/.ssh/id_rsa`; without this guard
-/// the agent client receives that path as a "skill resource" and the
-/// file-reading tool will follow the symlink. The defence in depth is
-/// `entry.file_type()` (which uses `lstat` and does NOT follow
-/// symlinks) plus an explicit `is_symlink()` skip.
-///
-/// Returned-but-not-followed symlinks could still be sniffed by an
-/// agent if the agent's file tool resolves them — Tome can't prevent
-/// that, but we can at least not enumerate them ourselves.
+/// FR-S-02: walk the skill's directory tree and collect every file path, but
+/// **reject symlinks** outright (a hostile catalog author can commit a symlink
+/// to a secret). Defence in depth via `entry.file_type()` (lstat, doesn't
+/// follow symlinks) plus an explicit `is_symlink()` skip.
 fn walk_dir(dir: &Path, exclude: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let ft = entry.file_type()?;
         if ft.is_symlink() {
-            // Skip silently — `resources` is informational. We don't
-            // log here (would flood under hostile-catalog scenarios)
-            // but the symlink is invisible to the agent client.
             continue;
         }
         if ft.is_dir() {
@@ -773,49 +1016,118 @@ fn walk_dir(dir: &Path, exclude: &Path, out: &mut Vec<String>) -> std::io::Resul
     Ok(())
 }
 
+/// Enumerate the entry's parent directory for the metadata-only mode (inherited
+/// from the former `get_skill_info::walk_resources`).
+///
+/// - `files`: top-level files in the parent directory, excluding the entry body,
+///   alphabetised by basename, capped at [`PER_DIRECTORY_CAP`] + `"and N more"`.
+/// - `directories`: immediate subdirectories, each with its immediate children
+///   (NOT recursed), same cap + sentinel per subdirectory. [`BTreeMap`]
+///   guarantees alphabetical JSON key order.
+/// - Symlinks (file or dir) are skipped at every level (FR-S-02).
+fn walk_resources(body_path: &Path) -> std::io::Result<ResourceEnumeration> {
+    let parent = body_path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "entry path `{}` has no parent directory",
+                body_path.display()
+            ),
+        )
+    })?;
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            subdirs.push(path);
+        } else if ft.is_file() && path != body_path {
+            files.push(path);
+        }
+    }
+
+    files.sort_by(|a, b| basename_cmp(a, b));
+    subdirs.sort_by(|a, b| basename_cmp(a, b));
+
+    let files_out = clip_and_sentinel(files.iter().map(|p| p.display().to_string()).collect());
+
+    let mut directories: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for sub in subdirs {
+        let name = sub
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| sub.display().to_string());
+        let children = list_dir_children(&sub)?;
+        directories.insert(name, children);
+    }
+
+    Ok(ResourceEnumeration {
+        files: files_out,
+        directories,
+    })
+}
+
+/// List one subdirectory's immediate children (files only — recursion is
+/// intentionally NOT performed).
+fn list_dir_children(dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut children: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_file() {
+            children.push(path);
+        }
+    }
+    children.sort_by(|a, b| basename_cmp(a, b));
+    Ok(clip_and_sentinel(
+        children.iter().map(|p| p.display().to_string()).collect(),
+    ))
+}
+
+/// Apply the `"and N more"` sentinel rule: if `items` fits inside
+/// [`PER_DIRECTORY_CAP`], return it unchanged; otherwise truncate to the cap and
+/// append `"and {N} more"`.
+fn clip_and_sentinel(items: Vec<String>) -> Vec<String> {
+    if items.len() <= PER_DIRECTORY_CAP {
+        return items;
+    }
+    let omitted = items.len() - PER_DIRECTORY_CAP;
+    let mut out: Vec<String> = items.into_iter().take(PER_DIRECTORY_CAP).collect();
+    out.push(format!("and {omitted} more"));
+    out
+}
+
+/// Compare two paths by basename so the sorts above produce the
+/// alphabetical-by-name ordering the contract pins.
+fn basename_cmp(a: &Path, b: &Path) -> std::cmp::Ordering {
+    let an = a.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let bn = b.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    an.cmp(&bn)
+}
+
 /// #333: inline the subset of `resources` whose contents fit the per-file and
-/// whole-response byte budgets, returning `{ path, content }` records in the
-/// SAME order the paths appear in `resources`.
-///
-/// For each resource path (already symlink-refused at enumeration in
-/// [`walk_dir`], so no NEW unguarded read is introduced):
-///
-/// - read it BOUNDED via [`bounded_read_to_string`] with the per-file cap
-///   ([`MAX_INLINE_RESOURCE_BYTES`]) — a huge/hostile file is refused by its
-///   metadata length BEFORE any bytes are slurped, and a non-UTF-8 (binary)
-///   file surfaces as an `InvalidData` read error;
-/// - inline it ONLY if the read succeeded AND the running total plus this
-///   file's byte length stays within the whole-response cap
-///   ([`MAX_INLINE_TOTAL_BYTES`]);
-/// - otherwise SKIP it — a binary / over-per-file-cap / budget-exceeding /
-///   unreadable resource is silently omitted here (its path remains in
-///   `resources` for the agent to fetch itself). Skipping is per-file: a later,
-///   smaller resource can still fit even after a bigger one was skipped by the
-///   total budget, but the total is never exceeded.
-///
-/// Pure synchronous I/O — the caller runs it inside the existing
-/// `spawn_blocking` on the MCP async island.
-///
-/// [`bounded_read_to_string`]: crate::util::bounded_read_to_string
+/// whole-response byte budgets.
 fn inline_resource_bodies(resources: &[String]) -> Vec<ResourceBody> {
     let mut out: Vec<ResourceBody> = Vec::new();
     let mut total: u64 = 0;
     for path in resources {
-        // Bounded read: refuses over-per-file-cap (by metadata length, no slurp)
-        // and non-UTF-8 (as an `InvalidData` error). A read failure of any kind
-        // (missing, unreadable, over-cap, binary) ⇒ skip this resource.
         let Ok(content) =
             crate::util::bounded_read_to_string(Path::new(path), MAX_INLINE_RESOURCE_BYTES)
         else {
             continue;
         };
-        // Byte length of the UTF-8 content (== on-disk size for a text file).
-        // `saturating_add` keeps the budget check panic-free even in the
-        // (unreachable, given the per-file cap) event of an overflow.
         let len = content.len() as u64;
         if total.saturating_add(len) > MAX_INLINE_TOTAL_BYTES {
-            // Would exceed the whole-response budget — skip THIS file but keep
-            // scanning: a later, smaller resource may still fit.
             continue;
         }
         total = total.saturating_add(len);
@@ -827,32 +1139,21 @@ fn inline_resource_bodies(resources: &[String]) -> Vec<ResourceBody> {
     out
 }
 
-/// Build the [`SubstitutionContext`] for one `get_skill` call.
-///
-/// Mirrors `mcp::prompts::build_get_context` for fields shared between
-/// the two surfaces (catalog/plugin/entry scalars, paths, clock, lazy
-/// data-dir slots). The two divergences from prompts:
-///
-/// - `args` is always `None` and `declared_args` always empty (get_skill
-///   never accepts args — Stage 3 + Stage 4 are unreachable here).
-/// - `plugin_version` is sourced from the `SkillRecord.plugin_version`
-///   captured in `LookupHit`, not the registry cache (registry is the
-///   prompts-side construct).
+/// Build the [`SubstitutionContext`] for one full-body `get_skill` call. The
+/// entry `name` passed here is the RESOLVED name (for a wildcard, the concrete
+/// matched entry, not the pattern).
 fn build_substitution_context(
     state: &McpState,
     input: &Input,
+    resolved_name: &str,
     skill_path: &Path,
     plugin_version: String,
 ) -> Result<SubstitutionContext, (&'static str, McpError)> {
-    // Polish M-2 (Phase 5): delegates to the shared
-    // `mcp::substitution_helpers::build_context_for_entry` — same body
-    // shape as `prompts::build_get_context` modulo the
-    // args/declared_args constants (get_skill never accepts args).
     crate::mcp::substitution_helpers::build_context_for_entry(
         input.catalog.clone(),
         input.plugin.clone(),
         plugin_version,
-        input.name.clone(),
+        resolved_name.to_owned(),
         skill_path.to_path_buf(),
         state.scope.scope.name(),
         state.scope.project_root.clone(),
@@ -872,15 +1173,7 @@ fn build_substitution_context(
 }
 
 /// Map a [`SubstitutionError`] surfaced by the render pipeline to a
-/// (`code`, [`McpError`]) tuple. Mirrors the variant routing in
-/// `mcp::prompts::emit_tome_error_for_get` so both MCP surfaces agree
-/// on `data.code` slugs.
-///
-/// `InvalidArgumentFrontmatter` and `PromptArgumentMismatch` are
-/// defensively mapped even though `get_skill` never supplies args
-/// (declared_args is empty and Stage 3 is unreachable) — keeps the
-/// match exhaustive against the closed `SubstitutionError` enum so a
-/// future variant addition surfaces as a compile error here.
+/// (`code`, [`McpError`]) tuple.
 fn map_substitution_error(err: SubstitutionError) -> (&'static str, McpError) {
     match err {
         SubstitutionError::PluginDataDirCreationFailed { path, source } => (
@@ -943,11 +1236,8 @@ fn map_substitution_error(err: SubstitutionError) -> (&'static str, McpError) {
     }
 }
 
-/// Map a substitution/context-build `code` slug (the `&'static str` first element
-/// of the `(code, McpError)` tuples produced by [`map_substitution_error`] and
-/// [`build_substitution_context`]) back to its closed [`ErrorCategory`], for the
-/// Co-M1 attributed-error telemetry. Any unrecognised slug falls back to the
-/// generic `SubstitutionFailed` category (the render stage's umbrella class).
+/// Map a substitution/context-build `code` slug back to its closed
+/// [`ErrorCategory`], for the Co-M1 attributed-error telemetry.
 fn substitution_code_to_category(code: &str) -> crate::error::ErrorCategory {
     use crate::error::ErrorCategory;
     match code {
@@ -955,25 +1245,20 @@ fn substitution_code_to_category(code: &str) -> crate::error::ErrorCategory {
         "workspace_data_dir_write_failed" => ErrorCategory::WorkspaceDataDirWriteFailed,
         "invalid_argument_frontmatter" => ErrorCategory::InvalidArgumentFrontmatter,
         "prompt_argument_mismatch" => ErrorCategory::PromptArgumentMismatch,
-        // "substitution_failed" (the context-build umbrella) + any future slug.
         _ => ErrorCategory::SubstitutionFailed,
     }
 }
 
 /// Build the `internal_error` envelope plus an error log event.
-///
-/// #296: `category` drives both the `data.code` slug and the structured
-/// `retryable` / `remediation` fields (via [`error_data`]), so this residual
-/// path agrees with the CLI envelope and every other MCP surface.
 fn internal(input: &Input, started: Instant, msg: String, category: ErrorCategory) -> McpError {
-    // FR-M-LOG-1: scrub error chains before logging — reqwest / git
-    // error messages can carry signed URLs.
+    // FR-M-LOG-1: scrub error chains before logging.
     let scrubbed = crate::catalog::git::scrub_to_string(msg.as_bytes());
     error!(
         target: "tome::mcp::tools::get_skill",
         catalog = input.catalog,
         plugin = input.plugin,
         name = input.name,
+        kind = input.kind.as_str(),
         error_code = category.as_str(),
         error_message = %scrubbed,
         elapsed_ms = started.elapsed().as_millis() as u64,
@@ -982,53 +1267,32 @@ fn internal(input: &Input, started: Instant, msg: String, category: ErrorCategor
     McpError::internal_error(msg, Some(error_data(category)))
 }
 
-/// Log the error variants the contract recognises, then return the
-/// caller's pre-built `McpError` unchanged.
+/// Log the error variants the contract recognises, then return the caller's
+/// pre-built `McpError` unchanged.
 fn emit_error(input: &Input, started: Instant, code: &str, err: McpError) -> McpError {
     info!(
         target: "tome::mcp::tools::get_skill",
         catalog = input.catalog,
         plugin = input.plugin,
         name = input.name,
+        kind = input.kind.as_str(),
         result = code,
-        body_bytes = 0,
-        resource_count = 0,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "call",
     );
     err
 }
 
-/// Co-M1 / FR-052: emit the POST-resolution telemetry for a `get_skill` failure
-/// that occurred AFTER the entry row resolved — so the (non-optional)
-/// `plugin_version` and the entry/plugin names are all in hand (the FR-059
-/// PUBLISHED-artefact carve-out, never a secret).
-///
-/// Emits the anonymous `tome.error` (closed [`ErrorCategory`] only) and, ALONGSIDE,
-/// the attributed `catalog.<id>.error` IFF this entry's catalog resolves — by
-/// SOURCE, at emit time — to an allowlisted catalog. Mirrors the success-path
-/// `entry_invoked` attribution; `None` ⇒ anonymous only.
-///
-/// Sec-M1 / R-L1: the attribution read + the attributed enqueue are folded into a
-/// `spawn_blocking` (best-effort: a join error is ignored) so the sync SQLite
-/// open+query never runs on the single-threaded MCP reactor. Best-effort
-/// throughout — never alters the returned `McpError`.
-///
-/// This is distinct from the PRE-resolution lookup boundary (see the
-/// `lookup_skill` `map_err` above), where there is no trustworthy
-/// `plugin_version` and the attributed error stays DEFERRED.
+/// Co-M1 / FR-052: emit the POST-resolution telemetry for a full-body
+/// `get_skill` failure that occurred AFTER the entry row resolved.
 async fn emit_post_resolution_error_telemetry(
     state: &Arc<McpState>,
     input: &Input,
     plugin_version: String,
     category: crate::error::ErrorCategory,
 ) {
-    // Anonymous `tome.error` (closed category only, MCP surface + this session's
-    // calling harness). Same infallible local append as every other enqueue.
     crate::mcp::enqueue_tool_error(state, category);
 
-    // Attributed `catalog.<id>.error`, folded into a blocking task so the
-    // `resolve_attribution` SQLite read never stalls the reactor.
     let scope = state.scope.clone();
     let catalog = input.catalog.clone();
     let plugin_name = input.plugin.clone();
@@ -1053,8 +1317,223 @@ impl Input {
             catalog: self.catalog.clone(),
             plugin: self.plugin.clone(),
             name: self.name.clone(),
+            kind: self.kind,
+            metadata_only: self.metadata_only,
             raw: self.raw,
             include_resource_bodies: self.include_resource_bodies,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_under_cap_returns_unchanged() {
+        let items: Vec<String> = (0..PER_DIRECTORY_CAP)
+            .map(|i| format!("item-{i}"))
+            .collect();
+        let clipped = clip_and_sentinel(items.clone());
+        assert_eq!(clipped, items);
+    }
+
+    #[test]
+    fn clip_at_cap_returns_unchanged() {
+        let items: Vec<String> = (0..PER_DIRECTORY_CAP)
+            .map(|i| format!("item-{i}"))
+            .collect();
+        assert_eq!(items.len(), PER_DIRECTORY_CAP);
+        let clipped = clip_and_sentinel(items.clone());
+        assert_eq!(clipped, items, "exactly-at-cap must NOT add sentinel");
+    }
+
+    #[test]
+    fn clip_over_cap_truncates_and_appends_sentinel() {
+        let total = PER_DIRECTORY_CAP + 3;
+        let items: Vec<String> = (0..total).map(|i| format!("item-{i:02}")).collect();
+        let clipped = clip_and_sentinel(items);
+        assert_eq!(clipped.len(), PER_DIRECTORY_CAP + 1);
+        assert_eq!(clipped[PER_DIRECTORY_CAP], "and 3 more");
+        for (idx, val) in clipped.iter().take(PER_DIRECTORY_CAP).enumerate() {
+            assert_eq!(val, &format!("item-{idx:02}"));
+        }
+    }
+
+    #[test]
+    fn basename_cmp_orders_by_filename_not_full_path() {
+        let p1 = PathBuf::from("/tmp/b/aaa");
+        let p2 = PathBuf::from("/tmp/a/zzz");
+        assert_eq!(basename_cmp(&p1, &p2), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn walk_resources_alphabetises_files_and_skips_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let entry = dir.join("SKILL.md");
+        std::fs::write(&entry, "body").unwrap();
+        std::fs::write(dir.join("zebra.txt"), "z").unwrap();
+        std::fs::write(dir.join("apple.txt"), "a").unwrap();
+        std::fs::write(dir.join("mango.txt"), "m").unwrap();
+
+        let r = walk_resources(&entry).unwrap();
+        assert_eq!(r.files.len(), 3);
+        assert!(r.files[0].ends_with("apple.txt"));
+        assert!(r.files[1].ends_with("mango.txt"));
+        assert!(r.files[2].ends_with("zebra.txt"));
+        assert!(r.directories.is_empty());
+    }
+
+    #[test]
+    fn walk_resources_caps_top_level_files_with_sentinel() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let entry = dir.join("SKILL.md");
+        std::fs::write(&entry, "body").unwrap();
+        for i in 0..7 {
+            std::fs::write(dir.join(format!("file-{i:02}.txt")), "x").unwrap();
+        }
+        let r = walk_resources(&entry).unwrap();
+        assert_eq!(r.files.len(), PER_DIRECTORY_CAP + 1);
+        assert_eq!(r.files[PER_DIRECTORY_CAP], "and 2 more");
+    }
+
+    #[test]
+    fn walk_resources_enumerates_subdirs_alphabetically_with_per_dir_cap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let entry = dir.join("SKILL.md");
+        std::fs::write(&entry, "body").unwrap();
+
+        let examples = dir.join("examples");
+        std::fs::create_dir(&examples).unwrap();
+        std::fs::write(examples.join("basic.ts"), "x").unwrap();
+        std::fs::write(examples.join("advanced.ts"), "x").unwrap();
+
+        let scripts = dir.join("scripts");
+        std::fs::create_dir(&scripts).unwrap();
+        for i in 0..7 {
+            std::fs::write(scripts.join(format!("step-{i:02}.sh")), "x").unwrap();
+        }
+
+        let r = walk_resources(&entry).unwrap();
+        let keys: Vec<&str> = r.directories.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["examples", "scripts"]);
+
+        let examples_out = r.directories.get("examples").unwrap();
+        assert_eq!(examples_out.len(), 2);
+        assert!(examples_out[0].ends_with("advanced.ts"));
+        assert!(examples_out[1].ends_with("basic.ts"));
+
+        let scripts_out = r.directories.get("scripts").unwrap();
+        assert_eq!(scripts_out.len(), PER_DIRECTORY_CAP + 1);
+        assert_eq!(scripts_out[PER_DIRECTORY_CAP], "and 2 more");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_resources_skips_symlinks() {
+        let entry_tmp = tempfile::TempDir::new().unwrap();
+        let target_tmp = tempfile::TempDir::new().unwrap();
+        let dir = entry_tmp.path();
+        let entry = dir.join("SKILL.md");
+        std::fs::write(&entry, "body").unwrap();
+        std::fs::write(dir.join("real.txt"), "r").unwrap();
+
+        let target = target_tmp.path().join("secret.txt");
+        std::fs::write(&target, "secret").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("link.txt")).unwrap();
+
+        let r = walk_resources(&entry).unwrap();
+        assert_eq!(
+            r.files.len(),
+            1,
+            "symlink must be skipped, got {:?}",
+            r.files
+        );
+        assert!(r.files[0].ends_with("real.txt"));
+    }
+
+    /// Full-body Output serialises with `content` + `resources` + `kind` +
+    /// `substitutions_applied`, and OMITS every metadata-only field — the wire
+    /// shape stays byte-identical to the pre-#497 `get_skill` output.
+    #[test]
+    fn body_mode_output_omits_metadata_fields() {
+        let out = Output {
+            catalog: "c".into(),
+            plugin: "p".into(),
+            name: "s".into(),
+            kind: EntryKind::Skill,
+            path: "/abs/SKILL.md".into(),
+            content: Some("body".into()),
+            resources_paths: Some(vec!["/abs/a.txt".into()]),
+            substitutions_applied: Some(true),
+            resource_bodies: None,
+            description: None,
+            when_to_use: MetaWhenToUse::Absent,
+            plugin_version: None,
+            user_invocable: None,
+            resources: None,
+            prompt_name: None,
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        // Body-mode fields present.
+        assert!(json.contains("\"content\":\"body\""), "{json}");
+        assert!(json.contains("\"resources\":[\"/abs/a.txt\"]"), "{json}");
+        assert!(json.contains("\"substitutions_applied\":true"), "{json}");
+        assert!(json.contains("\"kind\":\"skill\""), "{json}");
+        // Metadata-mode fields absent.
+        for absent in [
+            "description",
+            "when_to_use",
+            "plugin_version",
+            "user_invocable",
+            "resource_bodies",
+            "prompt_name",
+        ] {
+            assert!(
+                !json.contains(&format!("\"{absent}\"")),
+                "body-mode JSON must omit `{absent}`: {json}",
+            );
+        }
+    }
+
+    /// Metadata-only Output serialises with `description` + `when_to_use`
+    /// (nullable) + `plugin_version` + `user_invocable` + `resources`
+    /// enumeration, and OMITS every body-mode field.
+    #[test]
+    fn metadata_mode_output_omits_body_fields() {
+        let out = Output {
+            catalog: "c".into(),
+            plugin: "p".into(),
+            name: "s".into(),
+            kind: EntryKind::Skill,
+            path: "/abs/SKILL.md".into(),
+            content: None,
+            resources_paths: None,
+            substitutions_applied: None,
+            resource_bodies: None,
+            description: Some("desc".into()),
+            when_to_use: MetaWhenToUse::Null,
+            plugin_version: Some("1.0.0".into()),
+            user_invocable: Some(false),
+            resources: Some(ResourceEnumeration {
+                files: vec!["/abs/x.txt".into()],
+                directories: BTreeMap::new(),
+            }),
+            prompt_name: None,
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains("\"description\":\"desc\""), "{json}");
+        // `when_to_use` serialises as JSON null (present-but-none).
+        assert!(json.contains("\"when_to_use\":null"), "{json}");
+        assert!(json.contains("\"plugin_version\":\"1.0.0\""), "{json}");
+        assert!(json.contains("\"user_invocable\":false"), "{json}");
+        assert!(json.contains("\"resources\":{"), "{json}");
+        // Body-mode fields absent.
+        assert!(!json.contains("\"content\""), "{json}");
+        assert!(!json.contains("\"substitutions_applied\""), "{json}");
+        assert!(!json.contains("\"resource_bodies\""), "{json}");
     }
 }

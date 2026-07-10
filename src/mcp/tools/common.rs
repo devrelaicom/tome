@@ -1,18 +1,18 @@
-//! Shared lookup helpers for the read-side MCP tools (`get_skill`,
-//! `get_skill_info`).
+//! Shared lookup helpers for the read-side MCP tools.
 //!
-//! Both tools need to answer the SAME question when a `(catalog, plugin, name)`
-//! lookup fails to resolve an enabled entry: *which* not-found case is it —
-//! `unknown_catalog`, `unknown_plugin`, or `unknown_skill`? #295 aligned
-//! `get_skill_info` onto `get_skill`'s three-code surface so an agent never
-//! pays a second round-trip to learn whether the catalog, the plugin, or just
-//! the entry name was wrong.
+//! Every read-side lookup needs to answer the SAME question when a `(catalog,
+//! plugin, name)` lookup fails to resolve an enabled entry: *which* not-found
+//! case is it — `unknown_catalog`, `unknown_plugin`, or `unknown_skill`? #295
+//! aligned the body-fetch and metadata-only lookups onto one three-code surface
+//! so an agent never pays a second round-trip to learn whether the catalog, the
+//! plugin, or just the entry name was wrong. #497 consolidated the two former
+//! tools (`get_skill` + `get_skill_info`) into a single `get_skill`, so both its
+//! modes route through the one classifier here.
 //!
 //! The catalog/plugin existence guards live here as the single source of truth
 //! (the "single-source-of-truth promotion at the second consumer" pattern):
-//! `get_skill` used to own them inline, and `get_skill_info` would otherwise
-//! have had to copy-paste the identical `workspace_catalogs::find` +
-//! `list_for_plugin`-is-empty logic. Both now call [`classify_not_found`].
+//! every not-found path calls [`classify_not_found`] rather than re-deriving the
+//! identical `workspace_catalogs::find` + `list_for_plugin`-is-empty logic.
 
 use serde_json::{Value, json};
 
@@ -64,7 +64,7 @@ pub fn error_data_with_code(code: &str, category: ErrorCategory, extra: &[(&str,
 /// The three not-found classifications the read-side tools distinguish, in the
 /// contract's precedence order (catalog, then plugin, then skill). Each maps to
 /// a stable `data.code` slug on the wire (`unknown_catalog` / `unknown_plugin`
-/// / `unknown_skill`) — identical across `get_skill` and `get_skill_info`.
+/// / `unknown_skill`) — identical across both `get_skill` modes (#497).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotFound {
     /// The catalog is not enrolled in the resolved workspace's
@@ -103,9 +103,9 @@ pub fn catalog_enrolled(
 /// 3. Otherwise (the plugin has rows, just not this enabled entry) →
 ///    [`NotFound::UnknownSkill`].
 ///
-/// This is the shared classifier `get_skill` and `get_skill_info` both route
-/// through, so the two surfaces emit byte-identical codes + precedence for the
-/// same failure. `list_for_plugin` returns every row for the pair regardless of
+/// This is the shared classifier every read-side lookup routes through, so all
+/// surfaces emit byte-identical codes + precedence for the same failure.
+/// `list_for_plugin` returns every row for the pair regardless of
 /// per-row enablement, so "empty" means the plugin genuinely has no entries in
 /// this workspace — the same `unknown_plugin` vs `unknown_skill` split
 /// `get_skill` has always drawn.

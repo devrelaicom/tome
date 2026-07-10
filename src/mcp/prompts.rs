@@ -841,8 +841,8 @@ impl PromptRegistry {
     /// (post-collision-suffixing) prompt name it is registered under, or
     /// `None` when no prompt exists for it.
     ///
-    /// This is the SSOT for "what prompt does `search_skills` / `get_skill` /
-    /// `get_skill_info` point a caller at for this entry" — it resolves the
+    /// This is the SSOT for "what prompt does `search_skills` / `get_skill`
+    /// (body or metadata_only) point a caller at for this entry" — it resolves the
     /// override + collision suffix that `prompt_name::derive_name` alone cannot
     /// (the override lives only in frontmatter, the suffix only in this
     /// registry). `None` is the right answer for an entry that is searchable

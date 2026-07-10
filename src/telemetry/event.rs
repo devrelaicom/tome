@@ -426,7 +426,8 @@ impl Event for Search {
     }
 }
 
-/// `tome.entry_info` — a `get_skill_info` lookup. `rank` is this entry's exact
+/// `tome.entry_info` — a metadata-only `get_skill` lookup (`metadata_only:
+/// true`, formerly the `get_skill_info` tool). `rank` is this entry's exact
 /// 1-indexed position in the preceding search this session (`0` ⇒ no rank).
 #[derive(Debug, Clone, Serialize)]
 pub struct EntryInfo {

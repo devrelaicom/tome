@@ -87,6 +87,8 @@ fn get_skill_plugin_data_dir_unwritable_exits_9() {
             catalog: staged.catalog_name.clone(),
             plugin: staged.plugin_name.clone(),
             name: "needs-data".into(),
+            kind: tome::plugin::identity::EntryKind::Skill,
+            metadata_only: false,
             raw: false,
             include_resource_bodies: false,
         })
@@ -172,6 +174,8 @@ fn get_skill_with_missing_plugin_dir_exits_27() {
             catalog: staged.catalog_name.clone(),
             plugin: staged.plugin_name.clone(),
             name: "ghost".into(),
+            kind: tome::plugin::identity::EntryKind::Skill,
+            metadata_only: false,
             raw: false,
             include_resource_bodies: false,
         })

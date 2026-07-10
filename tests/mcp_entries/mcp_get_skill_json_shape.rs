@@ -1,82 +1,100 @@
-//! Byte-stable JSON wire-shape pin for `get_skill`'s `Output`. #289.
+//! Byte-stable JSON wire-shape pin for the consolidated `get_skill` `Output`.
+//! #289 / #331 / #333 / #497.
 //!
-//! `get_skill_info` and `search_skills` each have a shape pin; `get_skill`
-//! previously had none. #289 made `get_skill` additive: a non-`Option` `kind`
-//! key now appears on EVERY result (skill-kind included), and an optional
-//! `prompt_name` appears for user-invocable entries (omitted otherwise via
-//! `#[serde(skip_serializing_if = "Option::is_none")]`).
+//! Issue #497 consolidated `get_skill` + `get_skill_info` into one tool with a
+//! `metadata_only` flag, so the `Output` now serves both modes through one
+//! struct. This file pins the FULL-BODY mode (`metadata_only: false`); the
+//! metadata-only mode is pinned in `mcp_get_skill_info_json_shape.rs`.
 //!
-//! Two snapshots are pinned:
-//!
-//! 1. Skill-kind, non-invocable: `kind: "skill"` PRESENT (the additive #289
-//!    key), `prompt_name` ABSENT. This is the common skill case — the pin
-//!    documents that the pre-#289 fields keep their order and the only change
-//!    is the appended `kind` key.
-//! 2. Command-kind, invocable: `kind: "command"` + `prompt_name` PRESENT,
-//!    appended LAST, with empty `resources`.
+//! Full-body mode field order:
+//!   catalog, plugin, name, kind, path, content, resources,
+//!   substitutions_applied, [resource_bodies], [prompt_name].
+//! Every metadata-only field (`description` / `when_to_use` / `plugin_version`
+//! / `user_invocable` / structured `resources` enumeration) is `Option`/tri-
+//! state-gated and MUST be absent here.
 //!
 //! Each snapshot is constructed directly from the public types so the test
 //! doesn't need a staged workspace or the index — it pins the Serialize impl
 //! shape, not the handler's behaviour (covered end-to-end in `entry_e2e.rs`).
 //! Any field rename, reorder, or default-flip will flip this test red.
 
-use tome::mcp::tools::get_skill::{Output, ResourceBody};
+use std::collections::BTreeMap;
+
+use tome::mcp::tools::get_skill::{MetaWhenToUse, Output, ResourceBody};
 use tome::plugin::identity::EntryKind;
+
+/// A full-body `Output` builder: the metadata-only fields are all absent.
+fn body_output(
+    content: &str,
+    path: &str,
+    resources: Vec<String>,
+    kind: EntryKind,
+    prompt_name: Option<String>,
+    substitutions_applied: bool,
+    resource_bodies: Option<Vec<ResourceBody>>,
+) -> Output {
+    Output {
+        catalog: "midnight-expert".into(),
+        plugin: "compact-dev".into(),
+        name: "compact-circuits".into(),
+        kind,
+        path: path.into(),
+        content: Some(content.into()),
+        resources_paths: Some(resources),
+        substitutions_applied: Some(substitutions_applied),
+        resource_bodies,
+        description: None,
+        when_to_use: MetaWhenToUse::Absent,
+        plugin_version: None,
+        user_invocable: None,
+        resources: None,
+        prompt_name,
+    }
+}
 
 #[test]
 fn get_skill_output_wire_shape_for_skill_kind() {
-    let out = Output {
-        content: "rendered skill body".into(),
-        path: "/abs/path/to/SKILL.md".into(),
-        resources: vec!["/abs/path/to/examples/basic.ts".into()],
-        kind: EntryKind::Skill,
-        // A non-invocable skill has no prompt — `prompt_name` is `None` and
-        // MUST be omitted; only the additive `kind` key is added vs pre-#289.
-        prompt_name: None,
-        // #331: the default (rendered) mode reports `substitutions_applied:
-        // true`. Always present (non-`Option`), appended LAST.
-        substitutions_applied: true,
-        // #333: `include_resource_bodies` was NOT requested → `resource_bodies`
-        // is `None` and MUST be omitted (skip_serializing_if), so the flag-off
-        // wire shape is byte-identical to pre-#333.
-        resource_bodies: None,
-    };
+    let out = body_output(
+        "rendered skill body",
+        "/abs/path/to/SKILL.md",
+        vec!["/abs/path/to/examples/basic.ts".into()],
+        EntryKind::Skill,
+        None,
+        true,
+        None,
+    );
 
     let json = serde_json::to_string(&out).expect("serialise");
 
-    // Document order: content, path, resources, kind, [prompt_name omitted],
-    // substitutions_applied, [resource_bodies omitted]. `kind` is lowercase via
-    // `#[serde(rename_all = "lowercase")]` on `EntryKind`. `prompt_name` is
-    // ABSENT (None + skip_serializing_if). `substitutions_applied` is the
-    // additive #331 key. `resource_bodies` is ABSENT (None + skip_serializing_if,
-    // #333) — the flag-off shape is byte-identical to pre-#333.
-    let expected = r#"{"content":"rendered skill body","path":"/abs/path/to/SKILL.md","resources":["/abs/path/to/examples/basic.ts"],"kind":"skill","substitutions_applied":true}"#;
+    // Document order for full-body mode: catalog, plugin, name, kind, path,
+    // content, resources, substitutions_applied. `prompt_name` ABSENT (None +
+    // skip_serializing_if). `resource_bodies` ABSENT (flag off). Every
+    // metadata-only field ABSENT.
+    let expected = r#"{"catalog":"midnight-expert","plugin":"compact-dev","name":"compact-circuits","kind":"skill","path":"/abs/path/to/SKILL.md","content":"rendered skill body","resources":["/abs/path/to/examples/basic.ts"],"substitutions_applied":true}"#;
 
     assert_eq!(
         json, expected,
-        "get_skill skill-kind JSON wire shape drift — `kind` must be present (additive #289), `prompt_name` absent, `substitutions_applied` present (additive #331), `resource_bodies` absent (additive #333, flag off)",
+        "get_skill full-body skill-kind JSON wire shape drift (#497 consolidation)",
     );
 }
 
 #[test]
 fn get_skill_output_wire_shape_for_raw_mode() {
     // #331: `raw: true` preserves literal `${TOME_*}` tokens and reports
-    // `substitutions_applied: false`. Wire shape is otherwise identical — the
-    // only difference is the boolean value of the always-present key.
-    let out = Output {
-        content: "raw body with ${TOME_PROJECT_DIR} preserved".into(),
-        path: "/abs/path/to/SKILL.md".into(),
-        resources: vec![],
-        kind: EntryKind::Skill,
-        prompt_name: None,
-        substitutions_applied: false,
-        // #333: not requested → absent, byte-identical to pre-#333.
-        resource_bodies: None,
-    };
+    // `substitutions_applied: false`. Wire shape is otherwise identical.
+    let out = body_output(
+        "raw body with ${TOME_PROJECT_DIR} preserved",
+        "/abs/path/to/SKILL.md",
+        vec![],
+        EntryKind::Skill,
+        None,
+        false,
+        None,
+    );
 
     let json = serde_json::to_string(&out).expect("serialise");
 
-    let expected = r#"{"content":"raw body with ${TOME_PROJECT_DIR} preserved","path":"/abs/path/to/SKILL.md","resources":[],"kind":"skill","substitutions_applied":false}"#;
+    let expected = r#"{"catalog":"midnight-expert","plugin":"compact-dev","name":"compact-circuits","kind":"skill","path":"/abs/path/to/SKILL.md","content":"raw body with ${TOME_PROJECT_DIR} preserved","resources":[],"substitutions_applied":false}"#;
 
     assert_eq!(
         json, expected,
@@ -86,28 +104,26 @@ fn get_skill_output_wire_shape_for_raw_mode() {
 
 #[test]
 fn get_skill_output_wire_shape_for_command_kind() {
-    // #289: a user-invocable command resolved by get_skill carries its derived
-    // MCP `prompt_name`, appended LAST, with no sibling-resource enumeration.
-    let out = Output {
-        content: "run the deploy".into(),
-        path: "/abs/path/to/commands/deploy.md".into(),
-        resources: vec![],
-        kind: EntryKind::Command,
-        prompt_name: Some("plug__deploy".into()),
-        // #331: rendered mode; `substitutions_applied` follows `prompt_name`.
-        substitutions_applied: true,
-        // #333: commands have no resource directory → `resource_bodies` stays
-        // `None`/absent even had the flag been passed.
-        resource_bodies: None,
-    };
+    // #289: a user-invocable command carries its derived MCP `prompt_name`,
+    // appended LAST, with no sibling-resource enumeration.
+    let mut out = body_output(
+        "run the deploy",
+        "/abs/path/to/commands/deploy.md",
+        vec![],
+        EntryKind::Command,
+        Some("plug__deploy".into()),
+        true,
+        None,
+    );
+    out.name = "deploy".into();
 
     let json = serde_json::to_string(&out).expect("serialise");
 
-    let expected = r#"{"content":"run the deploy","path":"/abs/path/to/commands/deploy.md","resources":[],"kind":"command","prompt_name":"plug__deploy","substitutions_applied":true}"#;
+    let expected = r#"{"catalog":"midnight-expert","plugin":"compact-dev","name":"deploy","kind":"command","path":"/abs/path/to/commands/deploy.md","content":"run the deploy","resources":[],"substitutions_applied":true,"prompt_name":"plug__deploy"}"#;
 
     assert_eq!(
         json, expected,
-        "get_skill command-kind JSON wire shape drift — `kind` lowercase `command`, `prompt_name` then `substitutions_applied` appended LAST, `resource_bodies` absent (#333)",
+        "get_skill command-kind JSON wire shape drift — `prompt_name` appended LAST after `substitutions_applied`",
     );
 }
 
@@ -115,36 +131,56 @@ fn get_skill_output_wire_shape_for_command_kind() {
 fn get_skill_output_wire_shape_with_inlined_resource_bodies() {
     // #333: when `include_resource_bodies` was requested and at least one
     // resource fit the byte budget, `resource_bodies` is PRESENT as an array of
-    // `{ path, content }`, appended LAST (after `substitutions_applied`). Each
-    // `path` also appears in `resources` — `resource_bodies` is a parallel VIEW,
-    // not a replacement.
-    let out = Output {
-        content: "rendered skill body".into(),
-        path: "/abs/path/to/SKILL.md".into(),
-        resources: vec![
+    // `{ path, content }`, appended after `substitutions_applied`.
+    let out = body_output(
+        "rendered skill body",
+        "/abs/path/to/SKILL.md",
+        vec![
             "/abs/path/to/examples/basic.ts".into(),
             "/abs/path/to/data/blob.bin".into(),
         ],
-        kind: EntryKind::Skill,
-        prompt_name: None,
-        substitutions_applied: true,
-        // Only the text resource was inlined; the binary one is omitted here but
-        // still present in `resources` above.
-        resource_bodies: Some(vec![ResourceBody {
+        EntryKind::Skill,
+        None,
+        true,
+        Some(vec![ResourceBody {
             path: "/abs/path/to/examples/basic.ts".into(),
             content: "export const x = 1;\n".into(),
         }]),
-    };
+    );
 
     let json = serde_json::to_string(&out).expect("serialise");
 
-    // Order: content, path, resources, kind, [prompt_name omitted],
-    // substitutions_applied, resource_bodies. Each `resource_bodies` element is
-    // `{ "path": ..., "content": ... }` in field order.
-    let expected = r#"{"content":"rendered skill body","path":"/abs/path/to/SKILL.md","resources":["/abs/path/to/examples/basic.ts","/abs/path/to/data/blob.bin"],"kind":"skill","substitutions_applied":true,"resource_bodies":[{"path":"/abs/path/to/examples/basic.ts","content":"export const x = 1;\n"}]}"#;
+    let expected = r#"{"catalog":"midnight-expert","plugin":"compact-dev","name":"compact-circuits","kind":"skill","path":"/abs/path/to/SKILL.md","content":"rendered skill body","resources":["/abs/path/to/examples/basic.ts","/abs/path/to/data/blob.bin"],"substitutions_applied":true,"resource_bodies":[{"path":"/abs/path/to/examples/basic.ts","content":"export const x = 1;\n"}]}"#;
 
     assert_eq!(
         json, expected,
-        "get_skill inlined-resource-bodies JSON wire shape drift — `resource_bodies` appended LAST as an array of path/content objects",
+        "get_skill inlined-resource-bodies JSON wire shape drift — `resource_bodies` appended after `substitutions_applied`",
     );
+}
+
+/// A skill-kind full-body output that carries a subdirectory in `resources`
+/// must NOT emit the structured metadata `resources` enumeration (which uses a
+/// `files`/`directories` object). The two `resources` are distinct: full-body
+/// mode serialises `resources_paths` (a flat array) under the `resources` key.
+#[test]
+fn full_body_resources_is_a_flat_array_never_the_metadata_object() {
+    let out = body_output(
+        "body",
+        "/abs/SKILL.md",
+        vec!["/abs/a.txt".into()],
+        EntryKind::Skill,
+        None,
+        true,
+        None,
+    );
+    let value = serde_json::to_value(&out).expect("serialise");
+    let obj = value.as_object().expect("object");
+    // `resources` is an array (the flat path list), never a `{files,directories}`
+    // object.
+    assert!(
+        obj.get("resources").and_then(|r| r.as_array()).is_some(),
+        "full-body `resources` must serialise as a flat array; got: {value}",
+    );
+    // No metadata-object shape leaks in.
+    let _unused: BTreeMap<String, Vec<String>> = BTreeMap::new();
 }
