@@ -196,11 +196,26 @@ fn plan_plugin(
         });
     }
 
-    // Verbatim pass-through (hooks/): planned as Copy like supporting files;
-    // `ensure_in_bounds` still asserts every rel at the sink.
-    for f in &plugin.hooks_files {
+    // hooks/ pass-through: `hooks/hooks.json` is emitted as Text when the
+    // importer normalised it (unwrapping the `{"hooks":{...}}` wrapped form so
+    // `harness sync` never sees the exit-43 shape); all other hooks/ files
+    // (scripts, etc.) are copied verbatim. `ensure_in_bounds` still asserts
+    // every rel at the sink.
+    let hooks_json_rel = prefix.join("hooks").join("hooks.json");
+    if let Some(normalised) = &plugin.hooks_json {
         files.push(PlannedFile {
-            rel: prefix.join(&f.relative),
+            rel: hooks_json_rel.clone(),
+            content: PlannedContent::Text(normalised.clone()),
+        });
+    }
+    for f in &plugin.hooks_files {
+        let rel = prefix.join(&f.relative);
+        if plugin.hooks_json.is_some() && rel == hooks_json_rel {
+            // Already emitted above as normalised Text; skip the verbatim Copy.
+            continue;
+        }
+        files.push(PlannedFile {
+            rel,
             content: PlannedContent::Copy(f.source.clone()),
         });
     }

@@ -327,8 +327,10 @@ fn invalid_hooks_json_produces_a_hooks_spec_warning() {
 
 #[test]
 fn valid_hooks_json_produces_no_hooks_spec_finding() {
-    // A native plugin with a hooks/hooks.json that is valid JSON must not
-    // produce any lint/hooks-spec finding.
+    // A native plugin with a hooks/hooks.json in the event-map form must not
+    // produce any lint/hooks-spec finding.  The wrapped form {"hooks":{...}} IS
+    // flagged (it would cause harness sync to exit 43); the event-map form is
+    // the only accepted shape.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("p");
     fs::create_dir(&dir).unwrap();
@@ -338,7 +340,8 @@ fn valid_hooks_json_produces_no_hooks_spec_finding() {
     )
     .unwrap();
     fs::create_dir_all(dir.join("hooks")).unwrap();
-    fs::write(dir.join("hooks/hooks.json"), r#"{"hooks":{}}"#).unwrap();
+    // Use the correct event-map form (not the wrapped {"hooks":{}} form).
+    fs::write(dir.join("hooks/hooks.json"), r#"{"PreToolUse":[]}"#).unwrap();
     // A skill so the plugin is otherwise clean.
     fs::create_dir_all(dir.join("skills/foo")).unwrap();
     fs::write(
@@ -358,6 +361,47 @@ fn valid_hooks_json_produces_no_hooks_spec_finding() {
         report.diagnostics
     );
     assert_eq!(report.errors, 0, "{:?}", report.diagnostics);
+}
+
+#[test]
+fn wrapped_hooks_json_produces_hooks_spec_finding() {
+    // A native plugin whose hooks/hooks.json uses the wrapped form
+    // ({"hooks":{...}}) must produce a lint/hooks-spec warning — this is the
+    // shape that causes `harness sync` to exit 43.  The fix is to run
+    // `tome catalog convert` which normalises the file to the event-map form.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"my-plugin\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("hooks")).unwrap();
+    // Wrapped form — discriminated by the top-level "hooks" key.
+    fs::write(
+        dir.join("hooks/hooks.json"),
+        r#"{"hooks":{"PreToolUse":[{"type":"command","command":"run.sh"}]}}"#,
+    )
+    .unwrap();
+    // A skill so the plugin is otherwise clean.
+    fs::create_dir_all(dir.join("skills/foo")).unwrap();
+    fs::write(
+        dir.join("skills/foo/SKILL.md"),
+        "---\nname: foo\ndescription: a skill\n---\nbody\n",
+    )
+    .unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/hooks-spec"),
+        "wrapped form must produce lint/hooks-spec finding: {:?}",
+        report.diagnostics
+    );
 }
 
 #[test]
