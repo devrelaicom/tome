@@ -832,7 +832,7 @@ fn collect_hooks(
     let json = if root.is_file(Path::new("hooks/hooks.json")) {
         // hooks.json shares the harness-config read cap (1 MiB) — same semantic class as .mcp.json.
         match root.read_text(Path::new("hooks/hooks.json"), HARNESS_MCP_MAX) {
-            Ok(s) => Some(s),
+            Ok(s) => Some(normalize_hooks_json(s)),
             Err(e) => {
                 // Copied verbatim regardless, but Tome cannot validate it —
                 // surfaced as strict-blocking honesty.
@@ -849,6 +849,46 @@ fn collect_hooks(
         None
     };
     Ok((files, json))
+}
+
+/// Detect and unwrap the Claude Code wrapped hooks.json form.
+///
+/// Claude Code marketplace material uses two top-level shapes for `hooks.json`:
+///
+/// - **Event-map** (what `harness sync` requires):
+///   `{"PreToolUse": [...], "PostToolUse": [...]}`
+/// - **Wrapped** (also seen in CC material):
+///   `{"description": "...", "hooks": {"PreToolUse": [...]}}`
+///
+/// When the text parses as JSON and the top-level object has exactly a `"hooks"`
+/// key whose value is itself an object, the content inside that key IS the
+/// event-map — unwrap it and re-serialise. This ensures the emitted
+/// `hooks/hooks.json` is always in the event-map form that `harness sync`
+/// expects, so a converted plugin doesn't fail at exit 43.
+///
+/// Any other shape (valid or invalid JSON, plain event-map, non-object `"hooks"`
+/// value) is returned verbatim — the lint rule will signal the bad shapes.
+fn normalize_hooks_json(raw: String) -> String {
+    // Only attempt parse when the string looks like an object; non-JSON is
+    // returned verbatim so the HooksSpec lint rule catches it.
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return raw;
+    };
+    let Some(obj) = value.as_object() else {
+        return raw;
+    };
+    // The wrapped form is an object that has a "hooks" key whose value is an
+    // object (the event-map). We must not accidentally unwrap a native
+    // event-map that happens to have a hook named "hooks" — but the CC spec
+    // names hooks after events ("PreToolUse", "PostToolUse", …) so a top-level
+    // "hooks" key is the wrapper discriminator.
+    if let Some(inner) = obj.get("hooks").filter(|v| v.is_object()) {
+        // Re-serialise the inner event-map as the canonical form.
+        if let Ok(normalised) = serde_json::to_string_pretty(inner) {
+            return normalised;
+        }
+    }
+    raw
 }
 
 /// Synthesize the plugin's MCP servers from `.mcp.json` (CC format), inferring
@@ -1187,13 +1227,24 @@ mod tests {
             .map(|f| f.relative.display().to_string())
             .collect();
         assert_eq!(rels, ["hooks/hooks.json", "hooks/scripts/run.sh"]);
-        // hooks.json content is carried for the lint rule — token INTACT (the
-        // sync-time rewriter owns ${CLAUDE_PLUGIN_ROOT}).
+        // hooks.json is normalised: the wrapped form is unwrapped to the event-map
+        // so `harness sync` never sees the exit-43 shape.  The ${CLAUDE_PLUGIN_ROOT}
+        // token is preserved intact inside the normalised JSON (the sync-time
+        // rewriter still owns it).
+        let hj = p.hooks_json.as_deref().unwrap();
         assert!(
-            p.hooks_json
-                .as_deref()
-                .unwrap()
-                .contains("${CLAUDE_PLUGIN_ROOT}")
+            hj.contains("${CLAUDE_PLUGIN_ROOT}"),
+            "token must survive normalisation: {hj}"
+        );
+        // After unwrapping, the top-level no longer contains the "hooks" wrapper key.
+        let v: serde_json::Value = serde_json::from_str(hj).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("hooks"),
+            "normalised JSON must be an event-map (no wrapper key): {hj}"
+        );
+        assert!(
+            v.as_object().unwrap().contains_key("SessionStart"),
+            "normalised JSON must expose the event directly: {hj}"
         );
     }
 
@@ -1310,5 +1361,115 @@ mod tests {
             "fallback uses the rewritten body: {desc}"
         );
         assert!(!desc.contains("CLAUDE_PLUGIN_ROOT"));
+    }
+
+    // --- normalize_hooks_json -------------------------------------------------
+
+    #[test]
+    fn normalize_hooks_json_unwraps_wrapped_form() {
+        // The wrapped form has a top-level "hooks" key whose value is the event-map.
+        let wrapped = r#"{"hooks":{"PreToolUse":[{"type":"command","command":"run.sh"}]}}"#;
+        let out = normalize_hooks_json(wrapped.to_owned());
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("hooks"),
+            "wrapper must be stripped: {out}"
+        );
+        assert!(
+            obj.contains_key("PreToolUse"),
+            "event must be at top-level: {out}"
+        );
+    }
+
+    #[test]
+    fn normalize_hooks_json_unwraps_with_description_sibling() {
+        // Some CC plugins include a description alongside the hooks key.
+        let wrapped = r#"{"description":"desc","hooks":{"SessionStart":[]}}"#;
+        let out = normalize_hooks_json(wrapped.to_owned());
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("hooks"),
+            "wrapper must be stripped: {out}"
+        );
+        assert!(
+            !obj.contains_key("description"),
+            "description sibling is in the wrapper: {out}"
+        );
+        assert!(
+            obj.contains_key("SessionStart"),
+            "event must be at top-level: {out}"
+        );
+    }
+
+    #[test]
+    fn normalize_hooks_json_leaves_event_map_unchanged() {
+        // An already-unwrapped event-map must pass through verbatim.
+        let event_map = r#"{"PreToolUse":[{"type":"command"}],"PostToolUse":[]}"#;
+        let out = normalize_hooks_json(event_map.to_owned());
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            obj.contains_key("PreToolUse"),
+            "PreToolUse must survive: {out}"
+        );
+        assert!(
+            obj.contains_key("PostToolUse"),
+            "PostToolUse must survive: {out}"
+        );
+    }
+
+    #[test]
+    fn normalize_hooks_json_preserves_variable_tokens() {
+        // ${CLAUDE_PLUGIN_ROOT} must survive unwrapping so sync-time rewrite still works.
+        let wrapped = r#"{"hooks":{"SessionStart":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/run.sh"}]}}"#;
+        let out = normalize_hooks_json(wrapped.to_owned());
+        assert!(
+            out.contains("${CLAUDE_PLUGIN_ROOT}"),
+            "token must survive normalisation: {out}"
+        );
+    }
+
+    #[test]
+    fn normalize_hooks_json_returns_invalid_json_verbatim() {
+        let invalid = "{not valid json";
+        let out = normalize_hooks_json(invalid.to_owned());
+        assert_eq!(out, invalid);
+    }
+
+    #[test]
+    fn collect_hooks_normalises_wrapped_form_via_import_plugin() {
+        let (_t, root) = cc_plugin(|base| {
+            fs::write(
+                base.join(".claude-plugin/plugin.json"),
+                br#"{"name":"p","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            fs::create_dir_all(base.join("hooks")).unwrap();
+            fs::write(
+                base.join("hooks/hooks.json"),
+                // Wrapped form — the kind that causes exit 43 in harness sync.
+                br#"{"description":"my hooks","hooks":{"PreToolUse":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/run.sh"}]}}"#,
+            )
+            .unwrap();
+        });
+        let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
+        let hj = p.hooks_json.as_deref().expect("hooks_json must be set");
+        let v: serde_json::Value = serde_json::from_str(hj).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("hooks"), "wrapper must be stripped: {hj}");
+        assert!(
+            !obj.contains_key("description"),
+            "description must be stripped: {hj}"
+        );
+        assert!(
+            obj.contains_key("PreToolUse"),
+            "event must be at top-level: {hj}"
+        );
+        assert!(
+            hj.contains("${CLAUDE_PLUGIN_ROOT}"),
+            "token must survive: {hj}"
+        );
     }
 }

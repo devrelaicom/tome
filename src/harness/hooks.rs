@@ -82,6 +82,21 @@ pub fn read_rewritten_entries(
 
     // The top-level shape is an object keyed by event name; each value is an
     // array of hook entries. Anything else is malformed.
+    //
+    // Defence in depth: silently unwrap the wrapped form
+    // (`{"hooks": {"PreToolUse": [...]}}`) that Claude Code marketplace
+    // material sometimes uses.  `convert` normalises this on import, but a
+    // plugin installed without going through `convert` may still carry the
+    // wrapped shape.  Unwrapping here means `harness sync` succeeds rather than
+    // exit-43-ing on a file that is structurally valid but shape-wrong.
+    if let Some(inner) = doc
+        .as_object()
+        .and_then(|o| o.get("hooks"))
+        .filter(|v| v.is_object())
+        .cloned()
+    {
+        doc = inner;
+    }
     let Some(obj) = doc.as_object_mut() else {
         return Err(TomeError::HookSpecParseError { path: source });
     };
@@ -887,6 +902,57 @@ mod tests {
         let derived = entry("/x/g.sh");
         assert!(!remove_if_present(&mut hooks, "PreToolUse", &derived));
         assert_eq!(hooks["PreToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    // Defence-in-depth: `read_rewritten_entries` silently unwraps the wrapped
+    // form (`{"hooks":{...}}`) so a plugin that bypassed `convert` still syncs.
+    #[test]
+    fn read_rewritten_entries_unwraps_wrapped_form() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let plugin_root = tmp.path().join("plugin");
+        let hooks_dir = plugin_root.join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+
+        // Write the wrapped form (the shape that previously caused exit 43).
+        std::fs::write(
+            hooks_dir.join("hooks.json"),
+            br#"{"hooks":{"PreToolUse":[{"type":"command","command":"/abs/run.sh"}]}}"#,
+        )
+        .unwrap();
+
+        let plugin_data = tmp.path().join("data");
+        let result = read_rewritten_entries(&plugin_root, &plugin_data)
+            .expect("wrapped form must not produce HookSpecParseError");
+        let hooks = result.expect("hooks must be present");
+        assert_eq!(hooks.events.len(), 1, "one event: {:?}", hooks.events);
+        assert_eq!(hooks.events[0].0, "PreToolUse");
+        assert_eq!(hooks.events[0].1.len(), 1);
+    }
+
+    #[test]
+    fn read_rewritten_entries_accepts_event_map_form() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let plugin_root = tmp.path().join("plugin");
+        let hooks_dir = plugin_root.join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+
+        // The canonical event-map form.
+        std::fs::write(
+            hooks_dir.join("hooks.json"),
+            br#"{"PreToolUse":[{"type":"command","command":"/abs/run.sh"}]}"#,
+        )
+        .unwrap();
+
+        let plugin_data = tmp.path().join("data");
+        let result = read_rewritten_entries(&plugin_root, &plugin_data)
+            .expect("event-map form must succeed");
+        let hooks = result.expect("hooks must be present");
+        assert_eq!(hooks.events.len(), 1);
+        assert_eq!(hooks.events[0].0, "PreToolUse");
     }
 }
 

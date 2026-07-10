@@ -227,15 +227,37 @@ impl Rule for HooksSpec {
         let Some(json) = &p.hooks_json else {
             return Vec::new();
         };
-        match serde_json::from_str::<serde_json::Value>(json) {
-            Ok(_) => Vec::new(),
-            Err(e) => vec![Diagnostic::warning(
+        let value = match serde_json::from_str::<serde_json::Value>(json) {
+            Ok(v) => v,
+            Err(e) => {
+                return vec![Diagnostic::warning(
+                    rule::HOOKS_SPEC,
+                    format!(
+                        "hooks/hooks.json is not valid JSON ({e}); `harness sync` will fail on this plugin (exit 43)"
+                    ),
+                )];
+            }
+        };
+        // After `convert` the importer normalises the wrapped form
+        // (`{"hooks":{...}}` → the inner event-map), so the on-disk IR always
+        // carries the event-map.  A native plugin whose author wrote the wrapped
+        // form directly (without going through `convert`) will still have
+        // `hooks_json` set to the raw wrapped text.  Flag it so the author knows
+        // `harness sync` would fail (exit 43) on the un-normalised file.
+        if value
+            .as_object()
+            .is_some_and(|obj| obj.get("hooks").is_some_and(|v| v.is_object()))
+        {
+            return vec![Diagnostic::warning(
                 rule::HOOKS_SPEC,
-                format!(
-                    "hooks/hooks.json is not valid JSON ({e}); `harness sync` will fail on this plugin (exit 43)"
-                ),
-            )],
+                "hooks/hooks.json uses the wrapped form (top-level \"hooks\" key); \
+                 `harness sync` requires the event-map form \
+                 ({\"PreToolUse\": [...], ...}). \
+                 Run `tome catalog convert` to fix."
+                    .to_owned(),
+            )];
         }
+        Vec::new()
     }
 }
 
@@ -1042,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn hooks_spec_flags_invalid_json_only() {
+    fn hooks_spec_flags_invalid_json_and_wrapped_form() {
         let tmp = tempfile::tempdir().unwrap();
         let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
 
@@ -1050,9 +1072,39 @@ mod tests {
         p.hooks_json = None;
         assert!(HooksSpec.check_plugin(&p).is_empty());
 
-        // Valid JSON → silent.
+        // Event-map form (what harness sync expects) → silent.
+        p.hooks_json = Some(r#"{"PreToolUse":[]}"#.to_owned());
+        assert!(
+            HooksSpec.check_plugin(&p).is_empty(),
+            "event-map must be silent"
+        );
+
+        // Empty event-map → silent.
+        p.hooks_json = Some("{}".to_owned());
+        assert!(
+            HooksSpec.check_plugin(&p).is_empty(),
+            "empty event-map must be silent"
+        );
+
+        // Wrapped form: {"hooks": {...}} → warns because harness sync would fail.
         p.hooks_json = Some(r#"{"hooks":{}}"#.to_owned());
-        assert!(HooksSpec.check_plugin(&p).is_empty());
+        let d = HooksSpec.check_plugin(&p);
+        assert_eq!(d.len(), 1, "wrapped form must warn");
+        assert_eq!(d[0].rule_id, rule::HOOKS_SPEC);
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(
+            d[0].message.contains("wrapped form"),
+            "message: {}",
+            d[0].message
+        );
+
+        // Wrapped form with description and non-empty event-map → same warning.
+        p.hooks_json = Some(
+            r#"{"description":"my hooks","hooks":{"PreToolUse":[{"type":"command"}]}}"#.to_owned(),
+        );
+        let d = HooksSpec.check_plugin(&p);
+        assert_eq!(d.len(), 1, "full wrapped form must warn");
+        assert_eq!(d[0].rule_id, rule::HOOKS_SPEC);
 
         // Invalid JSON → one warning naming the file and the consequence.
         p.hooks_json = Some("{not json".to_owned());

@@ -824,7 +824,11 @@ fn skill_convert_with_non_utf8_body_is_named_error_and_emits_nothing() {
 }
 
 #[test]
-fn convert_copies_hooks_byte_identical_with_tokens_intact() {
+fn convert_normalises_wrapped_hooks_json_and_keeps_token() {
+    // The fixture's hooks.json uses the wrapped form {"hooks":{...}};
+    // convert must unwrap it to the event-map form that `harness sync` expects,
+    // while preserving the ${CLAUDE_PLUGIN_ROOT} token intact for the
+    // sync-time rewriter.
     let tmp = tempfile::tempdir().unwrap();
     let src = cc_plugin_fixture(tmp.path());
     let out = tmp.path().join("out");
@@ -832,14 +836,27 @@ fn convert_copies_hooks_byte_identical_with_tokens_intact() {
     let outcome = run(&src, &config(out.clone())).expect("convert");
     let root = out.join(&outcome.final_name);
 
-    let original = fs::read(src.join("hooks/hooks.json")).unwrap();
-    let converted = fs::read(root.join("hooks/hooks.json")).unwrap();
-    assert_eq!(original, converted, "hooks.json must be byte-identical");
-    assert!(root.join("hooks/run.sh").is_file());
-    let text = String::from_utf8(converted).unwrap();
+    assert!(
+        root.join("hooks/run.sh").is_file(),
+        "hooks/run.sh must be copied"
+    );
+
+    let text = fs::read_to_string(root.join("hooks/hooks.json")).unwrap();
+    // Token must survive normalisation (sync-time rewriter owns it).
     assert!(
         text.contains("${CLAUDE_PLUGIN_ROOT}"),
-        "token must NOT be rewritten"
+        "token must NOT be rewritten: {text}"
+    );
+    // The output must be the event-map form (no wrapper key) so harness sync works.
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let obj = v.as_object().unwrap();
+    assert!(
+        !obj.contains_key("hooks"),
+        "converted hooks.json must be event-map, not wrapped: {text}"
+    );
+    assert!(
+        obj.contains_key("SessionStart"),
+        "event must be at the top level after normalisation: {text}"
     );
 }
 
