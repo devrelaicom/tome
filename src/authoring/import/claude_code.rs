@@ -211,6 +211,29 @@ const MAX_SUPPORTING_DIRS: usize = 4096;
 /// bare native-skill sources whose root may be a git checkout.
 const SKIP_SUPPORTING_NAMES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store"];
 
+/// Extract the `componentPaths` map from a CC `plugin.json` value (G6).
+///
+/// CC plugins may override conventional component directory locations via a
+/// top-level `componentPaths` object:
+///
+/// ```json
+/// { "componentPaths": { "commands": "./src/commands", "hooks": "./config/hooks.json" } }
+/// ```
+///
+/// Returns a map of component name → override path for recognised string
+/// values. Non-string values are ignored (leniently). A missing or non-object
+/// `componentPaths` returns an empty map.
+fn resolve_component_paths(
+    value: &serde_json::Value,
+) -> std::collections::BTreeMap<String, String> {
+    let Some(obj) = value.get("componentPaths").and_then(|v| v.as_object()) else {
+        return std::collections::BTreeMap::new();
+    };
+    obj.iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+        .collect()
+}
+
 /// Import a Claude Code plugin directory into a [`PluginIr`]. `default_name` is
 /// used when the manifest omits `name`; `source_path` is recorded for the
 /// report.
@@ -279,14 +302,55 @@ pub fn import_plugin(
             ));
         }
     }
-    // Component-path overrides: Tome uses the conventional dirs, so a custom
-    // path is dropped (info).
-    for field in ["commands", "agents", "skills", "hooks", "mcpServers"] {
-        if value.get(field).is_some() {
-            diagnostics.push(Diagnostic::info(
-                rule::DROPPED_MANIFEST_FIELD,
+    // Component-path overrides (G6): a `componentPaths` object in plugin.json
+    // lets a CC plugin redirect a component to a non-conventional location.
+    // Tome attempts to import from the overridden path when it refers to an
+    // entry directory (`commands`, `agents`, `skills`) or the hooks file.
+    // Overrides for unknown component names are dropped with an Info diagnostic.
+    let component_paths = resolve_component_paths(&value);
+
+    // Commands / agents / skills dirs: honour the override if present, otherwise
+    // use the conventional name. Unresolvable overrides warn (not info) because
+    // they are content-loss.
+    let commands_dir = component_paths
+        .get("commands")
+        .map(String::as_str)
+        .unwrap_or("commands");
+    let agents_dir = component_paths
+        .get("agents")
+        .map(String::as_str)
+        .unwrap_or("agents");
+    let skills_dir = component_paths
+        .get("skills")
+        .map(String::as_str)
+        .unwrap_or("skills");
+
+    // Bug 2 fix: warn when a recognised componentPaths override path is not a
+    // directory.  The comment above ("Unresolvable overrides warn") was correct
+    // in intent but the warning was never emitted.  Emit it now so callers see
+    // the content-loss rather than silently importing zero entries.
+    for (component, dir) in [
+        ("commands", commands_dir),
+        ("agents", agents_dir),
+        ("skills", skills_dir),
+    ] {
+        if component_paths.contains_key(component) && !root.is_dir(Path::new(dir)) {
+            diagnostics.push(Diagnostic::warning(
+                rule::COMPONENT_PATH_OVERRIDE_MISSING_DIR,
                 format!(
-                    "plugin.json `{field}` path override is ignored; Tome reads the conventional `{field}` location"
+                    "plugin.json `componentPaths.{component}` points to `{dir}` which is not a \
+                     directory — falling back to an empty component set"
+                ),
+            ));
+        }
+    }
+
+    for component in component_paths.keys() {
+        if !["commands", "agents", "skills", "hooks"].contains(&component.as_str()) {
+            diagnostics.push(Diagnostic::info(
+                rule::COMPONENT_PATH_OVERRIDE_UNRECOGNISED,
+                format!(
+                    "plugin.json `componentPaths.{component}` is not honoured by Tome; dropping it"
                 ),
             ));
         }
@@ -294,17 +358,17 @@ pub fn import_plugin(
 
     // --- entries ------------------------------------------------------------
     let mut entries = Vec::new();
-    import_skill_dir(root, &mut entries, &mut diagnostics)?;
+    import_skill_dir_named(root, skills_dir, &mut entries, &mut diagnostics)?;
     import_md_dir(
         root,
-        "commands",
+        commands_dir,
         EntryKind::Command,
         &mut entries,
         &mut diagnostics,
     )?;
     import_md_dir(
         root,
-        "agents",
+        agents_dir,
         EntryKind::Agent,
         &mut entries,
         &mut diagnostics,
@@ -335,10 +399,31 @@ pub fn import_plugin(
     // This matters because hooks or commands often shell out to
     // `${CLAUDE_PLUGIN_ROOT}/scripts/…` — if the directory isn't imported the
     // reference breaks silently at runtime.
-    warn_unrecognised_plugin_root_entries(root, &mut diagnostics)?;
+    //
+    // Bug 3 fix: collect the TOP-LEVEL path component of every componentPaths
+    // override value (e.g. `"src/commands"` → `"src"`) and pass it as an
+    // extra skip set so override-target dirs are not falsely flagged.
+    let component_path_top_dirs: std::collections::HashSet<String> = component_paths
+        .values()
+        .filter_map(|p| {
+            Path::new(p.trim_start_matches("./"))
+                .components()
+                .next()
+                .and_then(|c| {
+                    if let std::path::Component::Normal(s) = c {
+                        s.to_str().map(str::to_owned)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
+    warn_unrecognised_plugin_root_entries(root, &component_path_top_dirs, &mut diagnostics)?;
 
     // --- hooks/ verbatim pass-through --------------------------------------
-    let (hooks_files, hooks_json) = collect_hooks(root, &mut diagnostics)?;
+    // Honour a componentPaths.hooks override when present.
+    let hooks_override = component_paths.get("hooks").map(String::as_str);
+    let (hooks_files, hooks_json) = collect_hooks(root, hooks_override, &mut diagnostics)?;
 
     // --- MCP servers --------------------------------------------------------
     let mcp_servers = import_mcp(root, &mut diagnostics)?;
@@ -707,18 +792,20 @@ fn parse_owner(value: Option<&serde_json::Value>, diagnostics: &mut Vec<Diagnost
     }
 }
 
-/// Import each `skills/<name>/SKILL.md` directory into a skill [`EntryIr`].
-/// A single malformed skill is skipped with a warning, never aborting the
-/// plugin (`first_error` forward-progress).
-fn import_skill_dir(
+/// Import each `<dir>/<name>/SKILL.md` directory into a skill [`EntryIr`].
+/// `dir` is the effective skills directory (conventional `skills/` or an
+/// overridden path from `componentPaths.skills`). A single malformed skill is
+/// skipped with a warning, never aborting the plugin (forward-progress).
+fn import_skill_dir_named(
     root: &UntrustedRoot,
+    dir: &str,
     entries: &mut Vec<EntryIr>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<(), TomeError> {
-    if !root.is_dir(Path::new("skills")) {
+    if !root.is_dir(Path::new(dir)) {
         return Ok(());
     }
-    for child in root.list_dir(Path::new("skills"))? {
+    for child in root.list_dir(Path::new(dir))? {
         if !child.is_dir {
             continue;
         }
@@ -734,6 +821,28 @@ fn import_skill_dir(
 }
 
 /// Import each `<dir>/<name>.md` file into a command/agent [`EntryIr`].
+///
+/// Top-level `.md` files are imported first, then subdirectories are walked
+/// one level deep: `<dir>/<sub>/<name>.md` is flattened to the name
+/// `<sub>-<name>` (G3). Collisions between a flattened name and a top-level
+/// (or earlier nested) entry produce a Warning and the second file is skipped
+/// (forward-progress). The collision-tracking map is keyed on the
+/// **resolved** entry name (frontmatter `name:` preferred over file stem, the
+/// same resolution `import_md_entry` applies) so that the pre-scan and the
+/// import agree on the name used for deduplication.
+///
+/// # Why single-pass (not separate pre-scan)?
+///
+/// A separate pre-scan seeded `claimed` with the file *stem*, not the
+/// frontmatter-resolved name.  When a top-level `commands/deploy.md` carries
+/// `name: git-push`, the pre-scan would claim `"deploy"` while the import
+/// produced an `EntryIr` named `"git-push"`.  A nested `commands/git/push.md`
+/// (flat: `"git-push"`) would then pass the collision check (finding no
+/// `"git-push"` in `claimed`) and be imported too — resulting in two
+/// `EntryIr`s with `name = "git-push"` and silent last-write-wins overwrite
+/// in the emitter (#524).  By importing top-level entries first and recording
+/// their *actual* resolved names into `claimed` we eliminate the divergence
+/// by construction.
 fn import_md_dir(
     root: &UntrustedRoot,
     dir: &str,
@@ -744,16 +853,97 @@ fn import_md_dir(
     if !root.is_dir(Path::new(dir)) {
         return Ok(());
     }
-    for child in root.list_dir(Path::new(dir))? {
-        if child.is_dir || !child.name.ends_with(".md") {
+    // Track resolved names already claimed so nested-file collisions are
+    // reported and the second file is skipped (forward-progress, not a hard
+    // abort). The key is the *resolved* name so pre-scan and import agree.
+    let mut claimed: std::collections::BTreeMap<String, PathBuf> =
+        std::collections::BTreeMap::new();
+
+    let all_children = root.list_dir(Path::new(dir))?;
+
+    // ---- Phase 1: import top-level `.md` files first, record resolved names.
+    // We must do this before the nested-dir walk so that `claimed` contains
+    // the actual IR names (frontmatter-resolved), not file-stem guesses.
+    let mut subdirs: Vec<_> = Vec::new();
+    for child in all_children {
+        if child.is_dir {
+            // Collect subdirectories for phase 2.
+            subdirs.push(child);
+            continue;
+        }
+        if !child.name.ends_with(".md") {
             continue;
         }
         match import_md_entry(root, &child.rel, &child.name, kind) {
-            Ok(entry) => entries.push(entry),
+            Ok(entry) => {
+                // Record the resolved name so the nested walk can detect
+                // collisions against the name actually used in the IR.
+                claimed.insert(entry.name.clone(), child.rel.clone());
+                entries.push(entry);
+            }
             Err(e) => diagnostics.push(Diagnostic::warning(
                 rule::SKIPPED_ENTRY,
                 format!("skipped {} `{}`: {e}", kind.as_str(), child.name),
             )),
+        }
+    }
+
+    // ---- Phase 2: walk subdirectories one level deep (G3 flattening).
+    for child in subdirs {
+        for nested in root.list_dir(&child.rel)? {
+            if nested.is_dir || !nested.name.ends_with(".md") {
+                continue;
+            }
+            // Flatten `<sub>/<name>.md` → `<sub>-<name>`.
+            let stem = nested.name.strip_suffix(".md").unwrap_or(&nested.name);
+            let flat = format!("{}-{stem}", child.name);
+            // Validate the flat name before using it (it will become an
+            // emitted file/dir name); `validate_name` rejects `..`/absolute/
+            // leading-dot/etc. so hostile source sub-dir or entry names
+            // cannot escape.
+            if let Err(e) = UntrustedRoot::validate_name(&flat) {
+                diagnostics.push(Diagnostic::warning(
+                    rule::NESTED_ENTRY_SKIPPED,
+                    format!(
+                        "skipped nested {kind} `{}/{}/{}`; the flat name `{flat}` is unsafe: {e}",
+                        dir, child.name, nested.name,
+                    ),
+                ));
+                continue;
+            }
+            if let Some(prior) = claimed.get(&flat) {
+                diagnostics.push(Diagnostic::warning(
+                    rule::NESTED_ENTRY_SKIPPED,
+                    format!(
+                        "skipped nested {kind} `{dir}/{}/{}`; its flat name `{flat}` collides with `{}`",
+                        child.name,
+                        nested.name,
+                        prior.display(),
+                    ),
+                ));
+                continue;
+            }
+            claimed.insert(flat.clone(), nested.rel.clone());
+            // Import using the flat name as the file-stem override.
+            match import_md_entry_with_name(root, &nested.rel, &flat, kind) {
+                Ok(entry) => {
+                    diagnostics.push(Diagnostic::info(
+                        rule::NESTED_ENTRY_FLATTENED,
+                        format!(
+                            "nested {kind} `{dir}/{}/{}` flattened to `{flat}`",
+                            child.name, nested.name,
+                        ),
+                    ));
+                    entries.push(entry);
+                }
+                Err(e) => diagnostics.push(Diagnostic::warning(
+                    rule::SKIPPED_ENTRY,
+                    format!(
+                        "skipped nested {kind} `{dir}/{}/{}`: {e}",
+                        child.name, nested.name,
+                    ),
+                )),
+            }
         }
     }
     Ok(())
@@ -803,6 +993,9 @@ pub(crate) fn import_skill(
 }
 
 /// Build a command/agent entry from a single `<rel_file>` markdown file.
+/// The emitted name prefers the frontmatter `name:` field (when safe and
+/// non-empty) over the file stem — preserving the original behaviour for
+/// top-level entries.
 fn import_md_entry(
     root: &UntrustedRoot,
     rel_file: &Path,
@@ -819,8 +1012,77 @@ fn import_md_entry(
     let parsed = parse_skill_frontmatter_str(rel_file, &content)
         .map_err(|e| TomeError::Usage(e.to_string()))?;
 
-    let (name, _used) = parsed.resolved_name(&stem);
-    UntrustedRoot::validate_name(&name)?;
+    // Prefer the frontmatter name over the file stem when present and safe.
+    let (resolved, _used) = parsed.resolved_name(&stem);
+    UntrustedRoot::validate_name(&resolved)?;
+
+    let mut diagnostics = Vec::new();
+    classify_dropped_frontmatter(&content, kind, &mut diagnostics);
+    let rewritten = rewrite_body(
+        &parsed.body,
+        RewriteOptions {
+            legacy_command_args: kind == EntryKind::Command,
+        },
+    );
+    diagnostics.extend(rewritten.diagnostics);
+    let description = resolved_description(&parsed.frontmatter, &rewritten.text);
+
+    let agent_meta = if kind == EntryKind::Agent {
+        parse_agent_meta(&content)
+    } else {
+        None
+    };
+
+    if kind == EntryKind::Agent {
+        let body = &rewritten.text;
+        for token in UNRESOLVED_AGENT_TOKENS {
+            if body.contains(token) {
+                diagnostics.push(Diagnostic::warning(
+                    rule::AGENT_UNRESOLVED_TOKEN,
+                    format!(
+                        "`{token}` in agent body will not be substituted by harness sync — \
+                         this token is only resolved on the MCP-served path. Remove the token \
+                         or replace it with a static path before syncing to a native agent harness."
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(EntryIr {
+        kind,
+        name: resolved,
+        description: Some(description),
+        frontmatter: parsed.frontmatter,
+        agent_meta,
+        body: rewritten.text,
+        supporting_files: Vec::new(),
+        source_path: root.resolve(rel_file)?,
+        diagnostics,
+    })
+}
+
+/// Build a command/agent entry from a single `<rel_file>` markdown file, using
+/// `name_override` as the definitive emitted name. Used by the nested-entry
+/// flattener (G3) where the flat name (`<sub>-<stem>`) is the canonical output
+/// name regardless of any `name:` frontmatter field in the source file.
+///
+/// `name_override` must already have passed `UntrustedRoot::validate_name`
+/// before reaching here.
+fn import_md_entry_with_name(
+    root: &UntrustedRoot,
+    rel_file: &Path,
+    name_override: &str,
+    kind: EntryKind,
+) -> Result<EntryIr, TomeError> {
+    // Safety gate: the override must be a valid segment (callers validate it
+    // before calling, but defend-in-depth applies at every write boundary).
+    UntrustedRoot::validate_name(name_override)?;
+    let name = name_override.to_owned();
+
+    let content = root.read_body(rel_file)?;
+    let parsed = parse_skill_frontmatter_str(rel_file, &content)
+        .map_err(|e| TomeError::Usage(e.to_string()))?;
 
     let mut diagnostics = Vec::new();
     classify_dropped_frontmatter(&content, kind, &mut diagnostics);
@@ -1032,8 +1294,14 @@ const SKIP_PLUGIN_ROOT_FILES: &[&str] = &[
 /// that hooks or commands commonly reference via
 /// `${CLAUDE_PLUGIN_ROOT}/scripts/…` — without this warning they vanish
 /// silently from the conversion and the reference breaks at runtime.
+///
+/// `component_path_top_dirs` is the set of top-level path components extracted
+/// from `componentPaths` override values (e.g. `"src/commands"` → `"src"`).
+/// These must NOT be flagged as unrecognised — they are intentional override
+/// target directories, not stray files. (Bug 3 fix.)
 fn warn_unrecognised_plugin_root_entries(
     root: &UntrustedRoot,
+    component_path_top_dirs: &std::collections::HashSet<String>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<(), TomeError> {
     // list_dir on the root itself (Path::new("")) enumerates only depth-0 entries,
@@ -1068,6 +1336,12 @@ fn warn_unrecognised_plugin_root_entries(
         {
             continue;
         }
+        // Bug 3 fix: skip directories that are the top-level component of a
+        // componentPaths override value (e.g. `"src"` when commands points to
+        // `"src/commands"`).  These are known-intentional dirs, not stray ones.
+        if component_path_top_dirs.contains(&child.name) {
+            continue;
+        }
         let kind_label = if child.is_dir { "directory" } else { "file" };
         let display = if child.is_dir {
             format!("{}/", child.name)
@@ -1085,26 +1359,57 @@ fn warn_unrecognised_plugin_root_entries(
     Ok(())
 }
 
-/// Collect the `hooks/` subtree for verbatim pass-through. Reuses the
+/// Collect the hooks subtree for verbatim pass-through. Reuses the
 /// supporting-file walk (bounded, symlink-refusing, VCS-junk-skipping); rel
 /// paths are re-prefixed `hooks/` so emit plans them at the plugin root.
 /// `hooks/hooks.json`'s text is also carried (when readable) for the lint
 /// hooks-spec rule.
+///
+/// `hooks_override` is the effective hooks directory or `hooks.json` file path
+/// from a `componentPaths.hooks` override. When `None`, the conventional
+/// `hooks/` directory + `hooks/hooks.json` are used. When `Some(path)`:
+/// - if `path` ends with `.json`, it is treated as a direct `hooks.json`
+///   override (the hooks dir defaults to `hooks/` alongside it);
+/// - otherwise it is treated as the hooks directory override.
 fn collect_hooks(
     root: &UntrustedRoot,
+    hooks_override: Option<&str>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<(Vec<SupportingFile>, Option<String>), TomeError> {
-    let hooks_dir = Path::new("hooks");
-    if !root.is_dir(hooks_dir) {
+    // Determine the effective hooks directory and hooks.json path from the
+    // optional componentPaths.hooks override.
+    let (hooks_dir_owned, hooks_json_owned): (String, String) = match hooks_override {
+        None => ("hooks".to_owned(), "hooks/hooks.json".to_owned()),
+        Some(p) if p.ends_with(".json") => {
+            // A direct `.json` file override: use `hooks/` as the tree dir and
+            // the override path as the json location.
+            ("hooks".to_owned(), p.to_owned())
+        }
+        Some(p) => {
+            // Directory override: the json lives under the override dir.
+            (p.to_owned(), format!("{p}/hooks.json"))
+        }
+    };
+
+    let hooks_dir = Path::new(&hooks_dir_owned);
+    let hooks_json_path = Path::new(&hooks_json_owned);
+
+    if !root.is_dir(hooks_dir) && !root.is_file(hooks_json_path) {
         return Ok((Vec::new(), None));
     }
-    let mut files = collect_supporting(root, hooks_dir, None)?;
-    for f in &mut files {
-        f.relative = hooks_dir.join(&f.relative);
-    }
-    let json = if root.is_file(Path::new("hooks/hooks.json")) {
+    let mut files = if root.is_dir(hooks_dir) {
+        let mut fs = collect_supporting(root, hooks_dir, None)?;
+        for f in &mut fs {
+            f.relative = Path::new("hooks").join(&f.relative);
+        }
+        fs
+    } else {
+        Vec::new()
+    };
+
+    let json = if root.is_file(hooks_json_path) {
         // hooks.json shares the harness-config read cap (1 MiB) — same semantic class as .mcp.json.
-        match root.read_text(Path::new("hooks/hooks.json"), HARNESS_MCP_MAX) {
+        match root.read_text(hooks_json_path, HARNESS_MCP_MAX) {
             Ok(s) => Some(normalize_hooks_json(s)),
             Err(e) => {
                 // Copied verbatim regardless, but Tome cannot validate it —
@@ -1112,7 +1417,8 @@ fn collect_hooks(
                 diagnostics.push(Diagnostic::warning(
                     rule::HOOKS_UNREADABLE,
                     format!(
-                        "hooks/hooks.json could not be read as UTF-8 text ({e}); it is copied verbatim but not validated"
+                        "{} could not be read as UTF-8 text ({e}); it is copied verbatim but not validated",
+                        hooks_json_path.display(),
                     ),
                 ));
                 None
@@ -1121,6 +1427,20 @@ fn collect_hooks(
     } else {
         None
     };
+
+    // When the hooks.json came from a non-conventional path, ensure it is
+    // included in the supporting files as `hooks/hooks.json` in the output.
+    if hooks_override.is_some()
+        && root.is_file(hooks_json_path)
+        && !files
+            .iter()
+            .any(|f| f.relative == Path::new("hooks/hooks.json"))
+    {
+        files.push(SupportingFile {
+            relative: PathBuf::from("hooks/hooks.json"),
+            source: root.resolve(hooks_json_path)?,
+        });
+    }
     Ok((files, json))
 }
 
