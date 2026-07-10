@@ -386,6 +386,48 @@ fn glyphs() -> Glyphs {
     }
 }
 
+/// Render the workspace context header (identity, not a subsystem).
+///
+/// Issue #500 (parallel sink): the `Workspace:` line shows the workspace
+/// NAME — consistent with `tome workspace info` and `tome workspace
+/// current` — never the resolved project path. For a workspace scope the
+/// resolved project path (if any) is surfaced under a distinct `project:`
+/// label, aligned to the same fixed column as the sibling sub-labels
+/// (`  resolved via:  `, `  catalogs:      `).
+///
+/// Extracted to a pure `impl Write` sink so the header is unit-testable
+/// without spawning the binary (the doctor `Workspace:` line had no
+/// regression test, which is how the parallel-sink bug survived).
+fn write_workspace_header<W: std::io::Write>(
+    out: &mut W,
+    workspace: &crate::workspace::WorkspaceInfo,
+) -> Result<(), TomeError> {
+    writeln!(out, "Workspace:       {}", workspace.name)?;
+    if let (crate::workspace::ScopeKind::Workspace, Some(p)) =
+        (workspace.scope, workspace.path.as_deref())
+    {
+        writeln!(out, "  project:       {}", p.display())?;
+    }
+    writeln!(
+        out,
+        "  resolved via:  {}",
+        match workspace.source {
+            crate::workspace::ScopeSource::Flag => "--workspace flag",
+            crate::workspace::ScopeSource::Env => "TOME_WORKSPACE env",
+            crate::workspace::ScopeSource::Config => "config.toml [workspace] default",
+            crate::workspace::ScopeSource::ProjectMarker => "project marker walk",
+            crate::workspace::ScopeSource::GlobalFallback => "global fallback",
+        }
+    )?;
+    writeln!(out, "  catalogs:      {}", workspace.catalogs)?;
+    writeln!(
+        out,
+        "  plugins:       {} total, {} enabled",
+        workspace.plugins_total, workspace.plugins_enabled,
+    )?;
+    Ok(())
+}
+
 /// Issue #430: the human report leads with a one-line verdict, orders the body
 /// failing → warnings, and collapses the all-ok subsystems into one line
 /// (`--verbose` restores the full listing). `--json` is byte-identical to
@@ -430,31 +472,7 @@ fn emit_human(
     // Context header (identity, not a subsystem): always rendered.
     writeln!(out, "Tome:            {}", report.tome_version)?;
     writeln!(out)?;
-    writeln!(
-        out,
-        "Workspace:       {}",
-        match (report.workspace.scope, report.workspace.path.as_deref(),) {
-            (crate::workspace::ScopeKind::Workspace, Some(p)) => p.display().to_string(),
-            _ => "(global)".to_owned(),
-        }
-    )?;
-    writeln!(
-        out,
-        "  resolved via:  {}",
-        match report.workspace.source {
-            crate::workspace::ScopeSource::Flag => "--workspace flag",
-            crate::workspace::ScopeSource::Env => "TOME_WORKSPACE env",
-            crate::workspace::ScopeSource::Config => "config.toml [workspace] default",
-            crate::workspace::ScopeSource::ProjectMarker => "project marker walk",
-            crate::workspace::ScopeSource::GlobalFallback => "global fallback",
-        }
-    )?;
-    writeln!(out, "  catalogs:      {}", report.workspace.catalogs)?;
-    writeln!(
-        out,
-        "  plugins:       {} total, {} enabled",
-        report.workspace.plugins_total, report.workspace.plugins_enabled,
-    )?;
+    write_workspace_header(&mut out, &report.workspace)?;
     writeln!(out)?;
 
     // Issue #433: name the MCP server's log file — the natural first stop
@@ -1365,6 +1383,80 @@ mod tests {
         assert_eq!(
             harness_display_name("some-future-harness"),
             "some-future-harness"
+        );
+    }
+
+    // ---- Issue #500 (parallel sink): doctor's `Workspace:` header -------
+
+    use super::write_workspace_header;
+    use crate::workspace::{ScopeKind, ScopeSource, WorkspaceInfo};
+    use std::path::PathBuf;
+
+    fn workspace_info(name: &str, scope: ScopeKind, path: Option<PathBuf>) -> WorkspaceInfo {
+        WorkspaceInfo {
+            name: name.to_owned(),
+            scope,
+            path,
+            source: ScopeSource::ProjectMarker,
+            catalogs: 0,
+            plugins_total: 0,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            schema_version: None,
+            embedder: None,
+            enrolled_catalogs: Vec::new(),
+            enabled_plugins: Vec::new(),
+            bound_projects: Vec::new(),
+            summary_cache: None,
+            plugin_details: None,
+        }
+    }
+
+    fn render_header(info: &WorkspaceInfo) -> String {
+        let mut buf = Vec::new();
+        write_workspace_header(&mut buf, info).expect("render header");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    /// Regression for issue #500: doctor's `Workspace:` line must show the
+    /// workspace NAME, not the resolved project path (the parallel sink of
+    /// the `workspace info` bug). The path belongs on its own `project:`
+    /// line.
+    #[test]
+    fn doctor_workspace_header_shows_name_not_path() {
+        let project = PathBuf::from("/home/devbox/projects/midnight-docs");
+        let info = workspace_info("midnight", ScopeKind::Workspace, Some(project));
+        let out = render_header(&info);
+
+        // The `Workspace:` line carries the name.
+        assert!(
+            out.contains("Workspace:       midnight"),
+            "expected the workspace name on the Workspace line; out=\n{out}"
+        );
+        // The path is under its own `project:` label, never on `Workspace:`.
+        assert!(
+            out.contains("  project:       /home/devbox/projects/midnight-docs"),
+            "expected the project path on its own line; out=\n{out}"
+        );
+        assert!(
+            !out.contains("Workspace:       /home/devbox/projects/midnight-docs"),
+            "the project path must not masquerade as the workspace name; out=\n{out}"
+        );
+    }
+
+    /// The global scope shows the `global` name and emits no `project:` line
+    /// (there is no bound project path).
+    #[test]
+    fn doctor_workspace_header_global_has_name_and_no_project_line() {
+        let info = workspace_info("global", ScopeKind::Global, None);
+        let out = render_header(&info);
+        assert!(
+            out.contains("Workspace:       global"),
+            "expected the global name on the Workspace line; out=\n{out}"
+        );
+        assert!(
+            !out.contains("  project:"),
+            "global scope must not emit a project line; out=\n{out}"
         );
     }
 }
