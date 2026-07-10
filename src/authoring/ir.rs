@@ -75,6 +75,35 @@ pub struct PluginIr {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Agent-specific frontmatter preserved through the convert pipeline so that
+/// `harness sync` can translate these fields into per-harness native agent
+/// files (matching [`crate::harness::agents::CanonicalAgent`]).
+///
+/// Only populated for [`EntryKind::Agent`] entries; always `None` for skills
+/// and commands. Preserved from the source CC plugin; emitted verbatim into
+/// the converted agent `.md` frontmatter.
+#[derive(Debug, Clone, Default)]
+pub struct AgentMeta {
+    /// Canonical model value (`claude-opus-4-5`, `opus`, `inherit`, …).
+    pub model: Option<String>,
+    /// Allowed-tools posture (drives read-only inference at sync time).
+    pub tools: Option<Vec<String>>,
+    /// Disallowed-tools posture.
+    pub disallowed_tools: Option<Vec<String>>,
+    /// Permission mode (`bypassPermissions`, `acceptEdits`, …).
+    pub permission_mode: Option<String>,
+}
+
+impl AgentMeta {
+    /// True when no agent-specific field was populated (nothing to emit).
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none()
+            && self.tools.is_none()
+            && self.disallowed_tools.is_none()
+            && self.permission_mode.is_none()
+    }
+}
+
 /// One entry: a skill (`skills/<name>/SKILL.md`), command (`commands/<n>.md`),
 /// or agent (`agents/<n>.md`).
 #[derive(Debug, Clone)]
@@ -85,6 +114,9 @@ pub struct EntryIr {
     pub description: Option<String>,
     /// Only the Tome-modelled frontmatter fields (`data-model.md §6`).
     pub frontmatter: MappedFrontmatter,
+    /// Agent-specific frontmatter preserved through the pipeline so `harness
+    /// sync` can translate them. Only set for [`EntryKind::Agent`] entries.
+    pub agent_meta: Option<AgentMeta>,
     /// Entry body (Markdown after the frontmatter). Valid UTF-8; harness-isms
     /// already rewritten on the `convert` path.
     pub body: String,

@@ -209,6 +209,7 @@ mod tests {
             name: name.into(),
             description: Some("d".into()),
             frontmatter: MappedFrontmatter::default(),
+            agent_meta: None,
             body: String::new(),
             supporting_files: Vec::new(),
             source_path: PathBuf::from("s"),

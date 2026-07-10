@@ -338,6 +338,7 @@ fn parse_entry(ur: &UntrustedRoot, rel: &Path, kind: EntryKind, dir_or_stem: Str
                 name: dir_or_stem,
                 description: None,
                 frontmatter: MappedFrontmatter::default(),
+                agent_meta: None,
                 body: String::new(),
                 supporting_files: Vec::new(),
                 source_path: abs,
@@ -364,6 +365,7 @@ fn parse_entry(ur: &UntrustedRoot, rel: &Path, kind: EntryKind, dir_or_stem: Str
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
                 frontmatter: parsed.frontmatter,
+                agent_meta: None,
                 body: parsed.body,
                 supporting_files: Vec::new(),
                 source_path: abs,
@@ -375,6 +377,7 @@ fn parse_entry(ur: &UntrustedRoot, rel: &Path, kind: EntryKind, dir_or_stem: Str
             name: dir_or_stem,
             description: None,
             frontmatter: MappedFrontmatter::default(),
+            agent_meta: None,
             body: String::new(),
             supporting_files: Vec::new(),
             source_path: abs,

@@ -76,4 +76,9 @@ pub mod rule {
     /// not in the UNSUPPORTED_COMPONENTS list — it was silently ignored, but any
     /// `${CLAUDE_PLUGIN_ROOT}`-relative references to it will break at runtime.
     pub const UNRECOGNISED_PLUGIN_DIR: &str = "convert/unrecognised-plugin-dir";
+    /// An agent body contains a `${TOME_PLUGIN_DIR}` (or similar) token that
+    /// the native-agent writer copies verbatim — the substitution layer only
+    /// fires on the MCP-served path and not in native agent files. Emitted as
+    /// a Warning so the author knows the token will not be resolved at runtime.
+    pub const AGENT_UNRESOLVED_TOKEN: &str = "convert/agent-unresolved-token";
 }

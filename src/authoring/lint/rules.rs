@@ -829,6 +829,7 @@ mod tests {
             name: name.to_owned(),
             description: desc.map(str::to_owned),
             frontmatter: MappedFrontmatter::default(),
+            agent_meta: None,
             body: body.to_owned(),
             supporting_files: Vec::new(),
             source_path: source,
