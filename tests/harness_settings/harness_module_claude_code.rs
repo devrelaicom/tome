@@ -150,9 +150,20 @@ fn mcp_config_path_is_project_local() {
     let path = CLAUDE_CODE.mcp_config_path(project.path(), home.path());
     assert_eq!(
         path,
-        project.path().join(".claude/settings.json"),
-        "claude-code MCP config is per-project — home is ignored",
+        project.path().join(".mcp.json"),
+        "claude-code MCP config is .mcp.json at project root — home is ignored (issue #496)",
     );
+}
+
+#[test]
+fn legacy_mcp_config_paths_contains_old_settings_json() {
+    // Issue #496: the legacy path must be cleaned up on sync so users who
+    // ran Tome ≤ 0.7.16 are not left with a stale `.claude/settings.json`
+    // entry alongside the new `.mcp.json` one.
+    let project = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
+    let legacy = CLAUDE_CODE.legacy_mcp_config_paths(project.path(), home.path());
+    assert_eq!(legacy, vec![project.path().join(".claude/settings.json")]);
 }
 
 #[test]

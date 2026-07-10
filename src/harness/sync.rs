@@ -836,6 +836,12 @@ pub(crate) struct HarnessSnapshot {
     /// `AGENTS.md` / `.mcp.json`). `None` for every other harness, so their sink
     /// processing is byte-identical.
     pub(crate) open_plugins_root: Option<PathBuf>,
+    /// Issue #496: paths written by a previous Tome release that are no longer
+    /// the active MCP config target. On each sync pass, any Tome-owned entry
+    /// found at one of these paths is silently removed so the user is not left
+    /// with a stale, non-functional config block alongside the new active one.
+    /// Empty for every harness that has never changed its MCP location.
+    legacy_mcp_paths: Vec<PathBuf>,
 }
 
 fn collect_harness_snapshots(
@@ -1043,6 +1049,7 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
         hook_event_names,
         guardrails_target: m.guardrails_target(project_root),
         open_plugins_root: m.open_plugins_root(project_root),
+        legacy_mcp_paths: m.legacy_mcp_config_paths(project_root, home_root),
     }
 }
 
@@ -1340,6 +1347,23 @@ fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<
 
     if !deps.dry_run {
         mcp_config::write_entry(&snap.mcp_path, &snap.mcp_dialect, &expected)?;
+        // Issue #496: clean up any Tome-owned entry in a legacy location so the
+        // user is not left with a stale, non-functional config block alongside
+        // the newly-written active one. Best-effort: a failure here is logged
+        // and ignored (the active sink already succeeded, and a missing legacy
+        // file is not an error). The legacy dialect mirrors the default
+        // (`McpDialect::LEGACY`) because every harness that has a legacy path
+        // wrote it in the pre-Phase-11 JSON+mcpServers+CommandArgs shape.
+        for legacy in &snap.legacy_mcp_paths {
+            if let Err(e) = mcp_config::remove_entry(legacy, &crate::harness::McpDialect::LEGACY) {
+                tracing::debug!(
+                    harness = %snap.name,
+                    path = %legacy.display(),
+                    error = %e,
+                    "best-effort legacy MCP cleanup failed — ignored"
+                );
+            }
+        }
     }
     Ok(classification)
 }
@@ -1371,6 +1395,21 @@ pub(crate) fn expected_tome_entry(
 fn clean_mcp_for_harness(snap: &HarnessSnapshot, dry_run: bool) -> Result<Action, TomeError> {
     let existing = mcp_config::read_entry(&snap.mcp_path, &snap.mcp_dialect)?;
     let was_tome = matches!(existing.as_ref(), Some(e) if mcp_config::is_tome_owned(e));
+    // Issue #496: also clean legacy paths on removal so a complete teardown
+    // leaves no stale Tome-owned entries anywhere (best-effort, same as the
+    // write path above).
+    if !dry_run {
+        for legacy in &snap.legacy_mcp_paths {
+            if let Err(e) = mcp_config::remove_entry(legacy, &crate::harness::McpDialect::LEGACY) {
+                tracing::debug!(
+                    harness = %snap.name,
+                    path = %legacy.display(),
+                    error = %e,
+                    "best-effort legacy MCP cleanup on remove failed — ignored"
+                );
+            }
+        }
+    }
     if !was_tome {
         return Ok(Action::LeftAlone);
     }

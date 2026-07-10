@@ -91,7 +91,7 @@ fn claude_code_specifics() {
     let home = PathBuf::from("/home/u");
     assert_eq!(
         h.mcp_config_path(&project, &home),
-        PathBuf::from("/proj/.claude/settings.json"),
+        PathBuf::from("/proj/.mcp.json"),
     );
 }
 

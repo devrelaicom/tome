@@ -226,8 +226,10 @@ fn scrub_to_string_handles_harness_mcp_config_error_chain_paths() {
     );
 
     // Same discipline for the other four harnesses' typical paths.
+    // Note: claude-code's MCP config is now `.mcp.json` at the project root
+    // (issue #496); the scrubber must preserve that path too.
     for path in [
-        "/home/user/.claude/settings.json",
+        "/home/user/project/.mcp.json",
         "/home/user/.cursor/mcp.json",
         "/home/user/.gemini/config.json",
         "/home/user/.opencode/config.toml",

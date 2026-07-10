@@ -808,6 +808,19 @@ pub trait HarnessModule: Send + Sync {
         None
     }
 
+    /// Legacy MCP config paths that a previous Tome release wrote to for this
+    /// harness but which are no longer the active target.
+    ///
+    /// On each sync pass, any Tome-owned entry found at one of these paths is
+    /// silently removed (the active path is written by the normal MCP sink).
+    /// This provides a migration path when the on-disk target changes between
+    /// Tome releases (e.g. claude-code moved from `.claude/settings.json` to
+    /// `.mcp.json` in issue #496). The default is an empty `Vec` — every
+    /// harness that has never changed its MCP config location is unaffected.
+    fn legacy_mcp_config_paths(&self, _project_root: &Path, _home: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
     // -----------------------------------------------------------------------
     // Phase 6 — hooks, guardrails, native agents (harness-modules-p6.md).
     //
