@@ -597,6 +597,20 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.17](https://github.com/devrelaicom/tome/compare/v0.7.16...v0.7.17) - 2026-07-10
+
+### Added
+
+- *(mcp)* read-only tool parity — consolidate get_skill, add list_plugins/list_catalogs/status ([#508](https://github.com/devrelaicom/tome/pull/508))
+- *(query)* make reranking off by default ([#502](https://github.com/devrelaicom/tome/pull/502)) ([#507](https://github.com/devrelaicom/tome/pull/507))
+
+### Fixed
+
+- *(workspace)* show workspace name (not project path) in `workspace info` and `doctor` ([#506](https://github.com/devrelaicom/tome/pull/506))
+- *(reindex)* adopt active embedder on empty whole-index reindex ([#504](https://github.com/devrelaicom/tome/pull/504))
+- *(doctor)* skip bundled-model check for provider-served capabilities ([#505](https://github.com/devrelaicom/tome/pull/505))
+- *(logging)* suppress benign llama.cpp n_ctx WARN at default level ([#503](https://github.com/devrelaicom/tome/pull/503))
+
 ## [0.7.15](https://github.com/devrelaicom/tome/compare/v0.7.14...v0.7.15) - 2026-07-07
 
 ### Fixed
