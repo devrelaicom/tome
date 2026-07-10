@@ -25,7 +25,9 @@ use crate::config::Config;
 use crate::error::TomeError;
 use crate::index::meta::{self, ModelIdent};
 use crate::index::skills::ReindexSummary;
-use crate::index::{self, OpenOptions, enabled_plugins_for_catalog, workspace_catalogs};
+use crate::index::{
+    self, OpenOptions, acquire_lock, enabled_plugins_for_catalog, workspace_catalogs,
+};
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::plugin::PluginId;
@@ -97,7 +99,29 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
 
     for target in targets {
         let cache_dir = paths.cache_dir_for(&target.url);
-        let refreshed = refresh_one(&target, &cache_dir, mode)?;
+
+        // Acquire the advisory lock ONLY for the git fetch + reset + manifest
+        // read span (issue #512). The lock is released before the reindex pass
+        // below, because `reindex_catalog_plugins` and `auto_disable_orphan`
+        // internally call `acquire_lock` on the same lockfile; the lock is
+        // non-reentrant and a second `acquire_lock` from within that span would
+        // return `WouldBlock` → `IndexBusy` (exit 50). `tome reindex` follows
+        // the same discipline: it does not lock at the command layer and lets
+        // each per-plugin `lifecycle` call own its own lock window.
+        //
+        // What the lock DOES protect: concurrent `catalog update` invocations
+        // are serialised so two processes cannot race through `git reset --hard`
+        // on the same cache dir simultaneously.
+        //
+        // What the lock does NOT protect: readers (`tome query`, `tome plugin
+        // list`) deliberately do not take this lock and may observe a partial
+        // git tree during `git reset --hard`. Closing that reader race requires
+        // atomic tree replacement (deferred).
+        let refreshed = {
+            let _lock = acquire_lock(&paths.index_lock)?;
+            refresh_one(&target, &cache_dir, mode)?
+            // `_lock` is released here, before the reindex pass.
+        };
         if !refreshed {
             continue;
         }
