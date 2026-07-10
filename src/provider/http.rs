@@ -23,6 +23,7 @@
 //! receives the full [`RequestSpec`], so a stateful closure can return e.g. a
 //! 429 then a 200 across retry attempts.
 
+use std::io::Read as _;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -32,6 +33,14 @@ use crate::provider::error::{ProviderError, ProviderErrorKind};
 
 /// The Anthropic API version header value (the Messages API requires it).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Hard ceiling on a response body read. A misconfigured or hostile `base_url`
+/// returning a multi-GB response would otherwise trigger OOM-kill; cap at 16 MiB.
+/// Legitimate API responses (embeddings, chat completions, rerank results) are
+/// well under 1 MiB even for large batches. Exceeding this cap is surfaced as a
+/// non-retryable `MalformedResponse` error — retrying a 16 MiB+ response is
+/// unlikely to help and would compound the problem.
+const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 
 // The retry loop's total-attempt cap is per-request: `ResolvedProvider::max_attempts`
 // (default 3 = 1 initial + 2 retries — FR-012), overridable via the
@@ -106,8 +115,8 @@ pub struct RawResponse {
     pub body: Vec<u8>,
 }
 
-/// A transport-level failure (the request never completed): a connect error, a
-/// timeout, a TLS failure, etc. Distinct from a completed non-2xx response.
+/// A transport-level failure (the request never completed, or the response body
+/// exceeded the size ceiling). Distinct from a completed non-2xx response.
 #[derive(Debug, Clone)]
 pub enum TransportFailure {
     /// The request exceeded the per-call timeout.
@@ -115,6 +124,10 @@ pub enum TransportFailure {
     /// Any other transport error (connect refused, DNS, TLS, …). `detail` is a
     /// short, already-safe description (no URL/credential is included).
     Other { detail: String },
+    /// The response body exceeded [`MAX_RESPONSE_BYTES`]. The byte count is
+    /// included so the error detail can name the ceiling without a hardcoded
+    /// literal at the call site.
+    ResponseTooLarge { limit: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +247,26 @@ fn real_execute(spec: &RequestSpec, timeout: Duration) -> Result<RawResponse, Tr
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(parse_retry_after);
-            let body = resp.bytes().map(|b| b.to_vec()).unwrap_or_default();
+            // Cap the body read to MAX_RESPONSE_BYTES. We read one byte beyond
+            // the limit so we can detect truncation vs an exact-fit body: if
+            // the resulting buffer exceeds the cap the server sent more than we
+            // will accept and we surface ResponseTooLarge (non-retryable).
+            // `reqwest::blocking::Response` implements `std::io::Read`, so `.take`
+            // is the Read combinator (imported at the top of this module).
+            let mut body = Vec::new();
+            // NEVER surface _io.to_string() — it can include the URL/host and
+            // potentially a reflected credential. Keep the detail generic.
+            if let Err(_io) = resp.take(MAX_RESPONSE_BYTES + 1).read_to_end(&mut body) {
+                // I/O error reading the body — treat as a transport failure.
+                return Err(TransportFailure::Other {
+                    detail: "error reading response body".to_string(),
+                });
+            }
+            if body.len() as u64 > MAX_RESPONSE_BYTES {
+                return Err(TransportFailure::ResponseTooLarge {
+                    limit: MAX_RESPONSE_BYTES,
+                });
+            }
             Ok(RawResponse {
                 status,
                 retry_after,
@@ -437,6 +469,20 @@ pub fn request_with_retry(
                     ProviderErrorKind::Unreachable,
                     true,
                     format!("{detail} after {max_attempts} attempts"),
+                ));
+            }
+            // The response body exceeded MAX_RESPONSE_BYTES. Not retryable —
+            // a retry would return the same oversized body. Surfaces as
+            // MalformedResponse (the response is not in a form we can process).
+            Err(TransportFailure::ResponseTooLarge { limit }) => {
+                return Err(ProviderError::new(
+                    provider,
+                    ProviderErrorKind::MalformedResponse,
+                    false,
+                    format!(
+                        "response body exceeded the {limit}-byte ceiling ({} MiB)",
+                        limit / (1024 * 1024)
+                    ),
                 ));
             }
         }
@@ -888,6 +934,42 @@ mod tests {
         let err = request_with_retry(&r, "/x", &serde_json::json!({})).unwrap_err();
         assert_eq!(err.kind, ProviderErrorKind::Unreachable);
         assert!(err.retryable);
+    }
+
+    #[test]
+    fn response_too_large_is_malformed_response_not_retryable() {
+        // A transport that reports ResponseTooLarge must surface as a
+        // non-retryable MalformedResponse. It must NOT retry (the next attempt
+        // would return the same oversized body) and the detail must mention the
+        // ceiling so the operator knows what limit was hit.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let _guard = set_transport_override(move |_spec| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Err(TransportFailure::ResponseTooLarge {
+                limit: MAX_RESPONSE_BYTES,
+            })
+        });
+        let r = resolved(ProviderKind::Openai, Some("k"));
+        let err = request_with_retry(&r, "/x", &serde_json::json!({})).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ProviderErrorKind::MalformedResponse,
+            "ResponseTooLarge must map to MalformedResponse"
+        );
+        assert!(!err.retryable, "ResponseTooLarge must not be retryable");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "ResponseTooLarge must not retry"
+        );
+        // The detail must reference the ceiling so the operator knows what limit
+        // was hit (without a hardcoded literal here — just check the MiB token).
+        assert!(
+            err.redacted_detail.contains("MiB"),
+            "detail should mention the MiB ceiling: {}",
+            err.redacted_detail
+        );
     }
 
     #[test]
