@@ -35,7 +35,9 @@ use crate::authoring::untrusted::UntrustedRoot;
 use crate::catalog::git::{Git, scrub_to_string};
 use crate::catalog::manifest::Owner;
 use crate::error::TomeError;
-use crate::plugin::frontmatter::{frontmatter_keys, parse_skill_frontmatter_str};
+use crate::plugin::frontmatter::{
+    frontmatter_keys, parse_skill_frontmatter_str, split_frontmatter,
+};
 use crate::plugin::identity::EntryKind;
 use crate::plugin::manifest::TomeAuthor;
 use crate::util::{HARNESS_MCP_MAX, PLUGIN_MANIFEST_MAX};
@@ -89,63 +91,81 @@ fn resolved_description(fm: &crate::plugin::frontmatter::SkillFrontmatter, body:
     }
 }
 
-/// Serde target for agent-specific frontmatter fields. Parsed leniently from
-/// the raw source YAML (third-party input). Mirrors the `AgentFrontmatter`
-/// struct in `harness::agents` but scoped to the fields Tome preserves through
-/// the convert pipeline (G4). Unknown keys are silently tolerated per the
-/// strictness boundary (principle IV).
-#[derive(Default, serde::Deserialize)]
-struct AgentSourceFrontmatter {
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    tools: Option<Vec<String>>,
-    /// `allowed-tools` is the kebab-case CC spelling; also accept snake_case.
-    #[serde(default, rename = "allowed-tools", alias = "allowed_tools")]
-    allowed_tools: Option<Vec<String>>,
-    /// `disallowedTools` is the CC camelCase spelling; also accept kebab/snake.
-    #[serde(
-        default,
-        rename = "disallowedTools",
-        alias = "disallowed-tools",
-        alias = "disallowed_tools"
-    )]
-    disallowed_tools: Option<Vec<String>>,
-    /// `permissionMode` is the CC camelCase spelling; also accept snake_case.
-    #[serde(default, rename = "permissionMode", alias = "permission_mode")]
-    permission_mode: Option<String>,
-}
-
 /// Extract the [`AgentMeta`] from the raw source YAML for an agent entry (G4).
 ///
 /// Parses leniently — unknown keys are silently ignored per the strictness
 /// boundary. Returns `None` when the content has no parseable YAML block.
+///
+/// Uses [`split_frontmatter`] (the shared splitter) so delimiter lines with
+/// trailing whitespace (`--- \n`) and EOF-terminated close delimiters are all
+/// accepted (fixes I1).
+///
+/// Each field is extracted individually from the parsed `serde_yaml::Value`
+/// mapping. This means a malformed field — e.g. `tools: Bash` (a scalar
+/// instead of a sequence) — is coerced rather than causing the entire block
+/// to fail, preserving the other fields (`model`, `permissionMode`, etc.).
+/// This fixes C1: a scalar `tools` value is wrapped into a single-element
+/// `Vec<String>` instead of silently dropping all agent meta.
 fn parse_agent_meta(content: &str) -> Option<AgentMeta> {
-    // Reuse the same delimiter split logic as `frontmatter_keys`.
     let stripped = content.strip_prefix('\u{FEFF}').unwrap_or(content);
-    // Find the first `---` line (opening delimiter).
-    let after_open = stripped
-        .strip_prefix("---\n")
-        .or_else(|| stripped.strip_prefix("---\r\n"))?;
-    // Find the closing `---` line.
-    let close_pos = after_open
-        .find("\n---\n")
-        .or_else(|| after_open.find("\n---\r\n"))?;
-    let yaml_block = &after_open[..close_pos];
+    // Use the shared splitter (tolerates trailing whitespace on delimiters and
+    // an EOF-terminated closing delimiter — fixes I1).
+    let (yaml_block, _body) = split_frontmatter(stripped)?;
 
-    let Ok(parsed) = serde_yaml::from_str::<AgentSourceFrontmatter>(yaml_block) else {
+    // Parse the whole block into a generic mapping so each field can be
+    // extracted individually. A completely unparsable block → return None.
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml_block) else {
         return None;
     };
+    let map = value.as_mapping()?;
 
-    // `tools` from Claude Code means "allowed tools"; merge with the explicit
-    // `allowed-tools` key (Claude Code uses both conventions).
-    let tools = parsed.tools.or(parsed.allowed_tools);
+    // Helper: look up a key by any of its candidate names (first match wins).
+    let get = |keys: &[&str]| -> Option<&serde_yaml::Value> {
+        for k in keys {
+            if let Some(v) = map.get(serde_yaml::Value::String((*k).to_owned())) {
+                return Some(v);
+            }
+        }
+        None
+    };
+
+    // Coerce a YAML value that is either a bare scalar string or a sequence of
+    // strings into a `Vec<String>`. Any other shape is silently discarded so
+    // one malformed field cannot drop the whole AgentMeta (C1 fix).
+    let coerce_string_or_seq = |v: &serde_yaml::Value| -> Option<Vec<String>> {
+        match v {
+            serde_yaml::Value::String(s) => Some(vec![s.clone()]),
+            serde_yaml::Value::Sequence(seq) => {
+                let strs: Vec<String> = seq
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect();
+                if strs.is_empty() { None } else { Some(strs) }
+            }
+            // Any other shape (bool, int, null, …) → treat as absent.
+            _ => None,
+        }
+    };
+
+    let model = get(&["model"]).and_then(|v| v.as_str().map(str::to_owned));
+
+    // `tools` (CC alias for "allowed tools") and `allowed-tools` / snake
+    // variants are merged: the first non-empty one wins.
+    let tools = get(&["tools"])
+        .and_then(coerce_string_or_seq)
+        .or_else(|| get(&["allowed-tools", "allowed_tools"]).and_then(coerce_string_or_seq));
+
+    let disallowed_tools = get(&["disallowedTools", "disallowed-tools", "disallowed_tools"])
+        .and_then(coerce_string_or_seq);
+
+    let permission_mode =
+        get(&["permissionMode", "permission_mode"]).and_then(|v| v.as_str().map(str::to_owned));
 
     let meta = AgentMeta {
-        model: parsed.model,
+        model,
         tools,
-        disallowed_tools: parsed.disallowed_tools,
-        permission_mode: parsed.permission_mode,
+        disallowed_tools,
+        permission_mode,
     };
 
     if meta.is_empty() { None } else { Some(meta) }
