@@ -839,55 +839,15 @@ fn empty_strict_outcome(
     }
 }
 
-/// Truncate `s` to `max` Unicode scalar values, appending the ellipsis
-/// character `…` (U+2026) when truncation occurred. Per FR-092 the
-/// post-truncation string is exactly `max` content chars + the one
-/// ellipsis char (total `max + 1`). When `s` already fits within `max`
-/// chars, it's returned verbatim. When `max == 0` an empty string is
-/// returned (defensive — the input validation rejects values strictly
-/// above [`MAX_DESCRIPTION_MAX_CHARS`] but `0` is a legal opt-out
-/// value if a caller really wants empty descriptions).
+/// Truncate `s` to `max` Unicode scalar values, appending `…` (U+2026)
+/// when truncation occurred. Per FR-092 the post-truncation string is
+/// exactly `max` content chars + the one ellipsis char (total `max + 1`).
+/// When `s` already fits within `max` chars it's returned verbatim.
 ///
-/// Character count uses Unicode scalar values (`chars()`), NOT bytes —
-/// a multi-byte UTF-8 input isn't penalised by its encoding. Mirrors
-/// the same discipline used for `MAX_QUERY_CHARS` (Phase 4 US5.a).
-///
-/// US4.d C-2 + Security HIGH fix: this implementation uses
-/// `char_indices` to walk past `max` chars then stop — bounded O(max)
-/// work regardless of input size. The previous implementation called
-/// `chars().count()` for the early-return check, which is O(n) over
-/// the FULL input even when no truncation was needed. With caller-
-/// controlled `description_max_chars` (sanity cap 100,000) running over
-/// `top_k` results × multi-KB descriptions, that was a meaningful DoS
-/// amplifier. The new shape: walk at most `max + 1` chars, then either
-/// return the input verbatim (no truncation needed) or slice at the
-/// `max+1`-th char's byte offset and append the ellipsis. No
-/// `take().collect()` allocation in the truncation path; no full-string
-/// traversal in the no-truncation path.
+/// Delegates to [`crate::util::truncate_at_chars`] — the shared bounded
+/// `char_indices` walk that keeps the DoS-safe truncation logic in one place.
 fn truncate_description(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let mut iter = s.char_indices();
-    // Walk past `max` chars; if we exhaust the iterator within those,
-    // no truncation needed (input already fit).
-    for _ in 0..max {
-        if iter.next().is_none() {
-            return s.to_owned();
-        }
-    }
-    // If the (max+1)-th char exists, slice at its byte offset and
-    // append the ellipsis. Otherwise the input was exactly `max` chars
-    // — no truncation needed.
-    match iter.next() {
-        None => s.to_owned(),
-        Some((byte_idx, _)) => {
-            let mut out = String::with_capacity(byte_idx + '\u{2026}'.len_utf8());
-            out.push_str(&s[..byte_idx]);
-            out.push('\u{2026}');
-            out
-        }
-    }
+    crate::util::truncate_at_chars(s, max, "\u{2026}")
 }
 
 /// Split a `<catalog>/<plugin>` identifier for the JSON error payload.

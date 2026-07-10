@@ -52,6 +52,20 @@ fn main() {
         std::process::exit(0);
     }
 
+    // Resolve Paths once — the Result is reused for the early
+    // logging/colour/progress init (defensive, `.ok()`) and for the
+    // authoritative gate below (`match paths_result`). A single call avoids
+    // a double $HOME lookup and snapshot skew if $HOME could change between
+    // calls (Paths::resolve only reads $HOME and constructs path structs — it
+    // does not open any DB).
+    //
+    // Phase 4 / F10: Paths::resolve runs first so the workspace resolver
+    // can consult the central index for membership. Both can fail (HOME
+    // unset, central DB malformed, workspace not found, workspace name
+    // invalid); errors flow through the same exit-code path as command
+    // errors.
+    let paths_result = paths::Paths::resolve();
+
     // Skip the stderr-based CLI tracing subscriber on the MCP path —
     // `mcp::run` installs its own file-backed JSON subscriber, and the
     // global `tracing` registry only accepts one. Also skip the
@@ -61,8 +75,8 @@ fn main() {
         // Load config once defensively for logging + output knobs. A malformed
         // config.toml falls back to defaults here; the strict error is surfaced
         // by the command itself via `config::load`.
-        let output_cfg = tome::paths::Paths::resolve().ok().map(|p| {
-            let cfg = tome::config::load_or_default(&p);
+        let output_cfg = paths_result.as_ref().ok().map(|p| {
+            let cfg = tome::config::load_or_default(p);
             (cfg.logging.level, cfg.output)
         });
         let cfg_level = output_cfg.as_ref().and_then(|(lvl, _)| *lvl);
@@ -96,12 +110,7 @@ fn main() {
     // honours `TOME_NONINTERACTIVE`) alongside its per-command `--force`/`--yes`.
     prompt::set_non_interactive(cli.non_interactive);
 
-    // Phase 4 / F10: Paths::resolve runs first so the workspace
-    // resolver can consult the central index for membership. Both can
-    // fail (HOME unset, central DB malformed, workspace not found,
-    // workspace name invalid); errors flow through the same exit-code
-    // path as command errors.
-    let paths = match paths::Paths::resolve() {
+    let paths = match paths_result {
         Ok(p) => p,
         Err(err) => {
             let code = err.exit_code();

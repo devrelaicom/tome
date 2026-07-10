@@ -69,45 +69,24 @@ pub use rmcp::model::PromptMessageRole as PromptRole;
 /// shorter blurbs can set `description` shorter explicitly.
 pub const DESCRIPTION_MAX_CHARS: usize = 300;
 
-/// Truncate `description` at a char (Unicode scalar value) boundary and
-/// append U+2026 (`…`) when truncated. Mirrors the bounded-walk shape
-/// US4.d C-2 + Security HIGH fix landed in
-/// [`crate::mcp::tools::search_skills::truncate_description`]: walks at
-/// most `max + 1` chars regardless of input size (no `chars().count()`
-/// over the full input, no `take().collect()` allocation). Runs at
-/// registry-build time per entry rather than per request, so the DoS
-/// amplifier isn't the same shape as search_skills', but the pattern
-/// drift was the real cost — keeping the two truncate sites structurally
-/// identical prevents future copy-paste regressions.
+/// Truncate `description` so the total length (content + `…`) is at most
+/// [`DESCRIPTION_MAX_CHARS`] Unicode scalar values.
+///
+/// Delegates to [`crate::util::truncate_at_chars`] with
+/// `content_max = DESCRIPTION_MAX_CHARS - 1` so that, when truncation
+/// occurs, the result is exactly `DESCRIPTION_MAX_CHARS` chars total
+/// (content + one ellipsis char). When the input already fits within
+/// `DESCRIPTION_MAX_CHARS` chars it is returned verbatim.
+///
+/// This differs from the `search_skills` contract (where `max` is the
+/// content-only cap and the ellipsis is appended on top, yielding
+/// `max + 1` total). Both contracts are expressed as a single call to
+/// the shared helper with the appropriate `content_max` argument.
 fn truncate_description(s: &str) -> String {
-    let max = DESCRIPTION_MAX_CHARS;
-    if max == 0 {
-        return String::new();
-    }
-    let mut iter = s.char_indices();
-    // Walk past `max` chars; if we exhaust the iterator within those,
-    // no truncation needed.
-    for _ in 0..max {
-        if iter.next().is_none() {
-            return s.to_owned();
-        }
-    }
-    // Reserve one slot for the ellipsis by truncating at `max - 1`
-    // content chars and appending `…`. The contract for this site says
-    // the post-truncation string is `DESCRIPTION_MAX_CHARS` chars total
-    // (content + ellipsis), DIFFERING from search_skills (which is
-    // `max + 1` total: `max` content + ellipsis). The walk above
-    // measures the input; once we know it overflows, find the
-    // `max - 1`-th char's byte offset for the slice.
-    let mut iter = s.char_indices();
-    for _ in 0..(max - 1) {
-        iter.next();
-    }
-    let cut = iter.next().map(|(idx, _)| idx).unwrap_or(s.len());
-    let mut out = String::with_capacity(cut + '\u{2026}'.len_utf8());
-    out.push_str(&s[..cut]);
-    out.push('\u{2026}');
-    out
+    // content_max = DESCRIPTION_MAX_CHARS - 1 reserves one slot for `…`,
+    // keeping the total at most DESCRIPTION_MAX_CHARS chars.
+    let content_max = DESCRIPTION_MAX_CHARS.saturating_sub(1);
+    crate::util::truncate_at_chars(s, content_max, "\u{2026}")
 }
 
 // --- The catch-all argument's default description --------------------------
