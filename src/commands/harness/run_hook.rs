@@ -81,10 +81,20 @@ pub fn run(
     paths: &Paths,
     _mode: Mode,
 ) -> Result<(), TomeError> {
-    // Read the harness's native event JSON from stdin. Best-effort: an empty or
-    // unreadable stdin degrades to a fail-open allow downstream (never errors).
-    let mut stdin = String::new();
-    let _ = std::io::stdin().lock().read_to_string(&mut stdin);
+    // Read the harness's native event JSON from stdin, bounded by HOOK_STDIN_MAX.
+    // Best-effort: an empty, unreadable, or oversized stdin degrades to a
+    // fail-open allow downstream (never errors). The cap prevents an OOM kill
+    // (exit 137) from a multi-GiB payload, which harnesses such as Copilot treat
+    // as fail-CLOSED — violating the fail-open totality invariant. Truncated stdin
+    // either fails JSON parsing (→ Value::Null) or yields a partial object; both
+    // degrade to fail-open because the incoming event only feeds matcher filtering,
+    // never a hook decision — decisions come from handler output, not from stdin.
+    let mut stdin_bytes = Vec::new();
+    let _ = std::io::stdin()
+        .lock()
+        .take(HOOK_STDIN_MAX)
+        .read_to_end(&mut stdin_bytes);
+    let stdin = String::from_utf8_lossy(&stdin_bytes).into_owned();
 
     // US10: `--explain` prints what WOULD fire and runs nothing. Stdin is read
     // above and passed in so `explain` can apply the matcher + if filter against
@@ -663,6 +673,22 @@ const HOOK_HTTP_BODY_MAX: u64 = 4 * 1024 * 1024; // 4 MiB
 /// output that fails JSON parsing in `command_outcome_to_decision` degrades to
 /// a non-blocking allow — the correct fail-open behaviour.
 const HOOK_CMD_OUTPUT_MAX: u64 = 4 * 1024 * 1024; // 4 MiB, parity with HTTP cap
+
+/// Maximum bytes read from stdin by [`run`] on the hot dispatch path.
+///
+/// An unbounded `read_to_string` on a process-substituted or piped stdin
+/// would buffer the entire payload on the heap. A harness supplying a multi-GiB
+/// stdin payload (accidentally or maliciously) triggers an OOM kill (exit 137)
+/// which harnesses such as Copilot treat as fail-CLOSED — violating the
+/// fail-open totality invariant.
+///
+/// A hook event JSON object is tiny (typically well under 1 KiB). 1 MiB is
+/// ample for any legitimate harness payload. Truncated stdin either fails JSON
+/// parsing (→ `Value::Null`) or yields a partial object; both degrade to
+/// fail-open because the incoming event only feeds matcher filtering, never a
+/// hook decision — decisions come from handler output, not from the incoming
+/// payload.
+const HOOK_STDIN_MAX: u64 = 1024 * 1024; // 1 MiB
 
 /// The raw result of running one command handler: its exit code plus captured
 /// stdout/stderr. Translated into a [`CcDecision`] by
