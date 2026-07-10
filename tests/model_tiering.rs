@@ -581,6 +581,164 @@ fn explicit_catalog_selection_under_drift_is_refused_and_does_not_stamp() {
 }
 
 // ===========================================================================
+// Issue #498 — a WHOLE-INDEX reindex on an EMPTY index (no plugins enabled)
+// adopts the active embedder as the baseline, clearing embedder drift.
+//
+// The catch-22 the fix resolves: change the embedder on a fresh index (no
+// plugins yet) → the drift guard refuses `plugin enable` and directs the user
+// to reindex, but a whole-index reindex on an empty corpus used to hit the
+// "Nothing to reindex" early return BEFORE the `meta` embedder re-stamp — the
+// sole drift resolver — so the drift never cleared and the first plugin could
+// never be enabled.
+//
+// Both tests drive the REAL `reindex::run` entry point (NOT `run_with_deps`,
+// which bypasses `run_inner`'s empty-corpus branch). There are zero enabled
+// plugins, so the empty branch is exactly what runs.
+// ===========================================================================
+
+/// A `ResolvedScope` pointing at the privileged `global` workspace — the shape
+/// `reindex::run` expects. Mirrors the inline value the drift refusal test
+/// above builds.
+fn global_resolved_scope() -> ResolvedScope {
+    ResolvedScope {
+        scope: WsScope(WorkspaceName::global()),
+        source: ScopeSource::GlobalFallback,
+        project_root: None,
+        overridden_project_marker: None,
+    }
+}
+
+#[test]
+fn whole_index_reindex_on_empty_index_adopts_active_embedder_and_clears_drift() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().to_path_buf();
+    let _home_guard = HomeGuard::install(&home);
+    let paths = lifecycle_paths(&home.join(".tome"));
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    // Bootstrap an EMPTY index at the MEDIUM baseline (no plugin enabled → no
+    // stored vectors), then flip the active profile to `large` so the configured
+    // embedder drifts from the stored `meta` stamp — exactly the state a fresh
+    // index lands in after an embedder change with nothing enabled yet.
+    let conn = open_writable(&paths);
+    meta::write(&conn, MetaKey::EmbedderName, MEDIUM_EMBEDDER).unwrap();
+    meta::write(&conn, MetaKey::EmbedderVersion, "1.5").unwrap();
+    meta::write(&conn, MetaKey::ModelProfile, "large").unwrap();
+
+    // Sanity: the corpus is empty (no plugins enabled).
+    let row_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM skill_embeddings", [], |r| r.get(0))
+        .expect("count embeddings");
+    assert_eq!(row_count, 0, "the index must be empty for this scenario");
+
+    // Precondition — the catch-22: the drift guard (what `plugin enable` /
+    // `catalog update` call) FIRES against the large-profile embedder, and the
+    // whole-index reindex is the only resolver.
+    let configured = meta::active_embedder(&conn).expect("resolve active embedder");
+    assert_eq!(
+        configured.name, LARGE_EMBEDDER,
+        "the large profile resolves the large embedder",
+    );
+    let configured_ident = ModelIdent {
+        name: LARGE_EMBEDDER.into(),
+        version: configured.version.to_owned(),
+    };
+    let drift_err = meta::guard_embedder_drift(&conn, &configured_ident)
+        .expect_err("drift must fire before the reindex resolves it");
+    assert_eq!(
+        drift_err.exit_code(),
+        41,
+        "stored medium vs configured large is EmbedderNameDrift (exit 41)",
+    );
+    drop(conn);
+
+    // Run the REAL whole-index reindex (no scopes / --catalog / --plugin) on the
+    // empty index. There is nothing to re-embed, but it must adopt the active
+    // embedder as the baseline before returning "Nothing to reindex".
+    reindex::run(
+        tome::cli::ReindexArgs {
+            scopes: Vec::new(),
+            catalog: Vec::new(),
+            plugin: Vec::new(),
+            force: false,
+        },
+        &global_resolved_scope(),
+        Mode::Json,
+    )
+    .expect("whole-index reindex on an empty index must succeed");
+
+    // The global `meta` embedder identity is now the LARGE embedder — the stored
+    // baseline matches the configured one, so the drift is cleared and the first
+    // plugin can finally be enabled.
+    let conn = open_writable(&paths);
+    let stored_name = meta::read(&conn, MetaKey::EmbedderName).unwrap().unwrap();
+    assert_eq!(
+        stored_name, LARGE_EMBEDDER,
+        "the empty whole-index reindex must adopt the active (large) embedder",
+    );
+    meta::guard_embedder_drift(&conn, &configured_ident)
+        .expect("drift must be cleared after the empty whole-index reindex");
+}
+
+#[test]
+fn scoped_empty_reindex_does_not_stamp_the_embedder_identity() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().to_path_buf();
+    let _home_guard = HomeGuard::install(&home);
+    let paths = lifecycle_paths(&home.join(".tome"));
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    // Enrol a catalog with NO enabled plugins so `--catalog <name>` resolves to
+    // a VALID empty selection (`whole_index == false`, targets empty) — the
+    // scoped-empty branch that must keep the "never stamp after a partial
+    // re-embed" invariant.
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
+
+    // Same drift state as above: stored MEDIUM, active profile LARGE.
+    let conn = open_writable(&paths);
+    meta::write(&conn, MetaKey::EmbedderName, MEDIUM_EMBEDDER).unwrap();
+    meta::write(&conn, MetaKey::EmbedderVersion, "1.5").unwrap();
+    meta::write(&conn, MetaKey::ModelProfile, "large").unwrap();
+    drop(conn);
+
+    // A SCOPED empty selection short-circuits at the empty-corpus branch BEFORE
+    // the policy gate (so it exits 0, not 47) and — crucially — does NOT stamp
+    // the global `meta` identity, unlike the whole-index empty case.
+    reindex::run(
+        tome::cli::ReindexArgs {
+            scopes: Vec::new(),
+            catalog: vec!["sample-plugin-catalog".to_owned()],
+            plugin: Vec::new(),
+            force: false,
+        },
+        &global_resolved_scope(),
+        Mode::Json,
+    )
+    .expect("a scoped empty reindex is a clean zero (exit 0)");
+
+    // The stored embedder identity is UNCHANGED — a scoped selection never
+    // adopts a new global baseline, so the drift is (correctly) still present.
+    let conn = open_writable(&paths);
+    let stored_name = meta::read(&conn, MetaKey::EmbedderName).unwrap().unwrap();
+    assert_eq!(
+        stored_name, MEDIUM_EMBEDDER,
+        "a scoped empty reindex must NOT restamp the global embedder identity",
+    );
+    let configured = meta::active_embedder(&conn).expect("resolve active embedder");
+    meta::guard_embedder_drift(
+        &conn,
+        &ModelIdent {
+            name: configured.name.to_owned(),
+            version: configured.version.to_owned(),
+        },
+    )
+    .expect_err("drift must persist after a scoped empty reindex (no stamp)");
+}
+
+// ===========================================================================
 // Phase 12 / US4 review fix — corrupt-index self-heals to EXTINCTION on a
 // bundled whole-index reindex.
 //
