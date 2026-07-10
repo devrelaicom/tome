@@ -96,8 +96,7 @@
           "--kind",
           "--output",
           "--template",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "convert": [
           "--allow",
@@ -126,8 +125,7 @@
           "--all",
           "--force",
           "--profile",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "list": [
           "--verbose",
@@ -139,15 +137,11 @@
           "--yes"
         ],
         "profile": [
-          "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "test": [
-          "--force",
           "--verbose",
-          "--verify",
-          "--yes"
+          "--verify"
         ],
         "update": [
           "--include-registry",
@@ -227,8 +221,7 @@
         "use": [
           "--create",
           "--force",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ]
       },
       "flags": [
@@ -255,8 +248,7 @@
           "--force",
           "--include-opt-in",
           "--scope",
-          "--verbose",
-          "--yes"
+          "--verbose"
         ],
         "remove": [
           "--all",

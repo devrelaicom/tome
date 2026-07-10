@@ -67,6 +67,7 @@ function flagsOf(text) {
     //      `--flag` tokens anyway) and NOT the free-prose "aliases" some help
     //      text mentions in parentheses.
     const head = line.replace(/^\s+/, '').split(/\s{2,}/)[0];
+    if (!head.startsWith('-')) continue; // skip description/continuation lines
     for (const m of head.matchAll(/--[a-z][a-z0-9-]*/g)) {
       if (!IGNORED_FLAGS.has(m[0])) found.add(m[0]);
     }
