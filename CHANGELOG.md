@@ -597,6 +597,39 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.18](https://github.com/devrelaicom/tome/compare/v0.7.17...v0.7.18) - 2026-07-10
+
+### Added
+
+- *(authoring)* dry-run file inventory + create scaffold for commands/agents/hooks/MCP (closes #527)
+
+### Changed
+
+- *(mcp)* dedupe bounded truncation helper; resolve Paths once in main (closes #520) ([#541](https://github.com/devrelaicom/tome/pull/541))
+
+### Documentation
+
+- *(index)* document exact-scan design decision in build_knn_sql (CR-11) ([#538](https://github.com/devrelaicom/tome/pull/538))
+- *(harness)* document TOCTOU bound in remove_tome_op and merge_decisions reason policy (closes #518) ([#537](https://github.com/devrelaicom/tome/pull/537))
+- *(meta-skill)* complete convert-marketplace agents/hooks/sync guidance ([#528](https://github.com/devrelaicom/tome/pull/528))
+
+### Fixed
+
+- *(authoring)* flatten CC nested command/agent subdirs + honour componentPaths overrides (closes #524) ([#550](https://github.com/devrelaicom/tome/pull/550))
+- *(authoring)* preserve agent frontmatter through convert + warn on unresolved tokens (closes #525) ([#549](https://github.com/devrelaicom/tome/pull/549))
+- *(authoring)* add missing mcp_json field to scaffold_hooks_plugin and scaffold_mcp_plugin; regenerate CLI surface contract with --kind and --yes flags (closes #545) ([#546](https://github.com/devrelaicom/tome/pull/546))
+- *(lint)* close blind spots vs harness sync — mcp.json, agent-spec, HooksSpec (closes #526)
+- *(authoring)* warn on unrecognised plugin-root dirs (closes #523)
+- *(authoring)* normalize wrapped hooks.json on convert ([#522](https://github.com/devrelaicom/tome/pull/522)) ([#539](https://github.com/devrelaicom/tome/pull/539))
+- *(build)* anchor frontmatter key match, skip symlinks in collect_files, wrap check-doc-drift reads (closes #521) ([#540](https://github.com/devrelaicom/tome/pull/540))
+- *(harness)* write Claude Code MCP config to .mcp.json not .claude/settings.json ([#536](https://github.com/devrelaicom/tome/pull/536))
+- *(harness)* add symlink guard before read_manifest in write branch ([#535](https://github.com/devrelaicom/tome/pull/535))
+- *(catalog)* scope advisory lock to refresh_one span only ([#534](https://github.com/devrelaicom/tome/pull/534))
+- *(index)* correct atomicity guarantee in stamp_embedder_meta_atomically doc ([#533](https://github.com/devrelaicom/tome/pull/533))
+- *(workspace)* fix global-config guard on macOS and remove panic on best-effort path ([#532](https://github.com/devrelaicom/tome/pull/532))
+- *(harness)* bound hook-dispatcher stdin read at 1 MiB to prevent OOM ([#530](https://github.com/devrelaicom/tome/pull/530))
+- *(provider)* cap HTTP response body read at 16 MiB to prevent OOM ([#531](https://github.com/devrelaicom/tome/pull/531))
+
 ## [0.7.17](https://github.com/devrelaicom/tome/compare/v0.7.16...v0.7.17) - 2026-07-10
 
 ### Added
