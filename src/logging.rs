@@ -4,12 +4,34 @@
 //!
 //! Verbosity sources, in precedence order: `-v`/`-vv` on the CLI, then
 //! `TOME_LOG`, then `RUST_LOG`, then `[logging] level` in `config.toml`,
-//! then the built-in default (`warn`).
+//! then the built-in default ([`DEFAULT_CLI_DIRECTIVE`] — `warn` with the
+//! benign llama.cpp/ggml chatter demoted to `error`).
 
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+/// The default CLI `EnvFilter` directive.
+///
+/// A bare `"warn"` lets through a benign llama.cpp chatter line that the
+/// bundled summariser triggers on every run (issue #501):
+///
+/// ```text
+/// WARN n_ctx_seq (4096) < n_ctx_train (32768) -- the full capacity of the
+/// model will not be utilized module="llama.cpp::llama_context"
+/// ```
+///
+/// llama.cpp / ggml C-side logs are routed through `tracing` under the target
+/// `llama-cpp-2` (the string literal in `llama_cpp_2`'s `send_logs_to_tracing`
+/// `Metadata`; the `module="llama.cpp::…"` text is a *field*, not the target).
+/// Demoting that one target to `error` in the default directive hides the
+/// benign WARN/INFO noise while still surfacing genuine llama.cpp errors.
+///
+/// This lives in the *default* directive only: an explicit `-v`/`-vv` flag, a
+/// `TOME_LOG` / `RUST_LOG` value, or a `[logging] level` in `config.toml` all
+/// take precedence (see [`resolve_directive`]) and restore full verbosity.
+pub(crate) const DEFAULT_CLI_DIRECTIVE: &str = "warn,llama-cpp-2=error";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum Verbosity {
@@ -53,8 +75,8 @@ impl Verbosity {
 /// 2. `TOME_LOG` env var (`tome_log`, non-empty)
 /// 3. `RUST_LOG` env var (`rust_log`, non-empty)
 /// 4. `[logging] level` in `config.toml` (`config_level`)
-/// 5. `default` — callers supply the right default: `"warn"` for the CLI,
-///    `"info"` for the MCP server.
+/// 5. `default` — callers supply the right default: [`DEFAULT_CLI_DIRECTIVE`]
+///    for the CLI, `"info"` for the MCP server.
 ///
 /// `tome_log` / `rust_log` are the raw env values (pass `None` when unset) so
 /// this function is pure and unit-testable without touching the real environment.
@@ -94,7 +116,7 @@ pub fn init(verbosity: Verbosity, config_level: Option<crate::config::LogLevel>)
         config_level,
         std::env::var("TOME_LOG").ok(),
         std::env::var("RUST_LOG").ok(),
-        "warn",
+        DEFAULT_CLI_DIRECTIVE,
     );
 
     let filter = EnvFilter::new(directive);
@@ -158,6 +180,71 @@ mod tests {
             resolve_directive(Some(Verbosity::default()), None, None, None, "warn"),
             "warn"
         );
+    }
+
+    #[test]
+    fn cli_default_directive_demotes_llama_target() {
+        // Issue #501: at the default log level, the bundled summariser's
+        // benign llama.cpp `n_ctx` WARN must be suppressed. The default CLI
+        // directive keeps `warn` globally but pins the `llama-cpp-2` tracing
+        // target — the one every llama.cpp/ggml C-side log is routed under —
+        // to `error`, so only genuine llama.cpp errors surface.
+        assert_eq!(DEFAULT_CLI_DIRECTIVE, "warn,llama-cpp-2=error");
+
+        // With no flag / env / config override, the resolver returns the CLI
+        // default unchanged (the demotion is part of the default itself).
+        let directive = resolve_directive(
+            Some(Verbosity::default()),
+            None,
+            None,
+            None,
+            DEFAULT_CLI_DIRECTIVE,
+        );
+        assert_eq!(directive, DEFAULT_CLI_DIRECTIVE);
+
+        // The composed directive parses into a valid `EnvFilter` (a malformed
+        // target would panic on `EnvFilter::new`, e.g. via bad `-` handling).
+        let _ = EnvFilter::new(directive);
+    }
+
+    #[test]
+    fn explicit_verbosity_overrides_llama_demotion() {
+        // `-vv` must restore full verbosity for the llama.cpp target too: the
+        // flag branch wins outright, so the demotion in the default drops out.
+        let directive = resolve_directive(
+            Some(Verbosity::from_count(2)),
+            None,
+            None,
+            None,
+            DEFAULT_CLI_DIRECTIVE,
+        );
+        assert_eq!(directive, "debug");
+        assert!(!directive.contains("llama-cpp-2"));
+    }
+
+    #[test]
+    fn env_override_replaces_llama_demotion() {
+        // An explicit `TOME_LOG` / `RUST_LOG` fully replaces the default (and
+        // therefore its llama demotion) — the user asked for verbatim control.
+        for env in [
+            resolve_directive(
+                Some(Verbosity::default()),
+                None,
+                Some("trace".into()),
+                None,
+                DEFAULT_CLI_DIRECTIVE,
+            ),
+            resolve_directive(
+                Some(Verbosity::default()),
+                None,
+                None,
+                Some("trace".into()),
+                DEFAULT_CLI_DIRECTIVE,
+            ),
+        ] {
+            assert_eq!(env, "trace");
+            assert!(!env.contains("llama-cpp-2"));
+        }
     }
 
     #[test]
