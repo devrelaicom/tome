@@ -503,6 +503,77 @@ fn query_empty_corpus_with_real_models_prints_enable_nudge() {
     );
 }
 
+/// #502 real-model gate: `tome query` on the DEFAULT (reranker-off) path must
+/// SUCCEED with the bundled reranker model ABSENT — no spurious `ModelMissing`
+/// (exit 30) failure. This is the exact user-facing fix from the issue: with
+/// reranking off by default, the query path's model-presence gate must NOT
+/// demand the reranker.
+///
+/// The test downloads ONLY the active-profile EMBEDDER (via the library
+/// `download_model` — `tome models download` would also pull the reranker,
+/// defeating the point), writes NO `config.toml` (so `[query] rerank` is unset →
+/// default off), then runs the real `tome query` binary and asserts exit 0.
+/// Before #502 (reranking on by default) this same setup returned exit 30
+/// ("model missing: <reranker>").
+///
+/// Excluded from fast CI (downloads the real ~45 MB BGE embedder); opt in with:
+///
+/// ```sh
+/// cargo test --test index_query_misc -- --ignored
+/// ```
+#[test]
+#[ignore = "#502 release gate: downloads the active-profile embedder (~45 MB); run with --ignored"]
+fn query_default_off_succeeds_with_reranker_model_absent() {
+    use tome::embedding::download::download_model;
+    use tome::embedding::profile::{Profile, embedder_for, reranker_for};
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.models_dir).expect("create models_dir");
+
+    // Download ONLY the embedder — leave the reranker deliberately absent.
+    let embedder = embedder_for(Profile::DEFAULT);
+    download_model(embedder, &paths.models_dir, None).expect("download embedder");
+
+    // Sanity: the embedder manifest is present and the reranker's is NOT — the
+    // whole point of this gate is that the query path succeeds in that exact
+    // state (presence is manifest-file existence, per `model_manifest_ok`).
+    let reranker = reranker_for(Profile::DEFAULT);
+    let embedder_manifest = paths
+        .model_manifest(embedder.name)
+        .expect("embedder manifest path");
+    let reranker_manifest = paths
+        .model_manifest(reranker.name)
+        .expect("reranker manifest path");
+    assert!(
+        embedder_manifest.is_file(),
+        "test setup: embedder `{}` manifest should exist after download",
+        embedder.name,
+    );
+    assert!(
+        !reranker_manifest.is_file(),
+        "test setup: reranker `{}` must be ABSENT (not downloaded)",
+        reranker.name,
+    );
+
+    // No `config.toml` written → `[query] rerank` is unset → reranking is OFF by
+    // default (#502). The query runs on an empty corpus (no catalog/plugin), so
+    // it exits 0 with the empty-corpus nudge — the load-bearing assertion is that
+    // it does NOT fail with `ModelMissing` (exit 30) for the absent reranker.
+    let query = env
+        .cmd()
+        .args(["query", "anything at all"])
+        .output()
+        .expect("spawn query");
+    assert_ne!(
+        query.status.code(),
+        Some(30),
+        "default-off query must NOT fail with ModelMissing (exit 30) for the absent reranker;\nstderr:\n{}",
+        String::from_utf8_lossy(&query.stderr),
+    );
+    assert_ok("query (default off, reranker absent)", &query);
+}
+
 /// Content-addressed cache dir for a catalog URL (sha256 hex), matching the
 /// binary's layout. Duplicated locally because `crate::common::cache_dir_for` takes a
 /// `ToolEnv` and we want the raw form here.

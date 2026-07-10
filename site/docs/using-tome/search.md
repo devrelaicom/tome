@@ -13,13 +13,17 @@ describe what you need and get the right entry back.
 ## `tome query`
 
 ```bash
-tome query "verify a Compact contract"
+tome query "verify a Compact contract" --rerank
 ```
 
 The query text is variadic and space-joined, so quoting is optional:
 `tome query reset a counter` works unquoted. Pass `-q`/`--query "…"` instead
 when the query itself contains flag-like or shell-significant tokens; the
 quoted form is mutually exclusive with the positional words.
+
+Reranking is off by default (see [Reranking](#reranking) below), so the example
+above passes `--rerank` to enable it. Its output — with reranked scores and
+`rerank=true` in the header — looks like this:
 
 ```text
 top_k=10  rerank=true  min_score=none  (10 results)
@@ -47,22 +51,50 @@ It is shown only in an interactive terminal; piped or redirected output omits
 it so the table stays clean to `grep`. The `Type` column reports whether each
 result is a `skill`, `command`, or `agent`.
 
-Search runs in two stages:
+Search runs in one or two stages:
 
 1. **KNN retrieval** — your query is embedded with a local model and matched
-   against the vector index to retrieve the nearest candidates.
-2. **Reranking** — a local cross-encoder reranker re-scores those candidates so
-   the most relevant results are ranked first.
+   against the vector index to retrieve the nearest candidates. This always
+   runs; the score is `1.0 − cosine distance`.
+2. **Reranking** *(optional)* — a cross-encoder reranker re-scores those
+   candidates so the most relevant results are ranked first. This stage is off
+   by default; see [Reranking](#reranking).
 
-Both models run on your machine; nothing is sent anywhere.
+The embedder runs on your machine; nothing is sent anywhere unless you point a
+capability at an external provider.
+
+## Reranking
+
+Reranking is **off by default**. KNN retrieval over the embeddings alone gives a
+usable ranking, and the bundled cross-encoder reranker (`bge-reranker`) is the
+largest model Tome ships, so it is an opt-in quality boost rather than a default
+cost. When reranking is off, results are ordered by embedding similarity and the
+`scoring` field reads `embedding-similarity`; when it is on, results are
+re-scored by the cross-encoder and `scoring` reads `reranked`.
+
+There are three ways to turn reranking on:
+
+- **Per query** — pass `--rerank` to enable it for a single run (or `--no-rerank`
+  to force it off for a run when it is otherwise on). The two flags are mutually
+  exclusive.
+- **In config** — set `[query] rerank = true` in `~/.tome/config.toml` to enable
+  it for every query. Setting `rerank = false` disables it; an explicit config
+  value always wins over the implicit enable below.
+- **Implicitly, via a reranker provider** — if you point the reranker capability
+  at an external provider (`[reranker] provider` and `model`), reranking is
+  enabled without also setting `[query] rerank`. Configuring a reranker backend
+  is taken as a clear intent to use one.
+
+A per-query flag overrides both the config value and the implicit enable.
 
 ## Scoping and flags
 
 | Flag | Effect |
 | --- | --- |
 | `--top-k <n>` | Return at most *n* results. |
-| `--min-score <s>` | Set the score floor used by `--strict`. On its own it changes nothing about which rows return — it's reflected in the header line and the `threshold_passed` JSON field, but results are only dropped when `--strict` is also passed. |
-| `--no-rerank` | Skip the reranking stage; results come back in raw KNN order. |
+| `--min-score <s>` | Set the score floor used by `--strict`. On its own it changes nothing about which rows return — it's reflected in the header line and the `threshold_passed` JSON field, but results are only dropped when `--strict` is also passed. Defaults to `0.5` (embedding similarity — the default path) or `0.0` when reranking is on. |
+| `--rerank` | Run the reranking stage for this query (off by default). Mutually exclusive with `--no-rerank`. See [Reranking](#reranking). |
+| `--no-rerank` | Skip the reranking stage; results come back in raw KNN order. Only meaningful when reranking is otherwise on (via `[query] rerank` or a configured reranker provider). Mutually exclusive with `--rerank`. |
 | `--catalog <name>` | Restrict the search to a catalog. Repeatable: pass `--catalog` several times to include entries from any of the named catalogs. |
 | `--plugin <name>` | Restrict the search to a plugin (across all catalogs unless `--catalog` is also set). Repeatable: include entries from any of the named plugins. |
 | `--kind <kind>` | Restrict the search to an entry kind (`skill`, `command`, or `agent`). Repeatable. `query` only searches indexed, searchable entries, so `--kind agent` typically returns nothing. |
@@ -80,7 +112,7 @@ tome query reset a counter --kind skill --plugin a --plugin b
 ### Limit results with `--top-k`
 
 ```bash
-tome query "verify a Compact contract" --top-k 3
+tome query "verify a Compact contract" --top-k 3 --rerank
 ```
 
 ```text
