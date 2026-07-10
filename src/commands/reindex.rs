@@ -218,23 +218,41 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
     // of `tome reindex --force` re-embeds everything and is fully self-healing.
     let aggregate = execute_targets(&plugins, &deps, force)?;
 
-    // B1: stamp the GLOBAL `meta` embedder rows ONLY after a WHOLE-INDEX
-    // re-embed commits. Never stamp after a partial (scoped) re-embed — the
-    // `meta` table is a single global key/value store describing the entire
-    // index, and a partial stamp would advertise a dimension the out-of-scope
-    // rows do not carry. `force` is true here whenever the embedder changed.
-    if whole_index && force {
-        stamp_embedder_after_whole_index(&policy_conn, &configured_ident)?;
-    }
-
-    // Phase 12 / US2 (FR-015a) + US4: reconcile `meta.embedder_dimension` on a
-    // WHOLE-INDEX reindex. The remote branch's persisted dimension is
-    // `[embedding] dimensions` (authoritative) else the dimension established
-    // from the first successful embed of this run.
+    // B1 + issue #516: stamp the GLOBAL `meta` embedder rows ONLY after a
+    // WHOLE-INDEX re-embed commits, inside a single SQLite transaction so no
+    // concurrent reader can observe a partial write from THIS writer's commit
+    // (e.g. EmbedderName updated but EmbedderVersion or EmbedderDimension not
+    // yet). Readers that issue multiple separate SELECT statements without their
+    // own read transaction can still see inconsistency across those queries —
+    // the WAL transaction only makes our write atomic, not their read snapshot.
+    // Never stamp after a partial (scoped) re-embed — the `meta` table is a
+    // single global key/value store describing the entire index, and a partial
+    // stamp would advertise a dimension the out-of-scope rows do not carry.
+    // `force` is true here whenever the embedder changed.
+    //
+    // `stamp_embedder_meta_atomically` handles the `whole_index && force` guard
+    // for the identity rows internally via `stamp_embedder_after_whole_index`
+    // (which is always correct to call here — see comment in the called fn).
+    // `reconcile_embedder_dimension` on the whole-index path is always correct
+    // regardless of `force` (it clears a stale remote dimension on the bundled
+    // path even when the embedder didn't change).
     if whole_index {
         let established = embedder.established_dimension();
         let persisted_dim = cfg.embedding.dimensions.map(|d| d as usize).or(established);
-        reconcile_embedder_dimension(&policy_conn, remote_embedding, persisted_dim)?;
+        if force {
+            // Embedder changed (or --force): stamp identity + reconcile dimension
+            // atomically so readers never see a half-updated meta.
+            stamp_embedder_meta_atomically(
+                &policy_conn,
+                &configured_ident,
+                remote_embedding,
+                persisted_dim,
+            )?;
+        } else {
+            // Embedder unchanged: only reconcile the dimension key (no identity
+            // rows to update). A single write/delete is already atomic.
+            reconcile_embedder_dimension(&policy_conn, remote_embedding, persisted_dim)?;
+        }
     }
     drop(policy_conn);
 
@@ -293,14 +311,18 @@ fn stamp_active_embedder_on_empty_index(
     let remote_embedding =
         crate::provider::resolve(cfg, crate::provider::Capability::Embedding)?.is_some();
 
-    stamp_embedder_after_whole_index(&policy_conn, &configured_ident)?;
-
-    // No embed happened, so there is no established dimension; only a pinned
-    // `[embedding] dimensions` contributes. `reconcile_embedder_dimension`
-    // persists it on the remote path (or leaves any prior value untouched when
-    // unset) and deletes any stale remote value on the bundled path.
+    // Issue #516: write identity + dimension atomically. No embed happened so
+    // there is no established dimension; only a pinned `[embedding] dimensions`
+    // contributes. `stamp_embedder_meta_atomically` wraps both the identity
+    // rows (`stamp_embedder_after_whole_index`) and the dimension key
+    // (`reconcile_embedder_dimension`) in one SQLite transaction.
     let persisted_dim = cfg.embedding.dimensions.map(|d| d as usize);
-    reconcile_embedder_dimension(&policy_conn, remote_embedding, persisted_dim)?;
+    stamp_embedder_meta_atomically(
+        &policy_conn,
+        &configured_ident,
+        remote_embedding,
+        persisted_dim,
+    )?;
     Ok(())
 }
 
@@ -616,6 +638,12 @@ pub fn embedder_change_policy(
 /// whole-index re-embed has committed. Callers MUST NOT invoke this after a
 /// partial (scoped) re-embed — see [`embedder_change_policy`]. Exposed for the
 /// regression test for the same reason the policy gate is.
+///
+/// NOTE: this function writes two separate autocommit statements. Production
+/// callers should use [`stamp_embedder_meta_atomically`] which wraps both this
+/// call and [`reconcile_embedder_dimension`] in a single SQLite transaction so
+/// the identity stamp + dimension key are never half-visible to concurrent
+/// readers (issue #516).
 pub fn stamp_embedder_after_whole_index(
     conn: &rusqlite::Connection,
     configured_embedder: &ModelIdent,
@@ -650,6 +678,11 @@ pub fn stamp_embedder_after_whole_index(
 /// Exposed (`pub`) so the corrupt-index-to-extinction regression test can drive
 /// the exact reconcile `run_inner` uses with a `StubEmbedder`, without loading a
 /// real on-disk model.
+///
+/// NOTE: this function writes at most one autocommit statement. Production
+/// callers should use [`stamp_embedder_meta_atomically`] which wraps both this
+/// call and [`stamp_embedder_after_whole_index`] in a single SQLite transaction
+/// (issue #516).
 pub fn reconcile_embedder_dimension(
     conn: &rusqlite::Connection,
     remote: bool,
@@ -662,6 +695,51 @@ pub fn reconcile_embedder_dimension(
     } else {
         meta::delete_embedder_dimension(conn)?;
     }
+    Ok(())
+}
+
+/// Atomically stamp the GLOBAL `meta` embedder identity + dimension after a
+/// WHOLE-INDEX re-embed has committed (issue #516).
+///
+/// Wraps [`stamp_embedder_after_whole_index`] and [`reconcile_embedder_dimension`]
+/// inside a single SQLite WAL transaction so the three potential writes
+/// (`EmbedderName`, `EmbedderVersion`, and `EmbedderDimension`) land in one
+/// commit — no concurrent reader can observe a partial write from THIS writer
+/// (e.g. name updated but version or dimension not yet). This is writer-side
+/// atomicity: readers such as `detect_drift` that issue multiple separate
+/// autocommit queries without an enclosing read transaction may still see
+/// inconsistency across their own reads, because WAL isolation does not force
+/// a snapshot across the reader's independent statements.
+///
+/// The `configured_embedder`, `remote`, and `persisted_dim` parameters have the
+/// same semantics as their counterparts in the two inner functions.
+///
+/// Callers MUST NOT invoke this after a partial (scoped) re-embed — the
+/// meta table is a single global key/value store and a partial stamp would
+/// advertise an identity the out-of-scope rows do not share. See
+/// [`embedder_change_policy`].
+pub fn stamp_embedder_meta_atomically(
+    conn: &rusqlite::Connection,
+    configured_embedder: &ModelIdent,
+    remote: bool,
+    persisted_dim: Option<usize>,
+) -> Result<(), TomeError> {
+    // A DEFERRED transaction: we hold only a SHARED lock until we first write,
+    // at which point SQLite promotes to RESERVED/EXCLUSIVE — exactly the
+    // minimal-contention pattern used by `reindex_plugin_atomic` (skills.rs).
+    // The advisory lockfile (`index.lock`) is an application-level guard for
+    // mutating writers; this SQLite transaction makes the meta writes commit as
+    // one atomic unit — no concurrent reader can observe a partial write from
+    // this commit. Readers that issue multiple separate autocommit queries
+    // (e.g. detect_drift) may still see inconsistency across their own reads.
+    let tx = conn.unchecked_transaction().map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("begin embedder-stamp tx: {e}"))
+    })?;
+    stamp_embedder_after_whole_index(&tx, configured_embedder)?;
+    reconcile_embedder_dimension(&tx, remote, persisted_dim)?;
+    tx.commit().map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("commit embedder-stamp tx: {e}"))
+    })?;
     Ok(())
 }
 
