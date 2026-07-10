@@ -267,6 +267,7 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
     let report = DoctorReport {
         tome_version: env!("CARGO_PKG_VERSION").to_owned(),
         workspace: WorkspaceInfo {
+            name: "global".to_owned(),
             scope: ScopeKind::Global,
             path: None,
             source: ScopeSource::GlobalFallback,
@@ -356,7 +357,7 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
 
     let json = serde_json::to_string(&report).expect("serialise");
     let expected = format!(
-        r#"{{"tome_version":"{v}","workspace":{{"scope":"global","path":null,"source":"global_fallback","catalogs":0,"plugins_total":0,"plugins_enabled":0,"skills_indexed":0,"schema_version":null,"embedder":null,"enrolled_catalogs":[],"enabled_plugins":[],"bound_projects":[],"summary_cache":null}},"embedder":{{"name":"bge-small-en-v1.5","version":"1.5","state":"ok"}},"reranker":{{"name":"bge-reranker-base","version":"1","state":"ok"}},"summariser":{{"name":"qwen2.5-0.5b-instruct","version":"2.5","state":"ok"}},"index":{{"present":false,"schema_version":null,"plugins_enabled":0,"skills_indexed":0,"size_bytes":0,"integrity_ok":true}},"drift":{{"kind":"none"}},"catalogs":[],"workspace_registry":{{"present":false,"tracked":0}},"harnesses":[],"harness_rules":[],"harness_mcp":[],"detected_uninstalled_harnesses":[],"model_registry":{{"source":"baked","fetched_at":"{fat}","model_count":{mc},"override_corrupt":false}},"overall":"ok","suggested_fixes":[]}}"#,
+        r#"{{"tome_version":"{v}","workspace":{{"name":"global","scope":"global","path":null,"source":"global_fallback","catalogs":0,"plugins_total":0,"plugins_enabled":0,"skills_indexed":0,"schema_version":null,"embedder":null,"enrolled_catalogs":[],"enabled_plugins":[],"bound_projects":[],"summary_cache":null}},"embedder":{{"name":"bge-small-en-v1.5","version":"1.5","state":"ok"}},"reranker":{{"name":"bge-reranker-base","version":"1","state":"ok"}},"summariser":{{"name":"qwen2.5-0.5b-instruct","version":"2.5","state":"ok"}},"index":{{"present":false,"schema_version":null,"plugins_enabled":0,"skills_indexed":0,"size_bytes":0,"integrity_ok":true}},"drift":{{"kind":"none"}},"catalogs":[],"workspace_registry":{{"present":false,"tracked":0}},"harnesses":[],"harness_rules":[],"harness_mcp":[],"detected_uninstalled_harnesses":[],"model_registry":{{"source":"baked","fetched_at":"{fat}","model_count":{mc},"override_corrupt":false}},"overall":"ok","suggested_fixes":[]}}"#,
         v = env!("CARGO_PKG_VERSION"),
         fat = mr_info.fetched_at,
         mc = mr_info.model_count,
@@ -484,6 +485,7 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
     let report = DoctorReport {
         tome_version: env!("CARGO_PKG_VERSION").to_owned(),
         workspace: WorkspaceInfo {
+            name: "global".to_owned(),
             scope: ScopeKind::Global,
             path: None,
             source: ScopeSource::Flag,
@@ -632,6 +634,7 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
     let report = DoctorReport {
         tome_version: env!("CARGO_PKG_VERSION").to_owned(),
         workspace: WorkspaceInfo {
+            name: "global".to_owned(),
             scope: ScopeKind::Global,
             path: None,
             source: ScopeSource::Flag,
@@ -802,6 +805,7 @@ fn doctor_json_unrepresented_agents_populated_wire_shape() {
     let report = DoctorReport {
         tome_version: env!("CARGO_PKG_VERSION").to_owned(),
         workspace: WorkspaceInfo {
+            name: "global".to_owned(),
             scope: ScopeKind::Global,
             path: None,
             source: ScopeSource::Flag,
