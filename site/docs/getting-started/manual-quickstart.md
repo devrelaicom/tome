@@ -92,7 +92,7 @@ and `min_score` knobs plus the result count.)
 
 That query ran a KNN vector search over the embeddings, entirely on your
 machine. Reranking is off by default; add `--rerank` to run the reranker over
-the KNN hits (it needs the ~280 MB reranker model). Inside a configured harness
+the KNN hits (it needs the ~563 MB reranker model). Inside a configured harness
 the same search runs over the
 [MCP server](../using-tome/mcp-server.md) — the agent searches, then loads only
 the top result instead of holding all 28 indexed entries in context.
