@@ -249,29 +249,46 @@ pub(crate) fn walk_for_project_marker() -> Option<(PathBuf, PathBuf)> {
     // returns the kernel-resolved form (with the `/private/` prefix). A raw
     // string compare between the marker path derived from `here` (canonical)
     // and the global_config_file derived from raw `$HOME` would fail even when
-    // they refer to the same inode. We fix this by canonicalizing the `$HOME`
-    // string itself — the home directory must exist for Tome to function, so
-    // `canonicalize()` on it should succeed. We build the expected global
-    // config path as `<canonical_home>/.tome/config.toml`.
-    let global_config_canonical: Option<PathBuf> = std::env::var_os("HOME").map(|h| {
-        let home = PathBuf::from(h);
-        // Canonicalize $HOME so the path form matches `current_dir()` output.
-        let canon_home = home.canonicalize().unwrap_or(home);
-        canon_home.join(".tome").join("config.toml")
-    });
+    // they refer to the same inode. We guard against this by keeping BOTH
+    // the raw-`$HOME`-derived config path AND (when `canonicalize` succeeds)
+    // the canonical form, then comparing the per-iteration marker against
+    // either. When `canonicalize` fails (dangling symlink, transient race)
+    // we log a debug note but continue: the raw-path guard still fires when
+    // CWD and `$HOME` are expressed consistently.
+    //
+    // CR-08: the previous code did `unwrap_or(home)` so a failed canonicalize
+    // silently fell back to raw `$HOME`.  On macOS with the `/private/`
+    // symlink the two forms diverge → the #302 guard missed → global config
+    // was parsed as a project marker → exit 70 on every command.
+    let global_config_guards: Option<(PathBuf, Option<PathBuf>)> =
+        std::env::var_os("HOME").map(|h| {
+            let home = PathBuf::from(h);
+            let raw_config = home.join(".tome").join("config.toml");
+            let canon_config = match home.canonicalize() {
+                Ok(c) => Some(c.join(".tome").join("config.toml")),
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        "$HOME canonicalize failed; global-config guard uses raw path only"
+                    );
+                    None
+                }
+            };
+            (raw_config, canon_config)
+        });
 
     let mut here = std::env::current_dir().ok()?;
     loop {
         let marker = Paths::project_marker_config(&here);
 
         // Skip the global config file — it must never be interpreted as a
-        // project marker. `here` came from `current_dir()` which is already
-        // in canonical form on macOS; `global_config_canonical` was built
-        // from the canonicalized `$HOME`, so both sides are in the same form.
-        if global_config_canonical
-            .as_ref()
-            .is_some_and(|gc| gc == &marker)
-        {
+        // project marker. Check the per-iteration marker against BOTH the
+        // raw-derived path and the canonical-derived path (when available) so
+        // the guard fires correctly regardless of which path form `here` uses.
+        let is_global_config = global_config_guards.as_ref().is_some_and(|(raw, canon)| {
+            raw == &marker || canon.as_ref().is_some_and(|c| c == &marker)
+        });
+        if is_global_config {
             // Continue walking upward — don't stop here.
             if !here.pop() {
                 break;
