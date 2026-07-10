@@ -211,6 +211,15 @@ pub fn import_plugin(
         ));
     }
 
+    // --- unrecognised top-level dirs/files (closes #523) -------------------
+    // After the known-component and UNSUPPORTED_COMPONENTS passes, enumerate
+    // every top-level entry so that unrecognised directories like `scripts/`
+    // or `lib/` produce an actionable warning instead of silently vanishing.
+    // This matters because hooks or commands often shell out to
+    // `${CLAUDE_PLUGIN_ROOT}/scripts/…` — if the directory isn't imported the
+    // reference breaks silently at runtime.
+    warn_unrecognised_plugin_root_entries(root, &mut diagnostics)?;
+
     // --- hooks/ verbatim pass-through --------------------------------------
     let (hooks_files, hooks_json) = collect_hooks(root, &mut diagnostics)?;
 
@@ -810,6 +819,104 @@ fn collect_supporting(
     }
     out.sort_by(|a, b| a.relative.cmp(&b.relative));
     Ok(out)
+}
+
+/// Top-level plugin-root names that this importer explicitly handles. Entries
+/// that map to `UNSUPPORTED_COMPONENTS` or `settings.json` are NOT listed here
+/// — instead `warn_unrecognised_plugin_root_entries` checks against
+/// `UNSUPPORTED_COMPONENTS` structurally so that a future addition to that
+/// array is automatically silent here without a manual mirror.
+const KNOWN_PLUGIN_ROOT_NAMES: &[&str] = &[
+    // Handled importer entry-point directories.
+    "skills",
+    "commands",
+    "agents",
+    "hooks",
+    // Handled files/dirs.
+    ".claude-plugin",
+    ".mcp.json",
+    // Already warned via the settings.json explicit check above.
+    "settings.json",
+];
+
+/// Root-level documentation, VCS metadata, and build files that CC plugins
+/// commonly ship and that are never referenced via `${CLAUDE_PLUGIN_ROOT}` —
+/// skip silently so the unrecognised-entry warning stays signal, not noise.
+const SKIP_PLUGIN_ROOT_FILES: &[&str] = &[
+    "README.md",
+    "README",
+    "LICENSE",
+    "LICENSE.md",
+    "LICENSE.txt",
+    "CHANGELOG.md",
+    "CHANGELOG",
+    "NOTICE",
+    ".gitignore",
+    ".gitattributes",
+    "Makefile",
+    ".editorconfig",
+];
+
+/// Scan the plugin root for top-level entries that are not in the known set
+/// (neither a handled directory/file, nor an `UNSUPPORTED_COMPONENTS` entry,
+/// nor a common documentation/metadata file) and emit an actionable
+/// [`Diagnostic::warning`] for each one.
+///
+/// This surfaces unrecognised support directories (e.g. `scripts/`, `lib/`)
+/// that hooks or commands commonly reference via
+/// `${CLAUDE_PLUGIN_ROOT}/scripts/…` — without this warning they vanish
+/// silently from the conversion and the reference breaks at runtime.
+fn warn_unrecognised_plugin_root_entries(
+    root: &UntrustedRoot,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<(), TomeError> {
+    // list_dir on the root itself (Path::new("")) enumerates only depth-0 entries,
+    // sorted, with symlink refusal already enforced.
+    let children = root.list_dir(Path::new(""))?;
+    for child in children {
+        if KNOWN_PLUGIN_ROOT_NAMES.contains(&child.name.as_str()) {
+            continue;
+        }
+        // Skip VCS metadata and OS junk (same guard as collect_supporting).
+        if SKIP_SUPPORTING_NAMES.contains(&child.name.as_str()) {
+            continue;
+        }
+        // Already handled by the UNSUPPORTED_COMPONENTS pass — skip to avoid
+        // double-warning. This check is structural so a new UNSUPPORTED_COMPONENTS
+        // entry is automatically silent here without mirroring it into
+        // KNOWN_PLUGIN_ROOT_NAMES.
+        if UNSUPPORTED_COMPONENTS
+            .iter()
+            .any(|(name, _)| *name == child.name.as_str())
+        {
+            continue;
+        }
+        // Skip common documentation/build files that are never
+        // ${CLAUDE_PLUGIN_ROOT}-referenced and would produce a false-positive
+        // "will break at runtime" warning if left to fall through.
+        let lower = child.name.to_lowercase();
+        if SKIP_PLUGIN_ROOT_FILES.contains(&child.name.as_str())
+            || lower.starts_with("readme")
+            || lower.starts_with("license")
+            || lower.starts_with("changelog")
+        {
+            continue;
+        }
+        let kind_label = if child.is_dir { "directory" } else { "file" };
+        let display = if child.is_dir {
+            format!("{}/", child.name)
+        } else {
+            child.name.clone()
+        };
+        diagnostics.push(Diagnostic::warning(
+            rule::UNRECOGNISED_PLUGIN_DIR,
+            format!(
+                "{kind_label} '{display}' was not imported; commands or hooks referencing \
+                 ${{CLAUDE_PLUGIN_ROOT}}/{display} will break at runtime after conversion"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Collect the `hooks/` subtree for verbatim pass-through. Reuses the
@@ -1470,6 +1577,162 @@ mod tests {
         assert!(
             hj.contains("${CLAUDE_PLUGIN_ROOT}"),
             "token must survive: {hj}"
+        );
+    }
+
+    // --- unrecognised plugin-root dirs (closes #523) -------------------------
+
+    #[test]
+    fn warns_on_unrecognised_top_level_dir() {
+        let (_t, root) = cc_plugin(|base| {
+            fs::write(
+                base.join(".claude-plugin/plugin.json"),
+                br#"{"name":"p","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            // `scripts/` is a common support directory that was previously
+            // silently dropped; it should now produce an actionable warning.
+            fs::create_dir_all(base.join("scripts")).unwrap();
+            fs::write(base.join("scripts/run.sh"), b"#!/bin/sh\n").unwrap();
+        });
+        let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
+        // Must have exactly one UNRECOGNISED_PLUGIN_DIR warning naming "scripts/".
+        let unrecognised: Vec<_> = p
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule_id == rule::UNRECOGNISED_PLUGIN_DIR)
+            .collect();
+        assert_eq!(
+            unrecognised.len(),
+            1,
+            "expected exactly one unrecognised-dir diagnostic, got: {:?}",
+            p.diagnostics
+        );
+        assert_eq!(unrecognised[0].severity, Severity::Warning);
+        assert!(
+            unrecognised[0].message.contains("scripts/"),
+            "message must name the directory: {}",
+            unrecognised[0].message
+        );
+        assert!(
+            unrecognised[0]
+                .message
+                .contains("${CLAUDE_PLUGIN_ROOT}/scripts/"),
+            "message must show the broken reference path: {}",
+            unrecognised[0].message
+        );
+    }
+
+    #[test]
+    fn warns_on_multiple_unrecognised_top_level_entries() {
+        let (_t, root) = cc_plugin(|base| {
+            fs::write(
+                base.join(".claude-plugin/plugin.json"),
+                br#"{"name":"p","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            fs::create_dir_all(base.join("scripts")).unwrap();
+            fs::write(base.join("scripts/run.sh"), b"#!/bin/sh\n").unwrap();
+            fs::create_dir_all(base.join("lib")).unwrap();
+            fs::write(base.join("lib/helper.py"), b"# helper\n").unwrap();
+            // A top-level file (not a dir) that is also unrecognised.
+            fs::write(base.join("extra.sh"), b"#!/bin/sh\n").unwrap();
+        });
+        let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
+        let unrecognised: Vec<_> = p
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule_id == rule::UNRECOGNISED_PLUGIN_DIR)
+            .collect();
+        // scripts/, lib/, and extra.sh each produce a warning.
+        assert_eq!(
+            unrecognised.len(),
+            3,
+            "expected three unrecognised-dir diagnostics, got: {:?}",
+            unrecognised
+        );
+        let messages: Vec<&str> = unrecognised.iter().map(|d| d.message.as_str()).collect();
+        assert!(messages.iter().any(|m| m.contains("scripts/")));
+        assert!(messages.iter().any(|m| m.contains("lib/")));
+        // extra.sh is a file, not a dir; message should not append a trailing slash.
+        assert!(messages.iter().any(|m| m.contains("extra.sh")));
+    }
+
+    #[test]
+    fn known_dirs_do_not_produce_unrecognised_warnings() {
+        // skills/, commands/, agents/, hooks/, .claude-plugin/, .mcp.json,
+        // every UNSUPPORTED_COMPONENTS entry, settings.json, .git, and common
+        // documentation files must all be silent — no UNRECOGNISED_PLUGIN_DIR
+        // diagnostic.  This test is structural: it creates a fixture that covers
+        // every branch of the skip logic and asserts zero warnings.
+        let (_t, root) = cc_plugin(|base| {
+            fs::write(
+                base.join(".claude-plugin/plugin.json"),
+                br#"{"name":"p","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            // Handled entry-point directories.
+            fs::create_dir(base.join("skills")).unwrap();
+            fs::create_dir(base.join("commands")).unwrap();
+            fs::create_dir(base.join("agents")).unwrap();
+            fs::create_dir(base.join("hooks")).unwrap();
+            // Handled files.
+            fs::write(base.join(".mcp.json"), br#"{"mcpServers":{}}"#).unwrap();
+            // All UNSUPPORTED_COMPONENTS entries (structural, not manual mirror).
+            for (name, _) in UNSUPPORTED_COMPONENTS {
+                fs::create_dir(base.join(name)).unwrap();
+            }
+            // settings.json is warned by the explicit check, not UNSUPPORTED_COMPONENTS.
+            fs::write(base.join("settings.json"), b"{}").unwrap();
+            // VCS metadata: covered by SKIP_SUPPORTING_NAMES.
+            fs::create_dir(base.join(".git")).unwrap();
+            // Common documentation files: covered by SKIP_PLUGIN_ROOT_FILES.
+            fs::write(base.join("README.md"), b"# readme\n").unwrap();
+            fs::write(base.join("LICENSE"), b"MIT\n").unwrap();
+            fs::write(base.join("CHANGELOG.md"), b"## Changes\n").unwrap();
+            fs::write(base.join(".gitignore"), b"target/\n").unwrap();
+        });
+        let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
+        let unrecognised: Vec<_> = p
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule_id == rule::UNRECOGNISED_PLUGIN_DIR)
+            .collect();
+        assert!(
+            unrecognised.is_empty(),
+            "no UNRECOGNISED_PLUGIN_DIR expected for known/skip entries, got: {:?}",
+            unrecognised
+        );
+    }
+
+    #[test]
+    fn common_doc_files_do_not_produce_unrecognised_warnings() {
+        // README.md, LICENSE, .gitignore etc. must be silently skipped even when
+        // they are the ONLY extra root-level files — the warning message "will
+        // break at runtime" would be a false positive for documentation files.
+        let (_t, root) = cc_plugin(|base| {
+            fs::write(
+                base.join(".claude-plugin/plugin.json"),
+                br#"{"name":"p","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            fs::write(base.join("README.md"), b"# My plugin\n").unwrap();
+            fs::write(base.join("LICENSE"), b"MIT License\n").unwrap();
+            fs::write(base.join("LICENSE.txt"), b"MIT License\n").unwrap();
+            fs::write(base.join(".gitignore"), b"target/\n").unwrap();
+            fs::write(base.join("CHANGELOG.md"), b"## Changes\n").unwrap();
+            fs::write(base.join(".editorconfig"), b"[*]\n").unwrap();
+        });
+        let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
+        let unrecognised: Vec<_> = p
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule_id == rule::UNRECOGNISED_PLUGIN_DIR)
+            .collect();
+        assert!(
+            unrecognised.is_empty(),
+            "documentation files must not produce UNRECOGNISED_PLUGIN_DIR warnings, got: {:?}",
+            unrecognised
         );
     }
 }

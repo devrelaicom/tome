@@ -72,4 +72,8 @@ pub mod rule {
     /// `hooks/hooks.json` exists but could not be read as UTF-8 text; copied
     /// verbatim, unvalidated. Strict-blocking.
     pub const HOOKS_UNREADABLE: &str = "convert/hooks-unreadable";
+    /// A top-level plugin-root directory (or file) was not in the known set and
+    /// not in the UNSUPPORTED_COMPONENTS list — it was silently ignored, but any
+    /// `${CLAUDE_PLUGIN_ROOT}`-relative references to it will break at runtime.
+    pub const UNRECOGNISED_PLUGIN_DIR: &str = "convert/unrecognised-plugin-dir";
 }
