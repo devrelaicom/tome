@@ -27,14 +27,17 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::authoring::ir::{
-    CatalogIr, Diagnostic, EntryIr, McpServerIr, McpTransport, PluginIr, Provenance, SupportingFile,
+    AgentMeta, CatalogIr, Diagnostic, EntryIr, McpServerIr, McpTransport, PluginIr, Provenance,
+    SupportingFile,
 };
 use crate::authoring::rewrite::{RewriteOptions, rewrite_body};
 use crate::authoring::untrusted::UntrustedRoot;
 use crate::catalog::git::{Git, scrub_to_string};
 use crate::catalog::manifest::Owner;
 use crate::error::TomeError;
-use crate::plugin::frontmatter::{frontmatter_keys, parse_skill_frontmatter_str};
+use crate::plugin::frontmatter::{
+    frontmatter_keys, parse_skill_frontmatter_str, split_frontmatter,
+};
 use crate::plugin::identity::EntryKind;
 use crate::plugin::manifest::TomeAuthor;
 use crate::util::{HARNESS_MCP_MAX, PLUGIN_MANIFEST_MAX};
@@ -57,7 +60,31 @@ const MODELLED_FRONTMATTER: &[&str] = &[
     "prompt_name",
 ];
 
-/// Frontmatter keys whose loss silently broadens capability — always a Warning.
+/// Agent-specific frontmatter keys preserved through the pipeline into
+/// [`AgentMeta`] (G4). These are NOT in [`MODELLED_FRONTMATTER`] (they are
+/// not `SkillFrontmatter` fields) but are preserved for agent entries so
+/// `harness sync` can translate them.
+///
+/// Every spelling accepted by `parse_agent_meta` must appear here so that
+/// `classify_dropped_frontmatter` recognises them as "preserved" (Info) rather
+/// than "dropped" (the agent-lossy fallback).  In particular, `disallowedTools`
+/// (camelCase — the canonical CC spelling) and `disallowed_tools` (snake alias)
+/// must be listed alongside the kebab form `disallowed-tools`, and similarly for
+/// `allowed_tools`.
+const AGENT_META_KEYS: &[&str] = &[
+    "model",
+    "tools",
+    "allowed-tools",
+    "allowed_tools",
+    "disallowed-tools",
+    "disallowedTools",
+    "disallowed_tools",
+    "permissionMode",
+    "permission_mode",
+];
+
+/// Frontmatter keys whose loss silently broadens capability — always a Warning
+/// when the entry is NOT an agent (for agents we preserve them via AgentMeta).
 const TOOL_RESTRICTION_KEYS: &[&str] = &["allowed-tools", "disallowed-tools"];
 
 /// When an entry has no frontmatter `description`, fall back to this many
@@ -73,6 +100,96 @@ fn resolved_description(fm: &crate::plugin::frontmatter::SkillFrontmatter, body:
         _ => body.chars().take(DESCRIPTION_FALLBACK_CHARS).collect(),
     }
 }
+
+/// Extract the [`AgentMeta`] from the raw source YAML for an agent entry (G4).
+///
+/// Parses leniently — unknown keys are silently ignored per the strictness
+/// boundary. Returns `None` when the content has no parseable YAML block.
+///
+/// Uses [`split_frontmatter`] (the shared splitter) so delimiter lines with
+/// trailing whitespace (`--- \n`) and EOF-terminated close delimiters are all
+/// accepted (fixes I1).
+///
+/// Each field is extracted individually from the parsed `serde_yaml::Value`
+/// mapping. This means a malformed field — e.g. `tools: Bash` (a scalar
+/// instead of a sequence) — is coerced rather than causing the entire block
+/// to fail, preserving the other fields (`model`, `permissionMode`, etc.).
+/// This fixes C1: a scalar `tools` value is wrapped into a single-element
+/// `Vec<String>` instead of silently dropping all agent meta.
+fn parse_agent_meta(content: &str) -> Option<AgentMeta> {
+    let stripped = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+    // Use the shared splitter (tolerates trailing whitespace on delimiters and
+    // an EOF-terminated closing delimiter — fixes I1).
+    let (yaml_block, _body) = split_frontmatter(stripped)?;
+
+    // Parse the whole block into a generic mapping so each field can be
+    // extracted individually. A completely unparsable block → return None.
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml_block) else {
+        return None;
+    };
+    let map = value.as_mapping()?;
+
+    // Helper: look up a key by any of its candidate names (first match wins).
+    let get = |keys: &[&str]| -> Option<&serde_yaml::Value> {
+        for k in keys {
+            if let Some(v) = map.get(serde_yaml::Value::String((*k).to_owned())) {
+                return Some(v);
+            }
+        }
+        None
+    };
+
+    // Coerce a YAML value that is either a bare scalar string or a sequence of
+    // strings into a `Vec<String>`. Any other shape is silently discarded so
+    // one malformed field cannot drop the whole AgentMeta (C1 fix).
+    let coerce_string_or_seq = |v: &serde_yaml::Value| -> Option<Vec<String>> {
+        match v {
+            serde_yaml::Value::String(s) => Some(vec![s.clone()]),
+            serde_yaml::Value::Sequence(seq) => {
+                let strs: Vec<String> = seq
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect();
+                if strs.is_empty() { None } else { Some(strs) }
+            }
+            // Any other shape (bool, int, null, …) → treat as absent.
+            _ => None,
+        }
+    };
+
+    let model = get(&["model"]).and_then(|v| v.as_str().map(str::to_owned));
+
+    // `tools` (CC alias for "allowed tools") and `allowed-tools` / snake
+    // variants are merged: the first non-empty one wins.
+    let tools = get(&["tools"])
+        .and_then(coerce_string_or_seq)
+        .or_else(|| get(&["allowed-tools", "allowed_tools"]).and_then(coerce_string_or_seq));
+
+    let disallowed_tools = get(&["disallowedTools", "disallowed-tools", "disallowed_tools"])
+        .and_then(coerce_string_or_seq);
+
+    let permission_mode =
+        get(&["permissionMode", "permission_mode"]).and_then(|v| v.as_str().map(str::to_owned));
+
+    let meta = AgentMeta {
+        model,
+        tools,
+        disallowed_tools,
+        permission_mode,
+    };
+
+    if meta.is_empty() { None } else { Some(meta) }
+}
+
+/// Token strings that are substituted at MCP-serve time but NOT when harness
+/// sync writes native agent bodies. When an agent body contains these tokens
+/// after the harness-ism rewrite, the author should be warned (G8).
+const UNRESOLVED_AGENT_TOKENS: &[&str] = &[
+    "${TOME_PLUGIN_DIR}",
+    "${TOME_PLUGIN_DATA}",
+    "${TOME_SKILL_DIR}",
+    "${TOME_PROJECT_DIR}",
+];
 
 /// Unsupported component directories/files (FR-012, §8): present ⇒ Warning.
 const UNSUPPORTED_COMPONENTS: &[(&str, &str)] = &[
@@ -677,6 +794,7 @@ pub(crate) fn import_skill(
         name,
         description: Some(description),
         frontmatter: parsed.frontmatter,
+        agent_meta: None,
         body: rewritten.text,
         supporting_files,
         source_path: root.resolve(&skill_md)?,
@@ -716,11 +834,42 @@ fn import_md_entry(
     diagnostics.extend(rewritten.diagnostics);
     let description = resolved_description(&parsed.frontmatter, &rewritten.text);
 
+    // G4: For agents, preserve the agent-specific frontmatter fields
+    // (`model`, `tools`, `disallowedTools`, `permissionMode`) in `AgentMeta`
+    // so that `harness sync` can translate them into per-harness native agent
+    // files. Non-agent entries never carry this field.
+    let agent_meta = if kind == EntryKind::Agent {
+        parse_agent_meta(&content)
+    } else {
+        None
+    };
+
+    // G8: Warn when an agent body contains TOME_* substitution tokens that
+    // the native-agent writer copies verbatim — the substitution layer only
+    // fires on the MCP-served path. Non-agent entries are not affected because
+    // their bodies are MCP-served (where substitution fires).
+    if kind == EntryKind::Agent {
+        let body = &rewritten.text;
+        for token in UNRESOLVED_AGENT_TOKENS {
+            if body.contains(token) {
+                diagnostics.push(Diagnostic::warning(
+                    rule::AGENT_UNRESOLVED_TOKEN,
+                    format!(
+                        "`{token}` in agent body will not be substituted by harness sync — \
+                         this token is only resolved on the MCP-served path. Remove the token \
+                         or replace it with a static path before syncing to a native agent harness."
+                    ),
+                ));
+            }
+        }
+    }
+
     Ok(EntryIr {
         kind,
         name,
         description: Some(description),
         frontmatter: parsed.frontmatter,
+        agent_meta,
         body: rewritten.text,
         supporting_files: Vec::new(),
         source_path: root.resolve(rel_file)?,
@@ -730,12 +879,28 @@ fn import_md_entry(
 
 /// Emit `Info`/`Warning` diagnostics for every source frontmatter key Tome does
 /// not model (`data-model.md §6`).
+///
+/// For agent entries, the agent-specific keys (`model`, `tools`,
+/// `allowed-tools`, `disallowed-tools`, `permissionMode`) are now preserved
+/// via [`AgentMeta`] (G4), so they are classified as `Info` rather than
+/// `Warning`. Tool restriction keys are also downgraded to `Info` for agents
+/// since the data is preserved.
 fn classify_dropped_frontmatter(content: &str, kind: EntryKind, diagnostics: &mut Vec<Diagnostic>) {
     for key in frontmatter_keys(content) {
         if MODELLED_FRONTMATTER.contains(&key.as_str()) {
             continue;
         }
-        if TOOL_RESTRICTION_KEYS.contains(&key.as_str()) {
+        // Agent-specific keys are preserved via AgentMeta — emit Info only.
+        if kind == EntryKind::Agent && AGENT_META_KEYS.contains(&key.as_str()) {
+            diagnostics.push(Diagnostic::info(
+                rule::AGENT_LOSSY,
+                format!(
+                    "agent frontmatter `{key}` is preserved in the converted agent file for harness sync"
+                ),
+            ));
+        } else if TOOL_RESTRICTION_KEYS.contains(&key.as_str()) {
+            // For non-agent entries (skills, commands) tool restrictions are
+            // still truly dropped — they are `Warning`.
             diagnostics.push(Diagnostic::warning(
                 rule::TOOL_RESTRICTION_DROPPED,
                 format!(
@@ -743,7 +908,7 @@ fn classify_dropped_frontmatter(content: &str, kind: EntryKind, diagnostics: &mu
                 ),
             ));
         } else if kind == EntryKind::Agent {
-            diagnostics.push(Diagnostic::warning(
+            diagnostics.push(Diagnostic::info(
                 rule::AGENT_LOSSY,
                 format!(
                     "agent frontmatter `{key}` is not modelled by Tome; dropping it (agent conversion is lossy)"
@@ -1193,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn command_gets_legacy_positional_rewrite_agent_is_lossy() {
+    fn command_gets_legacy_positional_rewrite_agent_meta_is_preserved() {
         let (_t, root) = cc_plugin(|base| {
             fs::write(
                 base.join(".claude-plugin/plugin.json"),
@@ -1225,13 +1390,29 @@ mod tests {
             .iter()
             .find(|e| e.kind == EntryKind::Agent)
             .unwrap();
-        // model + tools are dropped as agent-lossy warnings.
+        // model + tools are now preserved via AgentMeta (G4) — they emit
+        // Info-level agent-lossy diagnostics, not Warnings, since the data
+        // is retained through the pipeline.
         let lossy = agent
             .diagnostics
             .iter()
             .filter(|d| d.rule_id == rule::AGENT_LOSSY)
             .count();
-        assert_eq!(lossy, 2, "model + tools should both warn");
+        assert_eq!(lossy, 2, "model + tools both produce info diagnostics");
+        // Both must be Info (preserved, not dropped).
+        use crate::authoring::ir::Severity;
+        assert!(
+            agent
+                .diagnostics
+                .iter()
+                .filter(|d| d.rule_id == rule::AGENT_LOSSY)
+                .all(|d| d.severity == Severity::Info),
+            "preserved agent-meta keys must be Info, not Warning"
+        );
+        // AgentMeta is populated for the agent entry.
+        let meta = agent.agent_meta.as_ref().expect("agent_meta should be set");
+        assert_eq!(meta.model.as_deref(), Some("opus"));
+        assert_eq!(meta.tools.as_deref(), Some(&["Bash".to_owned()][..]));
     }
 
     #[test]

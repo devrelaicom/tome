@@ -512,7 +512,7 @@ pub fn frontmatter_keys(content: &str) -> Vec<String> {
 ///
 /// Delimiter lines accept both `\n` and `\r\n` terminators and may have
 /// trailing whitespace, but must consist solely of three dashes.
-fn split_frontmatter(contents: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_frontmatter(contents: &str) -> Option<(&str, &str)> {
     let after_open = strip_delimiter_line(contents)?;
     let close_at = find_closing_delimiter(after_open)?;
     let yaml = &after_open[..close_at.start];

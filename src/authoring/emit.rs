@@ -24,7 +24,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::authoring::ir::{Artifact, CatalogIr, EntryIr, McpServerIr, McpTransport, PluginIr};
+use crate::authoring::ir::{
+    AgentMeta, Artifact, CatalogIr, EntryIr, McpServerIr, McpTransport, PluginIr,
+};
 use crate::catalog::manifest::{CatalogManifest, Owner, PluginDeclaration};
 use crate::error::TomeError;
 use crate::plugin::frontmatter::ArgumentSpec;
@@ -280,9 +282,10 @@ fn plan_bare_entry(entry: &EntryIr, files: &mut Vec<PlannedFile>) -> Result<(), 
 // Serialisation — deterministic frontmatter + .mcp.json.
 // ---------------------------------------------------------------------------
 
-/// The frontmatter fields Tome emits, in a fixed order, with `skip` for absent
-/// optionals. Key names match the parser ([`crate::plugin::frontmatter`]):
-/// kebab-case throughout except the explicit `when_to_use` snake rename.
+/// The frontmatter fields Tome emits for skills and commands, in a fixed order,
+/// with `skip` for absent optionals. Key names match the parser
+/// ([`crate::plugin::frontmatter`]): kebab-case throughout except the explicit
+/// `when_to_use` snake rename.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 struct FrontmatterEmit<'a> {
@@ -305,23 +308,67 @@ struct FrontmatterEmit<'a> {
     user_invocable: Option<bool>,
 }
 
+/// The frontmatter fields Tome emits for agent entries (G4). Extends the base
+/// set with agent-specific fields preserved from the source CC plugin so that
+/// `harness sync` can translate them into per-harness native agent files.
+///
+/// Field names use the canonical CC vocabulary that `harness::agents::AgentFrontmatter`
+/// parses: camelCase for `disallowedTools` and `permissionMode` (matching the
+/// CC wire format).
+#[derive(serde::Serialize)]
+struct AgentFrontmatterEmit<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+    /// Canonical model value, emitted only when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    /// Allowed tools, emitted only when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a Vec<String>>,
+    /// Disallowed tools — CC camelCase so `harness::agents::AgentFrontmatter`
+    /// (which uses `rename = "disallowedTools"`) parses it back correctly.
+    #[serde(rename = "disallowedTools", skip_serializing_if = "Option::is_none")]
+    disallowed_tools: Option<&'a Vec<String>>,
+    /// Permission mode — CC camelCase.
+    #[serde(rename = "permissionMode", skip_serializing_if = "Option::is_none")]
+    permission_mode: Option<&'a str>,
+}
+
 /// Render an entry as `---\n<frontmatter>---\n<body>`. The frontmatter `name`
 /// and `description` are the entry's resolved values (so `name == dir` holds);
-/// the remaining fields come from the mapped frontmatter.
+/// the remaining fields come from the mapped frontmatter. For agent entries,
+/// the agent-specific fields from [`AgentMeta`] are also emitted (G4).
 fn entry_markdown(entry: &EntryIr) -> String {
-    let fm = &entry.frontmatter;
-    let emit = FrontmatterEmit {
-        name: &entry.name,
-        description: entry.description.as_deref(),
-        when_to_use: fm.when_to_use.as_deref(),
-        arguments: fm.arguments.clone(),
-        argument_hint: fm.argument_hint.as_deref(),
-        disable_model_invocation: fm.disable_model_invocation,
-        user_invocable: fm.user_invocable,
+    // Agent entries get a dedicated emit struct that includes the preserved
+    // agent-specific frontmatter fields.
+    let yaml = if entry.kind == EntryKind::Agent {
+        let default_meta = AgentMeta::default();
+        let meta = entry.agent_meta.as_ref().unwrap_or(&default_meta);
+        let emit = AgentFrontmatterEmit {
+            name: &entry.name,
+            description: entry.description.as_deref(),
+            model: meta.model.as_deref(),
+            tools: meta.tools.as_ref(),
+            disallowed_tools: meta.disallowed_tools.as_ref(),
+            permission_mode: meta.permission_mode.as_deref(),
+        };
+        serde_yaml::to_string(&emit).unwrap_or_default()
+    } else {
+        let fm = &entry.frontmatter;
+        let emit = FrontmatterEmit {
+            name: &entry.name,
+            description: entry.description.as_deref(),
+            when_to_use: fm.when_to_use.as_deref(),
+            arguments: fm.arguments.clone(),
+            argument_hint: fm.argument_hint.as_deref(),
+            disable_model_invocation: fm.disable_model_invocation,
+            user_invocable: fm.user_invocable,
+        };
+        serde_yaml::to_string(&emit).unwrap_or_default()
     };
     // serde_yaml is deterministic in struct field order. It does not prepend a
     // `---` document marker; we add the SKILL.md delimiters ourselves.
-    let yaml = serde_yaml::to_string(&emit).unwrap_or_default();
     let yaml = yaml.strip_prefix("---\n").unwrap_or(&yaml);
     let mut out = String::with_capacity(yaml.len() + entry.body.len() + 16);
     out.push_str("---\n");
@@ -491,6 +538,7 @@ mod tests {
             name: name.to_owned(),
             description: Some(desc.to_owned()),
             frontmatter: MappedFrontmatter::default(),
+            agent_meta: None,
             body: body.to_owned(),
             supporting_files: Vec::new(),
             source_path: PathBuf::from("src"),

@@ -1299,3 +1299,323 @@ fn json_convert_diagnostic_lines_carry_lint_finding_fields() {
         "exactly one trailing `type: \"result\"` line (envelope preserved):\n{stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// M3 — round-trip: emitted agent file re-parses correctly through the real
+//       harness sync reader (CanonicalAgent::parse), catching any key-rename
+//       drift between the emitter and the reader (issue #525).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_frontmatter_round_trips_through_canonical_agent_parse() {
+    // Convert a CC agent fixture that carries model, tools, disallowedTools, and
+    // permissionMode.  Read the emitted `.md` back through the real harness sync
+    // reader (CanonicalAgent::parse) and assert that every field survives the
+    // trip — not just that the emitted text contains the right strings.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"roundtrip","version":"1.0.0","description":"round-trip test"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("agents")).unwrap();
+    // Use the camelCase `disallowedTools` spelling (the canonical CC form) to
+    // exercise the I2 fix: AGENT_META_KEYS must include "disallowedTools" so
+    // classify_dropped_frontmatter emits Info (not the agent-lossy fallback).
+    fs::write(
+        src.join("agents/helper.md"),
+        "---\nname: helper\ndescription: a helper agent\nmodel: claude-opus-4-5\ntools:\n  - Bash\n  - Read\ndisallowedTools:\n  - Write\npermissionMode: acceptEdits\n---\nBody text here.\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // Read the emitted file back through the real harness sync reader.
+    let emitted_path = target.join("agents/helper.md");
+    assert!(
+        emitted_path.exists(),
+        "emitted agent file must exist: {emitted_path:?}"
+    );
+    let emitted_text = fs::read_to_string(&emitted_path).unwrap();
+
+    let canonical = tome::harness::agents::CanonicalAgent::parse(
+        "roundtrip",
+        "roundtrip",
+        "helper",
+        &emitted_text,
+    )
+    .expect("emitted agent file must parse through CanonicalAgent::parse");
+
+    // Every field must round-trip without loss.
+    assert_eq!(
+        canonical.model.as_deref(),
+        Some("claude-opus-4-5"),
+        "model must round-trip; emitted file:\n{emitted_text}"
+    );
+    assert_eq!(
+        canonical.tools.as_deref(),
+        Some(&["Bash".to_owned(), "Read".to_owned()][..]),
+        "tools must round-trip; emitted file:\n{emitted_text}"
+    );
+    assert_eq!(
+        canonical.disallowed_tools.as_deref(),
+        Some(&["Write".to_owned()][..]),
+        "disallowedTools must round-trip; emitted file:\n{emitted_text}"
+    );
+    assert_eq!(
+        canonical.permission_mode.as_deref(),
+        Some("acceptEdits"),
+        "permissionMode must round-trip; emitted file:\n{emitted_text}"
+    );
+    assert!(
+        canonical.body.contains("Body text here."),
+        "body must survive the round-trip; emitted file:\n{emitted_text}"
+    );
+
+    // No agent-lossy diagnostic for disallowedTools must be a Warning —
+    // the I2 fix ensures it is downgraded to Info (preserved, not dropped).
+    let lossy_warnings: Vec<_> = outcome
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule_id == "convert/agent-lossy" && d.severity.as_str() == "warning")
+        .collect();
+    assert!(
+        lossy_warnings.is_empty(),
+        "no preserved agent-meta key should produce a Warning-severity agent-lossy diagnostic \
+         (I2: disallowedTools was incorrectly classified as non-preserved before this fix):\n\
+         {lossy_warnings:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// G4 — Agent frontmatter preserved through convert (issue #525)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_frontmatter_model_and_tools_are_preserved_in_emitted_file() {
+    // G4: `model:`, `tools:`, `disallowedTools:`, and `permissionMode:` in an
+    // agent `.md` source must survive convert and appear verbatim in the emitted
+    // agent file so that `harness sync` can translate them.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"agent-test","version":"1.0.0","description":"agent test"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("agents")).unwrap();
+    fs::write(
+        src.join("agents/helper.md"),
+        "---\nname: helper\ndescription: a helper agent\nmodel: claude-opus-4-5\ntools:\n  - Bash\n  - Read\ndisallowedTools:\n  - Write\npermissionMode: acceptEdits\n---\nBody text here.\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // The emitted agent file must have its frontmatter fields preserved.
+    let agent_path = target.join("agents/helper.md");
+    assert!(
+        agent_path.exists(),
+        "agent file was emitted: {agent_path:?}"
+    );
+    let agent_content = fs::read_to_string(&agent_path).unwrap();
+
+    assert!(
+        agent_content.contains("model: claude-opus-4-5"),
+        "model preserved in emitted file:\n{agent_content}"
+    );
+    assert!(
+        agent_content.contains("Bash"),
+        "tools preserved in emitted file:\n{agent_content}"
+    );
+    assert!(
+        agent_content.contains("Read"),
+        "Read tool preserved in emitted file:\n{agent_content}"
+    );
+    assert!(
+        agent_content.contains("disallowedTools"),
+        "disallowedTools preserved in emitted file:\n{agent_content}"
+    );
+    assert!(
+        agent_content.contains("Write"),
+        "disallowed Write tool preserved:\n{agent_content}"
+    );
+    assert!(
+        agent_content.contains("permissionMode: acceptEdits"),
+        "permissionMode preserved in emitted file:\n{agent_content}"
+    );
+    assert!(
+        agent_content.contains("Body text here."),
+        "body preserved:\n{agent_content}"
+    );
+
+    // The diagnostics for the preserved fields must be Info, not Warning.
+    let agent_diags: Vec<_> = outcome
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule_id == "convert/agent-lossy")
+        .collect();
+    // All agent-lossy diagnostics for preserved fields must be Info.
+    for d in &agent_diags {
+        assert_eq!(
+            d.severity.as_str(),
+            "info",
+            "preserved agent-meta field `{}` must emit Info, not Warning: {:?}",
+            d.message,
+            d.severity,
+        );
+    }
+}
+
+#[test]
+fn agent_without_meta_fields_produces_minimal_frontmatter() {
+    // An agent with only name + description (no model/tools/permissionMode) must
+    // still emit a valid frontmatter with just name + description.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"min-agent","version":"1.0.0","description":"minimal"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("agents")).unwrap();
+    fs::write(
+        src.join("agents/simple.md"),
+        "---\nname: simple\ndescription: a simple agent\n---\nDo something.\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    let agent_content = fs::read_to_string(target.join("agents/simple.md")).unwrap();
+    assert!(
+        agent_content.contains("name: simple"),
+        "name present:\n{agent_content}"
+    );
+    assert!(
+        agent_content.contains("description: a simple agent"),
+        "description present:\n{agent_content}"
+    );
+    assert!(
+        !agent_content.contains("model:"),
+        "no spurious model key:\n{agent_content}"
+    );
+    assert!(
+        !agent_content.contains("tools:"),
+        "no spurious tools key:\n{agent_content}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// G8 — Warn on unresolved ${TOME_PLUGIN_DIR} in agent bodies (issue #525)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_body_with_tome_plugin_dir_token_emits_warning() {
+    // G8: An agent body containing ${CLAUDE_PLUGIN_ROOT} (rewritten to
+    // ${TOME_PLUGIN_DIR}) must trigger a `convert/agent-unresolved-token`
+    // Warning, because the native-agent writer copies the body verbatim and the
+    // substitution layer only fires on the MCP-served path.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"tok-test","version":"1.0.0","description":"token test"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("agents")).unwrap();
+    // The agent body contains ${CLAUDE_PLUGIN_ROOT} — the rewrite maps it to
+    // ${TOME_PLUGIN_DIR}, which native-agent harnesses cannot resolve.
+    fs::write(
+        src.join("agents/runner.md"),
+        "---\nname: runner\ndescription: runs scripts\n---\nRun ${CLAUDE_PLUGIN_ROOT}/run.sh\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+
+    // The agent-unresolved-token Warning must be present.
+    let unresolved: Vec<_> = outcome
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule_id == "convert/agent-unresolved-token")
+        .collect();
+    assert!(
+        !unresolved.is_empty(),
+        "expected convert/agent-unresolved-token warning;\ndiagnostics: {:#?}",
+        outcome.report.diagnostics
+    );
+    assert!(
+        unresolved.iter().all(|d| d.severity.as_str() == "warning"),
+        "unresolved-token diagnostic must be Warning: {unresolved:#?}"
+    );
+    assert!(
+        unresolved[0].message.contains("${TOME_PLUGIN_DIR}"),
+        "message names the token: {}",
+        unresolved[0].message
+    );
+
+    // The emitted agent body should still have the (post-rewrite) token —
+    // we warn but do not strip.
+    let target = out.join(&outcome.final_name);
+    let agent_content = fs::read_to_string(target.join("agents/runner.md")).unwrap();
+    assert!(
+        agent_content.contains("${TOME_PLUGIN_DIR}/run.sh"),
+        "token preserved verbatim in emitted body:\n{agent_content}"
+    );
+}
+
+#[test]
+fn skill_body_with_tome_plugin_dir_token_does_not_emit_agent_unresolved_warning() {
+    // G8: The ${TOME_PLUGIN_DIR} warning only applies to agents. A skill with
+    // the same token must NOT get the convert/agent-unresolved-token diagnostic
+    // (skills are MCP-served so the substitution layer fires at runtime).
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"skill-tok","version":"1.0.0","description":"skill token test"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("skills/runner")).unwrap();
+    fs::write(
+        src.join("skills/runner/SKILL.md"),
+        "---\nname: runner\ndescription: runs scripts\n---\nRun ${CLAUDE_PLUGIN_ROOT}/run.sh\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+
+    let unresolved: Vec<_> = outcome
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule_id == "convert/agent-unresolved-token")
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "skills must NOT get the agent-unresolved-token diagnostic: {unresolved:#?}"
+    );
+}
