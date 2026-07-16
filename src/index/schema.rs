@@ -36,7 +36,9 @@ use crate::error::TomeError;
 /// table into a plain `(skill_id INTEGER PRIMARY KEY, embedding BLOB)`
 /// table; KNN uses `vec_distance_cosine()` scalar so no dimension is
 /// baked into the schema (switching embedder models needs only a re-embed).
-pub const SCHEMA_VERSION: u32 = 6;
+/// Phase (metadata) bumps to 7: new `plugin_keywords` table (keyword
+/// discoverability — the structured search filter JOINs here).
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// The privileged seeded workspace name, present after every bootstrap and
 /// migration. Phase 4's lifecycle paths route un-bound operations through
@@ -133,6 +135,16 @@ pub const CREATE_STATEMENTS: &[&str] = &[
     "CREATE INDEX idx_workspace_projects_workspace ON workspace_projects(workspace_id)",
     "CREATE INDEX idx_workspace_skills_skill       ON workspace_skills(skill_id)",
     "CREATE INDEX idx_workspace_catalogs_url       ON workspace_catalogs(url)",
+    // Phase (metadata) / schema v7: keyword discoverability. Keywords live at
+    // the plugin level; the structured search filter (Task E1) JOINs here.
+    // COLLATE NOCASE so `--keyword Auth` matches a stored `auth`.
+    "CREATE TABLE plugin_keywords (
+        catalog  TEXT NOT NULL,
+        plugin   TEXT NOT NULL,
+        keyword  TEXT NOT NULL COLLATE NOCASE,
+        PRIMARY KEY (catalog, plugin, keyword)
+    )",
+    "CREATE INDEX idx_plugin_keywords_keyword ON plugin_keywords(keyword)",
 ];
 
 /// Apply every [`CREATE_STATEMENTS`] row, seed the `meta` table (including
@@ -251,5 +263,36 @@ mod schema_tests {
             )
             .unwrap();
         assert_eq!(profile, "medium");
+    }
+
+    #[test]
+    fn schema_version_is_7() {
+        assert_eq!(SCHEMA_VERSION, 7);
+    }
+
+    #[test]
+    fn bootstrap_creates_plugin_keywords_table() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::index::vec_ext::register_globally().unwrap();
+        let seed = |n: &str, v: &str| MetaSeed {
+            name: n.into(),
+            version: v.into(),
+        };
+        bootstrap(
+            &mut conn,
+            &seed("e", "1"),
+            &seed("r", "1"),
+            &seed("s", "1"),
+            crate::embedding::profile::Profile::DEFAULT,
+        )
+        .unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plugin_keywords'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(exists, "fresh bootstrap must create plugin_keywords");
     }
 }

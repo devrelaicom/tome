@@ -48,6 +48,8 @@ mod reindex;
 mod schema_migration_e2e;
 #[path = "index_query_misc/schema_migration_p6.rs"]
 mod schema_migration_p6;
+#[path = "index_query_misc/schema_migration_p7.rs"]
+mod schema_migration_p7;
 #[path = "index_query_misc/schema_migration_v3.rs"]
 mod schema_migration_v3;
 #[path = "index_query_misc/schema_migrations.rs"]

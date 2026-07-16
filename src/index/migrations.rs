@@ -57,7 +57,9 @@ pub struct Migration {
 /// Phase p11 / model tiering registers the fifth: `phase_p11_v5_to_v6`,
 /// rebuilding `skill_embeddings` from a `vec0` virtual table into a plain
 /// BLOB table and stamping `meta.model_profile = 'small'` for pre-existing
-/// installs (which used the Small profile models by default).
+/// installs (which used the Small profile models by default). Phase
+/// (metadata) registers the sixth: `phase_meta_v6_to_v7`, adding the
+/// `plugin_keywords` table (keyword discoverability).
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         from: 1,
@@ -88,6 +90,12 @@ pub const MIGRATIONS: &[Migration] = &[
         to: 6,
         name: "phase_p11_dimension_free_embeddings",
         apply: phase_p11_v5_to_v6,
+    },
+    Migration {
+        from: 6,
+        to: 7,
+        name: "metadata_plugin_keywords",
+        apply: phase_meta_v6_to_v7,
     },
 ];
 
@@ -416,6 +424,31 @@ fn phase_p11_v5_to_v6(tx: &Transaction) -> Result<(), TomeError> {
     .map_err(|e| {
         TomeError::IndexIntegrityCheckFailure(format!(
             "phase_p11_v5_to_v6: stamp model_profile: {e}"
+        ))
+    })?;
+    Ok(())
+}
+
+/// schema v6 → v7 (Phase metadata / keyword discoverability). Purely
+/// additive: creates `plugin_keywords` + its keyword index, mirroring
+/// `schema::CREATE_STATEMENTS` byte-for-byte so a fresh-bootstrap DB and a
+/// migrated DB end up with identical DDL. No existing table is touched, so
+/// no 12-step rebuild is needed. `apply_pending` records
+/// `meta.schema_version = 7` after this returns `Ok`.
+fn phase_meta_v6_to_v7(tx: &Transaction) -> Result<(), TomeError> {
+    tx.execute_batch(
+        "CREATE TABLE plugin_keywords (
+            catalog  TEXT NOT NULL,
+            plugin   TEXT NOT NULL,
+            keyword  TEXT NOT NULL COLLATE NOCASE,
+            PRIMARY KEY (catalog, plugin, keyword)
+         );
+
+         CREATE INDEX idx_plugin_keywords_keyword ON plugin_keywords(keyword);",
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "phase_meta_v6_to_v7: create plugin_keywords: {e}"
         ))
     })?;
     Ok(())
