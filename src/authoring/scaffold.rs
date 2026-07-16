@@ -177,6 +177,8 @@ pub fn create_artifact(
                         .filter(|n| !n.is_empty())
                         .map(str::to_owned)
                         .unwrap_or_else(|| PLACEHOLDER_OWNER.to_owned()),
+                    url: None,
+                    handles: None,
                     email: String::new(),
                 },
                 plugins: Vec::new(),

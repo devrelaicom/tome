@@ -1205,6 +1205,8 @@ mod tests {
             owner: Owner {
                 name: "o".into(),
                 email: "not-an-email".into(),
+                url: None,
+                handles: None,
             },
             plugins: vec![
                 plugin("dup", "1.0.0", tmp.path().to_path_buf(), vec![]),

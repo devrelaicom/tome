@@ -337,6 +337,8 @@ mod tests {
             owner: crate::catalog::manifest::Owner {
                 name: "o".into(),
                 email: "o@x.io".into(),
+                url: None,
+                handles: None,
             },
             plugins: Vec::new(),
             provenance: Provenance::local("tome", std::path::PathBuf::from("c")),

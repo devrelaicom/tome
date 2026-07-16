@@ -442,6 +442,8 @@ fn parse_owner(value: Option<&toml::Value>) -> Owner {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned(),
+        url: None,
+        handles: None,
     }
 }
 

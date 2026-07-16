@@ -170,8 +170,19 @@ fn plan_catalog(cat: &CatalogIr, files: &mut Vec<PlannedFile>) -> Result<(), Tom
         owner: Owner {
             name: cat.owner.name.clone(),
             email: cat.owner.email.clone(),
+            url: cat.owner.url.clone(),
+            handles: cat.owner.handles.clone(),
         },
         plugins: plugin_decls,
+        // The IR does not (yet) carry the optional discoverability/provenance
+        // fields — nothing to emit until authoring grows a source for them.
+        keywords: Vec::new(),
+        homepage: None,
+        repository: None,
+        bugs: None,
+        documentation: None,
+        display_name: None,
+        icon: None,
     };
     let toml = toml::to_string(&manifest)
         .map_err(|e| TomeError::Internal(anyhow::anyhow!("serialise tome-catalog.toml: {e}")))?;

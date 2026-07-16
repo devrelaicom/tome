@@ -1880,6 +1880,11 @@ pub enum ManifestInvalid {
 
     #[error("toml parse error in {}: {message}", file.display())]
     TomlParse { file: PathBuf, message: String },
+
+    /// A recognised optional metadata field failed value validation
+    /// (URL/keywords/display_name/handles). `message` already names the field.
+    #[error("invalid metadata in {}: {message}", file.display())]
+    InvalidMetadata { file: PathBuf, message: String },
 }
 
 #[cfg(test)]

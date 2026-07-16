@@ -21,6 +21,20 @@ pub struct CatalogManifest {
     pub owner: Owner,
     #[serde(default)]
     pub plugins: Vec<PluginDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bugs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,6 +42,10 @@ pub struct CatalogManifest {
 pub struct Owner {
     pub name: String,
     pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handles: Option<crate::manifest_meta::Handles>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,6 +189,60 @@ fn validate_semantic(m: &CatalogManifest, file: &Path) -> Result<(), ManifestInv
             });
         }
     }
+
+    validate_common_metadata(
+        &m.keywords,
+        &[
+            ("homepage", m.homepage.as_deref()),
+            ("repository", m.repository.as_deref()),
+            ("bugs", m.bugs.as_deref()),
+            ("documentation", m.documentation.as_deref()),
+        ],
+        m.display_name.as_deref(),
+        &[m.owner.url.as_deref()],
+        &[m.owner.handles.as_ref()],
+    )
+    .map_err(|message| ManifestInvalid::InvalidMetadata {
+        file: file.to_path_buf(),
+        message,
+    })?;
+
+    if let Some(icon) = m.icon.as_deref() {
+        crate::manifest_meta::validate_relative_path("icon", icon).map_err(|message| {
+            ManifestInvalid::InvalidMetadata {
+                file: file.to_path_buf(),
+                message,
+            }
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Validate the optional metadata fields common to both manifests. `map_err`
+/// converts the helper message string into the caller's error type.
+pub(crate) fn validate_common_metadata(
+    keywords: &[String],
+    urls: &[(&str, Option<&str>)],
+    display_name: Option<&str>,
+    people_urls: &[Option<&str>],
+    people_handles: &[Option<&crate::manifest_meta::Handles>],
+) -> Result<(), String> {
+    crate::manifest_meta::validate_keywords(keywords)?;
+    for (field, val) in urls {
+        if let Some(v) = val {
+            crate::manifest_meta::validate_http_url(field, v)?;
+        }
+    }
+    if let Some(dn) = display_name {
+        crate::manifest_meta::validate_display_name(dn)?;
+    }
+    for v in people_urls.iter().flatten() {
+        crate::manifest_meta::validate_http_url("url", v)?;
+    }
+    for hm in people_handles.iter().flatten() {
+        crate::manifest_meta::validate_handles(hm)?;
+    }
     Ok(())
 }
 
@@ -279,5 +351,73 @@ mod tests {
         assert!(!looks_like_email("a@b.co@c"));
         assert!(!looks_like_email("a@.co"));
         assert!(!looks_like_email("a@b."));
+    }
+
+    #[test]
+    fn catalog_accepts_new_optional_metadata() {
+        let src = r#"
+name = "c"
+description = "d"
+version = "1.0.0"
+keywords = ["auth", "oauth"]
+homepage = "https://example.com"
+repository = "https://github.com/x/y"
+bugs = "https://github.com/x/y/issues"
+documentation = "https://docs.example.com"
+display_name = "Cool Catalog"
+icon = "assets/icon.png"
+
+[owner]
+name = "Jo"
+email = "jo@example.com"
+url = "https://jo.dev"
+
+[owner.handles]
+github = "jo"
+"#;
+        let m = CatalogManifest::parse_and_validate(
+            std::path::Path::new("tome-catalog.toml"),
+            std::path::Path::new("."),
+            src.as_bytes(),
+        )
+        .expect("valid");
+        assert_eq!(m.keywords, vec!["auth", "oauth"]);
+        assert_eq!(m.homepage.as_deref(), Some("https://example.com"));
+        assert_eq!(m.owner.url.as_deref(), Some("https://jo.dev"));
+        assert_eq!(
+            m.owner
+                .handles
+                .as_ref()
+                .unwrap()
+                .get("github")
+                .map(String::as_str),
+            Some("jo")
+        );
+    }
+
+    #[test]
+    fn catalog_rejects_bad_url_and_overlong_keywords() {
+        let bad_url = "name=\"c\"\ndescription=\"d\"\nversion=\"1.0.0\"\nhomepage=\"ftp://x\"\n[owner]\nname=\"J\"\nemail=\"j@x.co\"\n";
+        assert!(
+            CatalogManifest::parse_and_validate(
+                std::path::Path::new("f"),
+                std::path::Path::new("."),
+                bad_url.as_bytes()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn catalog_without_new_fields_still_parses() {
+        let src = "name=\"c\"\ndescription=\"d\"\nversion=\"1.0.0\"\n[owner]\nname=\"J\"\nemail=\"j@x.co\"\n";
+        let m = CatalogManifest::parse_and_validate(
+            std::path::Path::new("f"),
+            std::path::Path::new("."),
+            src.as_bytes(),
+        )
+        .expect("valid");
+        assert!(m.keywords.is_empty());
+        assert!(m.homepage.is_none());
     }
 }

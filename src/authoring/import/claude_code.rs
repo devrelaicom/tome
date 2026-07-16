@@ -771,7 +771,12 @@ fn parse_owner(value: Option<&serde_json::Value>, diagnostics: &mut Vec<Diagnost
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         if let (Some(name), Some(email)) = (name.clone(), email.clone()) {
-            return Owner { name, email };
+            return Owner {
+                name,
+                email,
+                url: None,
+                handles: None,
+            };
         }
         diagnostics.push(Diagnostic::info(
             rule::CATALOG_SYNTHESIZED_FIELD,
@@ -780,6 +785,8 @@ fn parse_owner(value: Option<&serde_json::Value>, diagnostics: &mut Vec<Diagnost
         return Owner {
             name: name.unwrap_or_else(|| "unknown".to_owned()),
             email: email.unwrap_or_else(|| placeholder_email.to_owned()),
+            url: None,
+            handles: None,
         };
     }
     diagnostics.push(Diagnostic::info(
@@ -789,6 +796,8 @@ fn parse_owner(value: Option<&serde_json::Value>, diagnostics: &mut Vec<Diagnost
     Owner {
         name: "unknown".to_owned(),
         email: placeholder_email.to_owned(),
+        url: None,
+        handles: None,
     }
 }
 
