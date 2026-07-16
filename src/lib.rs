@@ -13,6 +13,7 @@ pub mod error;
 pub mod harness;
 pub mod index;
 pub mod logging;
+pub mod manifest_meta;
 pub mod mcp;
 pub mod model_registry;
 pub mod output;
