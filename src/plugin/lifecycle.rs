@@ -142,6 +142,7 @@ pub fn enable(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<EnableOutcome, 
     // malformed `tome-plugin.toml`.
     let manifest = read_plugin_manifest(&plugin_dir)?;
     let plugin_version = manifest.version.clone();
+    let keywords = manifest.keywords.clone();
 
     // Step 3 — already-enabled check. We open the DB read-only-ish (the
     // bootstrap is idempotent on re-open) and look for any enabled row.
@@ -162,7 +163,7 @@ pub fn enable(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<EnableOutcome, 
 
     // Run the rest under the lock; release explicitly on success, drop on
     // failure (Drop releases best-effort, matching the lock module's docs).
-    let result = enable_locked(id, &plugin_dir, &plugin_version, deps);
+    let result = enable_locked(id, &plugin_dir, &plugin_version, &keywords, deps);
 
     match result {
         Ok((summary, warnings)) => {
@@ -277,9 +278,18 @@ pub fn reindex_plugin_with_entry_bar(
 
     let manifest = read_plugin_manifest(&plugin_dir)?;
     let plugin_version = manifest.version.clone();
+    let keywords = manifest.keywords.clone();
 
     let lock = acquire_lock(&deps.paths.index_lock.clone())?;
-    let result = reindex_locked(id, &plugin_dir, &plugin_version, deps, force, entry_bar);
+    let result = reindex_locked(
+        id,
+        &plugin_dir,
+        &plugin_version,
+        &keywords,
+        deps,
+        force,
+        entry_bar,
+    );
 
     match result {
         Ok((summary, warnings)) => {
@@ -495,6 +505,7 @@ fn enable_locked(
     id: &PluginId,
     plugin_dir: &Path,
     plugin_version: &str,
+    keywords: &[String],
     deps: &LifecycleDeps<'_>,
 ) -> Result<(EnableSummary, Vec<String>), TomeError> {
     if was_cancelled() {
@@ -512,7 +523,7 @@ fn enable_locked(
     )?;
 
     let mut warnings: Vec<String> = Vec::new();
-    let pending = collect_pending_skills(id, plugin_dir, plugin_version, &mut warnings)?;
+    let pending = collect_pending_skills(id, plugin_dir, plugin_version, keywords, &mut warnings)?;
 
     let embedder = deps.embedder;
     let workspace_name = deps.workspace_name();
@@ -614,6 +625,7 @@ fn reindex_locked(
     id: &PluginId,
     plugin_dir: &Path,
     plugin_version: &str,
+    keywords: &[String],
     deps: &LifecycleDeps<'_>,
     force: bool,
     entry_bar: bool,
@@ -633,7 +645,7 @@ fn reindex_locked(
     )?;
 
     let mut warnings: Vec<String> = Vec::new();
-    let pending = collect_pending_skills(id, plugin_dir, plugin_version, &mut warnings)?;
+    let pending = collect_pending_skills(id, plugin_dir, plugin_version, keywords, &mut warnings)?;
 
     let embedder = deps.embedder;
     let workspace_name = deps.workspace_name();
@@ -705,12 +717,34 @@ fn collect_pending_skills(
     id: &PluginId,
     plugin_dir: &Path,
     plugin_version: &str,
+    keywords: &[String],
     warnings: &mut Vec<String>,
 ) -> Result<Vec<PendingSkill>, TomeError> {
     let mut pending: Vec<PendingSkill> = Vec::new();
-    collect_skill_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
-    collect_command_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
-    collect_agent_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
+    collect_skill_entries(
+        id,
+        plugin_dir,
+        plugin_version,
+        keywords,
+        warnings,
+        &mut pending,
+    )?;
+    collect_command_entries(
+        id,
+        plugin_dir,
+        plugin_version,
+        keywords,
+        warnings,
+        &mut pending,
+    )?;
+    collect_agent_entries(
+        id,
+        plugin_dir,
+        plugin_version,
+        keywords,
+        warnings,
+        &mut pending,
+    )?;
     dedupe_pending_by_identity(id, &mut pending, warnings);
     Ok(pending)
 }
@@ -761,6 +795,7 @@ fn collect_skill_entries(
     id: &PluginId,
     plugin_dir: &Path,
     plugin_version: &str,
+    keywords: &[String],
     warnings: &mut Vec<String>,
     pending: &mut Vec<PendingSkill>,
 ) -> Result<(), TomeError> {
@@ -802,6 +837,7 @@ fn collect_skill_entries(
             id,
             plugin_dir,
             plugin_version,
+            keywords,
             &skill_file,
             &dir_name,
             EntryKind::Skill,
@@ -821,6 +857,7 @@ fn collect_command_entries(
     id: &PluginId,
     plugin_dir: &Path,
     plugin_version: &str,
+    keywords: &[String],
     warnings: &mut Vec<String>,
     pending: &mut Vec<PendingSkill>,
 ) -> Result<(), TomeError> {
@@ -841,6 +878,7 @@ fn collect_command_entries(
             id,
             plugin_dir,
             plugin_version,
+            keywords,
             &cmd.path,
             &cmd.name,
             EntryKind::Command,
@@ -869,6 +907,7 @@ fn collect_agent_entries(
     id: &PluginId,
     plugin_dir: &Path,
     plugin_version: &str,
+    keywords: &[String],
     warnings: &mut Vec<String>,
     pending: &mut Vec<PendingSkill>,
 ) -> Result<(), TomeError> {
@@ -948,6 +987,7 @@ fn collect_agent_entries(
             when_to_use: None,
             searchable: false,
             user_invocable: false,
+            keywords: keywords.to_vec(),
         });
     }
 
@@ -981,10 +1021,12 @@ fn resolve_agent_description(parsed: &ParsedSkill) -> String {
 /// Returns `Ok(None)` when the file's YAML body is invalid (FR-013c — the
 /// warning has already been appended) so the caller skips the entry
 /// without aborting the whole plugin.
+#[allow(clippy::too_many_arguments)] // Task D3's `keywords` param pushed this to 8; both call sites are within this module
 fn parse_one_entry(
     id: &PluginId,
     plugin_dir: &Path,
     plugin_version: &str,
+    keywords: &[String],
     file: &Path,
     fallback_name: &str,
     kind: EntryKind,
@@ -1060,6 +1102,7 @@ fn parse_one_entry(
         when_to_use,
         searchable,
         user_invocable,
+        keywords: keywords.to_vec(),
     }))
 }
 
@@ -1260,6 +1303,35 @@ mod tests {
         plugin_dir
     }
 
+    /// [`write_plugin`] plus a `keywords` array in `tome-plugin.toml` (Task
+    /// D3). A separate helper rather than widening `write_plugin`'s
+    /// signature — most tests don't care about keywords, and `write_plugin`
+    /// has many call sites. Rewrites `tome-plugin.toml` after `write_plugin`
+    /// lays out the rest of the plugin.
+    fn write_plugin_with_keywords(
+        catalog_root: &Path,
+        plugin_name: &str,
+        plugin_version: Option<&str>,
+        keywords: &[&str],
+        skills: &[(&str, &str)],
+    ) -> PathBuf {
+        let plugin_dir = write_plugin(catalog_root, plugin_name, plugin_version, skills);
+        let version = plugin_version.unwrap_or("0.0.0");
+        let keywords_toml = keywords
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fs::write(
+            plugin_dir.join("tome-plugin.toml"),
+            format!(
+                "name = \"{plugin_name}\"\nversion = \"{version}\"\nkeywords = [{keywords_toml}]\n"
+            ),
+        )
+        .expect("rewrite tome-plugin.toml with keywords");
+        plugin_dir
+    }
+
     /// Construct a `LifecycleDeps` against the supplied stub. We have to
     /// thread it through carefully because `LifecycleDeps` borrows.
     ///
@@ -1319,6 +1391,31 @@ mod tests {
         .expect("count")
     }
 
+    /// The `plugin_keywords` rows for `(catalog, plugin)`, keyword-ascending
+    /// (Task D3).
+    fn plugin_keywords_rows(paths: &Paths, catalog: &str, plugin: &str) -> Vec<String> {
+        let conn = index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: stub_seed(),
+                reranker: stub_reranker_seed(),
+                summariser: stub_summariser_seed(),
+                profile: None,
+            },
+        )
+        .expect("open index");
+        let mut stmt = conn
+            .prepare(
+                "SELECT keyword FROM plugin_keywords
+                 WHERE catalog = ?1 AND plugin = ?2 ORDER BY keyword",
+            )
+            .expect("prepare plugin_keywords select");
+        stmt.query_map(rusqlite::params![catalog, plugin], |row| row.get(0))
+            .expect("query plugin_keywords")
+            .collect::<Result<_, _>>()
+            .expect("collect plugin_keywords")
+    }
+
     fn good_skill_md(name: &str, description: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\n\nbody text\n")
     }
@@ -1356,6 +1453,118 @@ mod tests {
         let (total, enabled_sum) = count_rows(&paths, "acme", "plug");
         assert_eq!(total, 2);
         assert_eq!(enabled_sum, 2);
+    }
+
+    // ---- enable: manifest keywords (Task D3) -------------------------------
+
+    /// Enabling a plugin whose manifest declares `keywords = ["auth"]`
+    /// inserts a `(catalog, plugin, "auth")` row into `plugin_keywords`, and
+    /// re-processing via `reindex_plugin` with the keywords unchanged does
+    /// not duplicate the row (delete-then-insert inside the same
+    /// transaction as the skill upserts).
+    #[test]
+    fn enable_populates_plugin_keywords_and_reindex_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.root).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
+        write_plugin_with_keywords(
+            &catalog_root,
+            "plug",
+            Some("1.0.0"),
+            &["auth"],
+            &[("alpha", &good_skill_md("alpha", "first skill"))],
+        );
+
+        let embedder = StubEmbedder::new();
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let id: PluginId = "acme/plug".parse().unwrap();
+
+        enable(&id, &deps).expect("enable should succeed");
+        assert_eq!(plugin_keywords_rows(&paths, "acme", "plug"), vec!["auth"]);
+
+        // Re-process the same manifest via reindex (enable itself rejects a
+        // second call on an already-enabled plugin) — the keywords are
+        // unchanged, so the row set must stay exactly the same, not grow.
+        reindex_plugin(&id, &deps, false).expect("reindex should succeed");
+        assert_eq!(
+            plugin_keywords_rows(&paths, "acme", "plug"),
+            vec!["auth"],
+            "unchanged keywords must not produce duplicate rows",
+        );
+    }
+
+    /// Changing a plugin's manifest `keywords` between two `reindex_plugin`
+    /// calls replaces the `plugin_keywords` rows (delete-then-insert), not
+    /// merges into them.
+    #[test]
+    fn reindex_updates_plugin_keywords_on_change() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.root).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
+        let plugin_dir = write_plugin_with_keywords(
+            &catalog_root,
+            "plug",
+            Some("1.0.0"),
+            &["auth"],
+            &[("alpha", &good_skill_md("alpha", "first skill"))],
+        );
+
+        let embedder = StubEmbedder::new();
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let id: PluginId = "acme/plug".parse().unwrap();
+
+        enable(&id, &deps).expect("enable should succeed");
+        assert_eq!(plugin_keywords_rows(&paths, "acme", "plug"), vec!["auth"]);
+
+        // Rewrite the manifest with a different keyword set, then reindex.
+        fs::write(
+            plugin_dir.join("tome-plugin.toml"),
+            "name = \"plug\"\nversion = \"1.0.0\"\nkeywords = [\"billing\"]\n",
+        )
+        .expect("rewrite tome-plugin.toml");
+        reindex_plugin(&id, &deps, false).expect("reindex should succeed");
+
+        assert_eq!(
+            plugin_keywords_rows(&paths, "acme", "plug"),
+            vec!["billing"],
+            "changed keywords replace the old row set",
+        );
+    }
+
+    /// A plugin declaring both `"Auth"` and `"auth"` collides on the
+    /// `plugin_keywords.keyword COLLATE NOCASE` PK (Task D1) — enable must
+    /// not surface a raw UNIQUE-constraint error (`INSERT OR IGNORE`).
+    #[test]
+    fn enable_with_case_variant_duplicate_keywords_does_not_error() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.root).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
+        write_plugin_with_keywords(
+            &catalog_root,
+            "plug",
+            Some("1.0.0"),
+            &["Auth", "auth"],
+            &[("alpha", &good_skill_md("alpha", "first skill"))],
+        );
+
+        let embedder = StubEmbedder::new();
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let id: PluginId = "acme/plug".parse().unwrap();
+
+        enable(&id, &deps).expect("enable does not error on case-variant duplicate keywords");
+        assert_eq!(plugin_keywords_rows(&paths, "acme", "plug"), vec!["Auth"]);
     }
 
     // ---- enable: idempotency rejected --------------------------------------

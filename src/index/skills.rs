@@ -84,6 +84,12 @@ pub struct PendingSkill {
     pub searchable: bool,
     /// Phase 5: resolved `user_invocable` flag.
     pub user_invocable: bool,
+    /// D3: the owning plugin's manifest `keywords`, threaded down from the
+    /// enable/reindex entry points so every entry of one plugin carries the
+    /// same slice. Contributes to `embedding_text`/`content_hash` (D2) and
+    /// is the source [`enable_plugin_atomic`]/[`reindex_plugin_atomic`] read
+    /// to sync the `plugin_keywords` table.
+    pub keywords: Vec<String>,
 }
 
 /// Outcome summary of an atomic enable.
@@ -875,15 +881,55 @@ where
     if pending.kind == EntryKind::Agent {
         return Ok(None);
     }
-    // `&[]`: `PendingSkill` has no `keywords` field yet — a later change
-    // wires the plugin's resolved keywords through here.
     let vector = embed(&embedding_text(
         &pending.name,
         &pending.description,
         pending.when_to_use.as_deref(),
-        &[],
+        &pending.keywords,
     ))?;
     Ok(Some(vector))
+}
+
+/// Replace the `plugin_keywords` rows for `(catalog, plugin)` with
+/// `keywords`, inside the caller's transaction — D3's FR-004 atomicity
+/// requirement puts this in the same transaction as the skill upserts, so a
+/// rollback undoes both together.
+///
+/// Delete-then-insert rather than diffing: a plugin's declared keyword set
+/// is small and this runs once per enable/reindex, not per entry.
+///
+/// The `plugin_keywords.keyword` PK collates `NOCASE` (Task D1), so
+/// `"Auth"` and `"auth"` collide on it. `INSERT OR IGNORE` keeps a plugin
+/// that declares both from raising a raw UNIQUE-constraint error — the
+/// first occurrence in `keywords` wins, later case-variants are silently
+/// dropped.
+fn sync_plugin_keywords(
+    tx: &rusqlite::Transaction<'_>,
+    catalog: &str,
+    plugin: &str,
+    keywords: &[String],
+) -> Result<(), TomeError> {
+    tx.execute(
+        "DELETE FROM plugin_keywords WHERE catalog = ?1 AND plugin = ?2",
+        params![catalog, plugin],
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "delete plugin_keywords for {catalog}/{plugin}: {e}"
+        ))
+    })?;
+    for keyword in keywords {
+        tx.execute(
+            "INSERT OR IGNORE INTO plugin_keywords (catalog, plugin, keyword) VALUES (?1, ?2, ?3)",
+            params![catalog, plugin, keyword],
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!(
+                "insert plugin_keywords for {catalog}/{plugin} keyword `{keyword}`: {e}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
@@ -931,12 +977,22 @@ where
     let now_unix = OffsetDateTime::now_utc().unix_timestamp();
     let mut newly_embedded: u32 = 0;
 
+    // D3: sync `plugin_keywords` for the plugin these entries belong to.
+    // Every element of `pending` carries the same `(catalog, plugin,
+    // keywords)` identity — this function is always invoked for one plugin
+    // at a time — so the first entry is a representative source. An empty
+    // `pending` (a plugin with zero skills/commands/agents) has nothing to
+    // key the sync off of and is skipped.
+    if let Some(first) = pending.first() {
+        sync_plugin_keywords(&tx, &first.catalog, &first.plugin, &first.keywords)?;
+    }
+
     for skill in pending {
         let hash = content_hash(
             &skill.name,
             &skill.description,
             skill.when_to_use.as_deref(),
-            &[],
+            &skill.keywords,
         );
 
         // Phase 5: identity includes `kind` — same-name entries across
@@ -1078,6 +1134,14 @@ where
     let now_unix = OffsetDateTime::now_utc().unix_timestamp();
     let mut summary = ReindexSummary::default();
 
+    // D3: sync `plugin_keywords` for `(catalog, plugin)`. Unlike
+    // `enable_plugin_atomic`, `catalog`/`plugin` are already explicit
+    // parameters here (needed below for the Removed pass), so the sync
+    // isn't gated on `pending` being non-empty — only the keyword source
+    // (every entry carries the same slice) needs a representative element.
+    let keywords: &[String] = pending.first().map_or(&[], |p| p.keywords.as_slice());
+    sync_plugin_keywords(&tx, catalog, plugin, keywords)?;
+
     // Snapshot existing rows once per call. Keyed by `(kind, name)` so
     // Phase 5's same-name-different-kind entries don't collide. We'll
     // diff against `pending` below and use the leftover set for the
@@ -1121,7 +1185,7 @@ where
             &skill.name,
             &skill.description,
             skill.when_to_use.as_deref(),
-            &[],
+            &skill.keywords,
         );
 
         let skill_id = match existing.remove(&(skill.kind, skill.name.clone())) {
@@ -1473,6 +1537,16 @@ mod tests {
         assert_eq!(t, "n\n\nd\n\nKeywords: auth, oauth");
     }
 
+    /// D3: `when_to_use` and `keywords` are independent widenings of the base
+    /// composition (D2 left this structurally guaranteed but untested) — both
+    /// present append in the fixed order documented on [`embedding_text`]:
+    /// name/description, then "When to use:", then "Keywords:".
+    #[test]
+    fn embedding_text_orders_when_to_use_before_keywords() {
+        let t = embedding_text("n", "d", Some("w"), &["auth".into(), "oauth".into()]);
+        assert_eq!(t, "n\n\nd\n\nWhen to use: w\n\nKeywords: auth, oauth");
+    }
+
     fn seed() -> MetaSeed {
         MetaSeed {
             name: "stub".into(),
@@ -1627,6 +1701,7 @@ mod tests {
             when_to_use: None,
             searchable: true,
             user_invocable: true,
+            keywords: Vec::new(),
         }
     }
 
@@ -1709,6 +1784,138 @@ mod tests {
         assert_eq!(summary.unchanged, 3);
         assert_eq!(embeds.get(), 0, "unchanged rows skip the embedder");
         assert_eq!(ticks.get(), 3, "ticks still cover every visited entry");
+    }
+
+    // ---- plugin_keywords sync (D3) --------------------------------------
+
+    /// [`pending_skill`] with `keywords` set — every entry of one plugin
+    /// carries the same slice, mirroring how `plugin_version` is already
+    /// constant across a plugin's entries.
+    fn pending_skill_with_keywords(name: &str, keywords: &[&str]) -> PendingSkill {
+        PendingSkill {
+            keywords: keywords.iter().map(|s| (*s).to_owned()).collect(),
+            ..pending_skill(name)
+        }
+    }
+
+    fn plugin_keywords_rows(conn: &Connection, catalog: &str, plugin: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT keyword FROM plugin_keywords
+                 WHERE catalog = ?1 AND plugin = ?2 ORDER BY keyword",
+            )
+            .expect("prepare plugin_keywords select");
+        stmt.query_map(params![catalog, plugin], |row| row.get(0))
+            .expect("query plugin_keywords")
+            .collect::<Result<_, _>>()
+            .expect("collect plugin_keywords")
+    }
+
+    #[test]
+    fn enable_plugin_atomic_inserts_plugin_keywords() {
+        let dir = TempDir::new().unwrap();
+        let mut conn = open_db(&dir);
+        let pending = vec![pending_skill_with_keywords("a", &["auth"])];
+
+        enable_plugin_atomic(
+            &mut conn,
+            "global",
+            &pending,
+            |_| Ok(vec![0.1f32; 384]),
+            || {},
+        )
+        .expect("enable");
+
+        assert_eq!(plugin_keywords_rows(&conn, "cat", "plug"), vec!["auth"]);
+    }
+
+    /// A plugin declaring both `"Auth"` and `"auth"` collides on the
+    /// `keyword COLLATE NOCASE` PK (Task D1) — `INSERT OR IGNORE` keeps this
+    /// a clean enable (first occurrence wins) rather than a raw
+    /// UNIQUE-constraint error.
+    #[test]
+    fn enable_plugin_atomic_case_variant_keywords_do_not_error() {
+        let dir = TempDir::new().unwrap();
+        let mut conn = open_db(&dir);
+        let pending = vec![pending_skill_with_keywords("a", &["Auth", "auth"])];
+
+        enable_plugin_atomic(
+            &mut conn,
+            "global",
+            &pending,
+            |_| Ok(vec![0.1f32; 384]),
+            || {},
+        )
+        .expect("enable does not error on case-variant duplicate keywords");
+
+        assert_eq!(plugin_keywords_rows(&conn, "cat", "plug"), vec!["Auth"]);
+    }
+
+    #[test]
+    fn reindex_plugin_atomic_unchanged_keywords_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let mut conn = open_db(&dir);
+        let pending = vec![pending_skill_with_keywords("a", &["auth"])];
+        enable_plugin_atomic(
+            &mut conn,
+            "global",
+            &pending,
+            |_| Ok(vec![0.1f32; 384]),
+            || {},
+        )
+        .expect("seed enable");
+
+        reindex_plugin_atomic(
+            &mut conn,
+            "global",
+            "cat",
+            "plug",
+            &pending,
+            false,
+            |_| Ok(vec![0.1f32; 384]),
+            || {},
+        )
+        .expect("reindex");
+
+        assert_eq!(
+            plugin_keywords_rows(&conn, "cat", "plug"),
+            vec!["auth"],
+            "unchanged keywords must not produce duplicate rows",
+        );
+    }
+
+    #[test]
+    fn reindex_plugin_atomic_changed_keywords_replaces_rows() {
+        let dir = TempDir::new().unwrap();
+        let mut conn = open_db(&dir);
+        let before = vec![pending_skill_with_keywords("a", &["auth"])];
+        enable_plugin_atomic(
+            &mut conn,
+            "global",
+            &before,
+            |_| Ok(vec![0.1f32; 384]),
+            || {},
+        )
+        .expect("seed enable");
+
+        let after = vec![pending_skill_with_keywords("a", &["billing"])];
+        reindex_plugin_atomic(
+            &mut conn,
+            "global",
+            "cat",
+            "plug",
+            &after,
+            false,
+            |_| Ok(vec![0.1f32; 384]),
+            || {},
+        )
+        .expect("reindex");
+
+        assert_eq!(
+            plugin_keywords_rows(&conn, "cat", "plug"),
+            vec!["billing"],
+            "changed keywords must delete the old row and insert the new one",
+        );
     }
 
     /// Insert a skill or command row and enrol it in `global` with the default
