@@ -281,18 +281,26 @@ pub struct ResourceEnumeration {
 /// `prompt_name`) are shared by both modes.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
-    /// The entry's catalog.
-    pub catalog: String,
-    /// The entry's plugin.
-    pub plugin: String,
+    /// The entry's catalog. Absent in the multi-match case (`matches` /
+    /// `next_actions` carry per-candidate identity instead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    /// The entry's plugin. Absent in the multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
     /// The RESOLVED concrete entry name (equals the input `name` for an exact
-    /// match; the matched entry's real name for a `*` wildcard).
-    pub name: String,
-    /// The resolved entry kind (`skill` | `command`).
-    pub kind: EntryKind,
+    /// match; the matched entry's real name for a `*` wildcard). Absent in
+    /// the multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The resolved entry kind (`skill` | `command`). Absent in the
+    /// multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<EntryKind>,
     /// Absolute path to the entry body file (a skill's `SKILL.md` or a
-    /// command's `<name>.md`).
-    pub path: String,
+    /// command's `<name>.md`). Absent in the multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 
     // ---- Full-body mode fields (metadata_only == false) --------------------
     /// SKILL.md / command body with YAML frontmatter stripped, then
@@ -349,6 +357,43 @@ pub struct Output {
     /// LAST.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_name: Option<String>,
+
+    // ---- Multi-match `uri` mode fields --------------------------------------
+    /// Multi-match previews (present only when a `uri` matched >1 entry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matches: Option<Vec<MatchItem>>,
+    /// Exact disambiguating `get_skill` calls, aligned index-for-index with
+    /// `matches`. Present only in the multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_actions: Option<Vec<NextAction>>,
+}
+
+/// One entry in a multi-match `uri` response: identity + full description, no
+/// body. Serialize-only (the `deny_unknown_fields` guard is inputs-only).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MatchItem {
+    pub catalog: String,
+    pub plugin: String,
+    pub name: String,
+    pub kind: EntryKind,
+    pub path: String,
+    pub description: String,
+}
+
+/// A ready-to-issue `get_skill` call that disambiguates one match.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NextAction {
+    pub tool: String,
+    pub arguments: NextActionArgs,
+}
+
+/// The exact triple + kind for a `NextAction`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NextActionArgs {
+    pub catalog: String,
+    pub plugin: String,
+    pub name: String,
+    pub kind: EntryKind,
 }
 
 /// Tri-state for the metadata-only `when_to_use` field, so it can serialise as
@@ -560,6 +605,8 @@ async fn handle_metadata(
     hit: LookupHit,
 ) -> Result<Output, McpError> {
     let LookupHit {
+        catalog: hit_catalog,
+        plugin: hit_plugin,
         body_path,
         kind: resolved_kind,
         name: resolved_name,
@@ -607,8 +654,8 @@ async fn handle_metadata(
 
     info!(
         target: "tome::mcp::tools::get_skill",
-        catalog = input.catalog.as_deref().unwrap_or(""),
-        plugin = input.plugin.as_deref().unwrap_or(""),
+        catalog = hit_catalog,
+        plugin = hit_plugin,
         name = resolved_name,
         kind = resolved_kind.as_str(),
         metadata_only = true,
@@ -627,12 +674,7 @@ async fn handle_metadata(
         .prompt_registry
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .prompt_name_for(
-            input.catalog.as_deref().unwrap_or(""),
-            input.plugin.as_deref().unwrap_or(""),
-            resolved_kind,
-            &resolved_name,
-        )
+        .prompt_name_for(&hit_catalog, &hit_plugin, resolved_kind, &resolved_name)
         .map(str::to_owned);
 
     let when_to_use = match when_to_use {
@@ -641,11 +683,11 @@ async fn handle_metadata(
     };
 
     Ok(Output {
-        catalog: input.catalog.unwrap_or_default(),
-        plugin: input.plugin.unwrap_or_default(),
-        name: resolved_name,
-        kind: resolved_kind,
-        path: body_path.display().to_string(),
+        catalog: Some(hit_catalog),
+        plugin: Some(hit_plugin),
+        name: Some(resolved_name),
+        kind: Some(resolved_kind),
+        path: Some(body_path.display().to_string()),
         // Full-body-mode fields are absent in metadata mode.
         content: None,
         resources_paths: None,
@@ -658,6 +700,8 @@ async fn handle_metadata(
         user_invocable: Some(user_invocable),
         resources,
         prompt_name,
+        matches: None,
+        next_actions: None,
     })
 }
 
@@ -670,6 +714,8 @@ async fn handle_body(
     hit: LookupHit,
 ) -> Result<Output, McpError> {
     let LookupHit {
+        catalog: hit_catalog,
+        plugin: hit_plugin,
         body_path,
         kind: resolved_kind,
         name: resolved_name,
@@ -760,14 +806,16 @@ async fn handle_body(
         (raw_content, false)
     } else {
         let ctx_state = state.clone();
-        let ctx_input = input.clone_for_log();
+        let ctx_catalog = hit_catalog.clone();
+        let ctx_plugin = hit_plugin.clone();
         let ctx_skill_path = skill_path.clone();
         let ctx_plugin_version = plugin_version;
         let ctx_resolved_name = resolved_name.clone();
         let rendered_result = tokio::task::spawn_blocking(move || {
             let ctx = build_substitution_context(
                 &ctx_state,
-                &ctx_input,
+                &ctx_catalog,
+                &ctx_plugin,
                 &ctx_resolved_name,
                 &ctx_skill_path,
                 ctx_plugin_version,
@@ -803,8 +851,8 @@ async fn handle_body(
 
     info!(
         target: "tome::mcp::tools::get_skill",
-        catalog = input.catalog.as_deref().unwrap_or(""),
-        plugin = input.plugin.as_deref().unwrap_or(""),
+        catalog = hit_catalog.as_str(),
+        plugin = hit_plugin.as_str(),
         name = resolved_name,
         kind = resolved_kind.as_str(),
         metadata_only = false,
@@ -825,9 +873,9 @@ async fn handle_body(
     // FR-052: attributed `catalog.<id>.entry_invoked`, folded into ONE blocking
     // task (the sync SQLite open+query must not run on the reactor).
     let attribution_scope = state.scope.clone();
-    let attribution_catalog = input.catalog.clone().unwrap_or_default();
+    let attribution_catalog = hit_catalog.clone();
     let attribution_entry_name = resolved_name.clone();
-    let attribution_plugin_name = input.plugin.clone().unwrap_or_default();
+    let attribution_plugin_name = hit_plugin.clone();
     let attribution_harness = crate::mcp::calling_harness(&state);
     let _ = tokio::task::spawn_blocking(move || {
         if let Some(catalog_id) =
@@ -849,12 +897,7 @@ async fn handle_body(
         .prompt_registry
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .prompt_name_for(
-            input.catalog.as_deref().unwrap_or(""),
-            input.plugin.as_deref().unwrap_or(""),
-            resolved_kind,
-            &resolved_name,
-        )
+        .prompt_name_for(&hit_catalog, &hit_plugin, resolved_kind, &resolved_name)
         .map(str::to_owned);
 
     // #333: when the caller opted in AND this is a skill, inline the byte-capped
@@ -879,11 +922,11 @@ async fn handle_body(
         };
 
     Ok(Output {
-        catalog: input.catalog.unwrap_or_default(),
-        plugin: input.plugin.unwrap_or_default(),
-        name: resolved_name,
-        kind: resolved_kind,
-        path: skill_path.display().to_string(),
+        catalog: Some(hit_catalog),
+        plugin: Some(hit_plugin),
+        name: Some(resolved_name),
+        kind: Some(resolved_kind),
+        path: Some(skill_path.display().to_string()),
         content: Some(content),
         resources_paths: Some(resources),
         substitutions_applied: Some(substitutions_applied),
@@ -895,6 +938,8 @@ async fn handle_body(
         user_invocable: None,
         resources: None,
         prompt_name,
+        matches: None,
+        next_actions: None,
     })
 }
 
@@ -911,6 +956,12 @@ fn available_json(entries: &[AvailableEntry]) -> serde_json::Value {
 
 /// A resolved entry hit carrying every field both modes need.
 struct LookupHit {
+    /// The entry's catalog. Sourced from the lookup, not `input` — correct
+    /// for both the triple path (equal to `input.catalog`) and the future
+    /// `uri` path (where `input.catalog` is absent).
+    catalog: String,
+    /// The entry's plugin. Same rationale as `catalog`.
+    plugin: String,
     body_path: PathBuf,
     kind: EntryKind,
     /// The resolved concrete name. Equals `input.name` for the exact-match
@@ -1079,6 +1130,8 @@ fn hit_from_row(
     let body_path =
         skills::resolve_entry_body_path(conn, paths, workspace_name, catalog, plugin, &row.path)?;
     Ok(LookupHit {
+        catalog: catalog.to_owned(),
+        plugin: plugin.to_owned(),
         body_path,
         kind: row.kind,
         name: row.name,
@@ -1269,14 +1322,15 @@ fn inline_resource_bodies(resources: &[String]) -> Vec<ResourceBody> {
 /// matched entry, not the pattern).
 fn build_substitution_context(
     state: &McpState,
-    input: &Input,
+    catalog: &str,
+    plugin: &str,
     resolved_name: &str,
     skill_path: &Path,
     plugin_version: String,
 ) -> Result<SubstitutionContext, (&'static str, McpError)> {
     crate::mcp::substitution_helpers::build_context_for_entry(
-        input.catalog.clone().unwrap_or_default(),
-        input.plugin.clone().unwrap_or_default(),
+        catalog.to_owned(),
+        plugin.to_owned(),
         plugin_version,
         resolved_name.to_owned(),
         skill_path.to_path_buf(),
@@ -1589,11 +1643,11 @@ mod tests {
     #[test]
     fn body_mode_output_omits_metadata_fields() {
         let out = Output {
-            catalog: "c".into(),
-            plugin: "p".into(),
-            name: "s".into(),
-            kind: EntryKind::Skill,
-            path: "/abs/SKILL.md".into(),
+            catalog: Some("c".into()),
+            plugin: Some("p".into()),
+            name: Some("s".into()),
+            kind: Some(EntryKind::Skill),
+            path: Some("/abs/SKILL.md".into()),
             content: Some("body".into()),
             resources_paths: Some(vec!["/abs/a.txt".into()]),
             substitutions_applied: Some(true),
@@ -1604,6 +1658,8 @@ mod tests {
             user_invocable: None,
             resources: None,
             prompt_name: None,
+            matches: None,
+            next_actions: None,
         };
         let json = serde_json::to_string(&out).unwrap();
         // Body-mode fields present.
@@ -1633,11 +1689,11 @@ mod tests {
     #[test]
     fn metadata_mode_output_omits_body_fields() {
         let out = Output {
-            catalog: "c".into(),
-            plugin: "p".into(),
-            name: "s".into(),
-            kind: EntryKind::Skill,
-            path: "/abs/SKILL.md".into(),
+            catalog: Some("c".into()),
+            plugin: Some("p".into()),
+            name: Some("s".into()),
+            kind: Some(EntryKind::Skill),
+            path: Some("/abs/SKILL.md".into()),
             content: None,
             resources_paths: None,
             substitutions_applied: None,
@@ -1651,6 +1707,8 @@ mod tests {
                 directories: BTreeMap::new(),
             }),
             prompt_name: None,
+            matches: None,
+            next_actions: None,
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(json.contains("\"description\":\"desc\""), "{json}");
@@ -1663,6 +1721,53 @@ mod tests {
         assert!(!json.contains("\"content\""), "{json}");
         assert!(!json.contains("\"substitutions_applied\""), "{json}");
         assert!(!json.contains("\"resource_bodies\""), "{json}");
+    }
+
+    #[test]
+    fn multi_match_output_omits_identity_and_body_fields() {
+        let out = Output {
+            catalog: None,
+            plugin: None,
+            name: None,
+            kind: None,
+            path: None,
+            content: None,
+            resources_paths: None,
+            substitutions_applied: None,
+            resource_bodies: None,
+            description: None,
+            when_to_use: MetaWhenToUse::Absent,
+            plugin_version: None,
+            user_invocable: None,
+            resources: None,
+            prompt_name: None,
+            matches: Some(vec![MatchItem {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "foo".into(),
+                kind: EntryKind::Skill,
+                path: "/abs/SKILL.md".into(),
+                description: "d".into(),
+            }]),
+            next_actions: Some(vec![NextAction {
+                tool: "get_skill".into(),
+                arguments: NextActionArgs {
+                    catalog: "acme".into(),
+                    plugin: "plug".into(),
+                    name: "foo".into(),
+                    kind: EntryKind::Skill,
+                },
+            }]),
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains(r#""matches":[{"catalog":"acme","plugin":"plug","name":"foo","kind":"skill","path":"/abs/SKILL.md","description":"d"}]"#), "{json}");
+        assert!(json.contains(r#""next_actions":[{"tool":"get_skill","arguments":{"catalog":"acme","plugin":"plug","name":"foo","kind":"skill"}}]"#), "{json}");
+        // Identity + body fields omitted in multi-match.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("catalog"));
+        assert!(!obj.contains_key("path"));
+        assert!(!obj.contains_key("content"));
     }
 
     #[test]

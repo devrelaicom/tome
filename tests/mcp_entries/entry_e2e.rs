@@ -587,7 +587,7 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
     );
     assert_eq!(
         output.kind,
-        EntryKind::Command,
+        Some(EntryKind::Command),
         "get_skill reports the resolved kind as command",
     );
     let get_skill_prompt = output
@@ -1242,7 +1242,7 @@ fn get_skill_command_omits_resource_bodies() {
         ))
         .expect("get_skill ok for command");
 
-    assert_eq!(out.kind, EntryKind::Command);
+    assert_eq!(out.kind, Some(EntryKind::Command));
     assert!(
         out.resources_paths.as_deref().unwrap().is_empty(),
         "command has no resources"

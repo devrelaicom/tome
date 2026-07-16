@@ -249,10 +249,10 @@ body
     )
     .expect("get_skill metadata ok");
 
-    assert_eq!(info.catalog, "acme");
-    assert_eq!(info.plugin, "plug");
-    assert_eq!(info.name, "with-resources");
-    assert!(matches!(info.kind, EntryKind::Skill));
+    assert_eq!(info.catalog.as_deref(), Some("acme"));
+    assert_eq!(info.plugin.as_deref(), Some("plug"));
+    assert_eq!(info.name.as_deref(), Some("with-resources"));
+    assert!(matches!(info.kind, Some(EntryKind::Skill)));
     assert_eq!(
         info.description.as_deref(),
         Some("A skill that ships sibling files.")
@@ -274,7 +274,7 @@ body
         Some(false),
         "skills default user_invocable=false"
     );
-    assert!(info.path.ends_with("SKILL.md"));
+    assert!(info.path.as_deref().unwrap().ends_with("SKILL.md"));
 
     let res = info.resources.expect("skill MUST carry resources field");
     assert_eq!(res.files.len(), 1);
@@ -306,8 +306,8 @@ fn command_info_omits_resources() {
     )
     .expect("get_skill metadata ok for command");
 
-    assert_eq!(info.name, "fix-issue");
-    assert!(matches!(info.kind, EntryKind::Command));
+    assert_eq!(info.name.as_deref(), Some("fix-issue"));
+    assert!(matches!(info.kind, Some(EntryKind::Command)));
     assert_eq!(info.description.as_deref(), Some("Fix a GitHub issue."));
     assert_eq!(
         info.user_invocable,
@@ -385,7 +385,7 @@ fn default_kind_is_skill() {
     );
 
     let info = invoke(state, input).expect("ok");
-    assert!(matches!(info.kind, EntryKind::Skill));
+    assert!(matches!(info.kind, Some(EntryKind::Skill)));
     assert_eq!(info.description.as_deref(), Some("a skill."));
 }
 
@@ -408,7 +408,7 @@ skill body
     )
     .expect("skill lookup ok");
     assert_eq!(skill_info.description.as_deref(), Some("SKILL deploy."));
-    assert!(matches!(skill_info.kind, EntryKind::Skill));
+    assert!(matches!(skill_info.kind, Some(EntryKind::Skill)));
 
     let cmd_info = invoke(
         state,
@@ -416,7 +416,7 @@ skill body
     )
     .expect("command lookup ok");
     assert_eq!(cmd_info.description.as_deref(), Some("COMMAND deploy."));
-    assert!(matches!(cmd_info.kind, EntryKind::Command));
+    assert!(matches!(cmd_info.kind, Some(EntryKind::Command)));
     assert!(cmd_info.resources.is_none());
 }
 
@@ -588,12 +588,13 @@ fn glob_name_matching_one_resolves() {
     .expect("glob matching one entry must resolve");
 
     assert_eq!(
-        info.name, "compact-circuits",
+        info.name.as_deref(),
+        Some("compact-circuits"),
         "the response reports the RESOLVED concrete name, not the glob pattern",
     );
-    assert!(matches!(info.kind, EntryKind::Skill));
+    assert!(matches!(info.kind, Some(EntryKind::Skill)));
     assert_eq!(info.description.as_deref(), Some("circuit skill."));
-    assert!(info.path.ends_with("SKILL.md"));
+    assert!(info.path.as_deref().unwrap().ends_with("SKILL.md"));
 }
 
 #[test]
@@ -679,8 +680,8 @@ fn glob_name_respects_kind_filter() {
     )
     .expect("kind-filtered glob resolves the single command candidate");
 
-    assert_eq!(info.name, "deploy-cmd");
-    assert!(matches!(info.kind, EntryKind::Command));
+    assert_eq!(info.name.as_deref(), Some("deploy-cmd"));
+    assert!(matches!(info.kind, Some(EntryKind::Command)));
     assert_eq!(info.description.as_deref(), Some("COMMAND deploy."));
 }
 
@@ -696,9 +697,9 @@ fn exact_name_unaffected_by_wildcard_path() {
     )
     .expect("exact name resolves");
 
-    assert_eq!(info.name, "exact-one");
+    assert_eq!(info.name.as_deref(), Some("exact-one"));
     assert_eq!(info.description.as_deref(), Some("exact."));
-    assert!(matches!(info.kind, EntryKind::Skill));
+    assert!(matches!(info.kind, Some(EntryKind::Skill)));
 }
 
 #[allow(dead_code)]

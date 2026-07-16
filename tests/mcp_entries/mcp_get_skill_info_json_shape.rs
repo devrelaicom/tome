@@ -50,11 +50,11 @@ fn metadata_wire_shape_for_skill_kind() {
     );
 
     let out = Output {
-        catalog: "midnight-expert".into(),
-        plugin: "compact-dev".into(),
-        name: "compact-circuits".into(),
-        kind: EntryKind::Skill,
-        path: "/abs/path/to/SKILL.md".into(),
+        catalog: Some("midnight-expert".into()),
+        plugin: Some("compact-dev".into()),
+        name: Some("compact-circuits".into()),
+        kind: Some(EntryKind::Skill),
+        path: Some("/abs/path/to/SKILL.md".into()),
         // Full-body-mode fields absent in metadata mode.
         content: None,
         resources_paths: None,
@@ -70,6 +70,8 @@ fn metadata_wire_shape_for_skill_kind() {
             directories,
         }),
         prompt_name: None,
+        matches: None,
+        next_actions: None,
     };
 
     let json = serde_json::to_string(&out).expect("serialise");
@@ -88,11 +90,11 @@ fn metadata_wire_shape_for_skill_kind() {
 #[test]
 fn metadata_wire_shape_for_command_kind_omits_resources() {
     let out = Output {
-        catalog: "midnight-expert".into(),
-        plugin: "compact-dev".into(),
-        name: "fix-issue".into(),
-        kind: EntryKind::Command,
-        path: "/abs/path/to/commands/fix-issue.md".into(),
+        catalog: Some("midnight-expert".into()),
+        plugin: Some("compact-dev".into()),
+        name: Some("fix-issue".into()),
+        kind: Some(EntryKind::Command),
+        path: Some("/abs/path/to/commands/fix-issue.md".into()),
         content: None,
         resources_paths: None,
         substitutions_applied: None,
@@ -108,6 +110,8 @@ fn metadata_wire_shape_for_command_kind_omits_resources() {
         // #289: a user-invocable command carries its derived MCP prompt_name,
         // appended LAST.
         prompt_name: Some("compact-dev__fix-issue".into()),
+        matches: None,
+        next_actions: None,
     };
 
     let json = serde_json::to_string(&out).expect("serialise");

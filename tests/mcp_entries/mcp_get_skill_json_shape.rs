@@ -34,11 +34,11 @@ fn body_output(
     resource_bodies: Option<Vec<ResourceBody>>,
 ) -> Output {
     Output {
-        catalog: "midnight-expert".into(),
-        plugin: "compact-dev".into(),
-        name: "compact-circuits".into(),
-        kind,
-        path: path.into(),
+        catalog: Some("midnight-expert".into()),
+        plugin: Some("compact-dev".into()),
+        name: Some("compact-circuits".into()),
+        kind: Some(kind),
+        path: Some(path.into()),
         content: Some(content.into()),
         resources_paths: Some(resources),
         substitutions_applied: Some(substitutions_applied),
@@ -49,6 +49,8 @@ fn body_output(
         user_invocable: None,
         resources: None,
         prompt_name,
+        matches: None,
+        next_actions: None,
     }
 }
 
@@ -115,7 +117,7 @@ fn get_skill_output_wire_shape_for_command_kind() {
         true,
         None,
     );
-    out.name = "deploy".into();
+    out.name = Some("deploy".into());
 
     let json = serde_json::to_string(&out).expect("serialise");
 
