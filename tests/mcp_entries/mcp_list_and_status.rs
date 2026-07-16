@@ -173,6 +173,184 @@ fn list_catalogs_json_uses_ref_key() {
 }
 
 // ---------------------------------------------------------------------------
+// Task C3 — new manifest metadata surfaced by list_catalogs / list_plugins.
+// ---------------------------------------------------------------------------
+
+const CATALOG_MANIFEST_WITH_METADATA: &str = r#"
+name = "acme"
+description = "Acme's catalog"
+version = "1.0.0"
+keywords = ["auth", "security"]
+homepage = "https://example.com"
+repository = "https://example.com/repo"
+bugs = "https://example.com/issues"
+documentation = "https://example.com/docs"
+display_name = "Acme Catalog"
+
+[owner]
+name = "Acme"
+email = "acme@example.com"
+
+[[plugins]]
+name = "plug"
+source = "plug"
+"#;
+
+const PLUGIN_MANIFEST_WITH_METADATA: &str = r#"
+name = "plug"
+version = "1.0.0"
+keywords = ["auth", "security"]
+homepage = "https://example.com"
+repository = "https://example.com/repo"
+bugs = "https://example.com/issues"
+documentation = "https://example.com/docs"
+display_name = "Plug Plugin"
+
+[[contributors]]
+name = "Sam"
+email = "sam@example.com"
+
+[[contributors]]
+name = "Ada"
+"#;
+
+#[test]
+fn list_catalogs_includes_new_metadata_fields_when_present() {
+    let staged = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
+    std::fs::write(
+        staged.catalog_root.join("tome-catalog.toml"),
+        CATALOG_MANIFEST_WITH_METADATA,
+    )
+    .unwrap();
+    let harness = staged.harness();
+
+    let out = harness
+        .call_list_catalogs(list_catalogs::Input {})
+        .expect("list_catalogs ok");
+    let json = serde_json::to_value(&out).expect("serialise");
+    let c = &json["catalogs"][0];
+
+    assert_eq!(c["display_name"], "Acme Catalog");
+    assert_eq!(c["keywords"], serde_json::json!(["auth", "security"]));
+    assert_eq!(c["homepage"], "https://example.com");
+    assert_eq!(c["repository"], "https://example.com/repo");
+    assert_eq!(c["bugs"], "https://example.com/issues");
+    assert_eq!(c["documentation"], "https://example.com/docs");
+}
+
+#[test]
+fn list_catalogs_omits_new_metadata_fields_when_absent() {
+    // The default staged fixture writes no `tome-catalog.toml` at all, so
+    // `read_catalog_manifest` returns `None` — the leanest "absent" case.
+    let staged = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
+    let harness = staged.harness();
+
+    let out = harness
+        .call_list_catalogs(list_catalogs::Input {})
+        .expect("list_catalogs ok");
+    let json = serde_json::to_value(&out).expect("serialise");
+    let c = &json["catalogs"][0];
+
+    for field in [
+        "display_name",
+        "homepage",
+        "repository",
+        "bugs",
+        "documentation",
+    ] {
+        assert!(
+            c.get(field).is_none(),
+            "`{field}` should be absent from JSON when the manifest is unreadable; got {c}",
+        );
+    }
+    assert!(
+        c.get("keywords").is_none() || c["keywords"] == serde_json::json!([]),
+        "keywords should be absent or empty; got {c}",
+    );
+}
+
+#[test]
+fn list_plugins_includes_new_metadata_fields_when_present() {
+    let staged = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
+    std::fs::write(
+        staged.plugin_dir().join("tome-plugin.toml"),
+        PLUGIN_MANIFEST_WITH_METADATA,
+    )
+    .unwrap();
+    let harness = staged.harness();
+
+    let out = harness
+        .call_list_plugins(list_plugins::Input {
+            catalog: None,
+            enabled_only: true,
+            kind: None,
+        })
+        .expect("list_plugins ok");
+    let json = serde_json::to_value(&out).expect("serialise");
+    let p = &json["plugins"][0];
+
+    assert_eq!(p["display_name"], "Plug Plugin");
+    assert_eq!(p["keywords"], serde_json::json!(["auth", "security"]));
+    assert_eq!(p["homepage"], "https://example.com");
+    assert_eq!(p["repository"], "https://example.com/repo");
+    assert_eq!(p["bugs"], "https://example.com/issues");
+    assert_eq!(p["documentation"], "https://example.com/docs");
+    assert_eq!(
+        p["contributors"],
+        serde_json::json!(["Sam <sam@example.com>", "Ada"])
+    );
+}
+
+#[test]
+fn list_plugins_degrades_gracefully_when_manifest_unreadable() {
+    let staged = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
+    // Simulate a declared-but-not-present plugin: the on-disk tree is gone,
+    // but the index (built at enable time) still knows about it.
+    std::fs::remove_dir_all(staged.plugin_dir()).unwrap();
+    let harness = staged.harness();
+
+    let out = harness
+        .call_list_plugins(list_plugins::Input {
+            catalog: None,
+            enabled_only: true,
+            kind: None,
+        })
+        .expect("list_plugins must not error when a plugin's manifest is unreadable");
+
+    assert_eq!(out.plugins.len(), 1, "the plugin still lists");
+    let p = &out.plugins[0];
+    assert_eq!(p.catalog, "acme");
+    assert_eq!(p.plugin, "plug");
+    assert!(
+        !p.entries.is_empty(),
+        "index-sourced entries are unaffected"
+    );
+
+    let json = serde_json::to_value(&out).expect("serialise");
+    let p_json = &json["plugins"][0];
+    for field in [
+        "display_name",
+        "homepage",
+        "repository",
+        "bugs",
+        "documentation",
+    ] {
+        assert!(
+            p_json.get(field).is_none(),
+            "`{field}` should be absent when the manifest is unreadable; got {p_json}",
+        );
+    }
+    assert!(
+        p_json.get("keywords").is_none() || p_json["keywords"] == serde_json::json!([]),
+        "keywords should be absent or empty; got {p_json}",
+    );
+    assert!(
+        p_json.get("contributors").is_none() || p_json["contributors"] == serde_json::json!([]),
+        "contributors should be absent or empty; got {p_json}",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // status (with + without the doctor fold-in)
 // ---------------------------------------------------------------------------
 

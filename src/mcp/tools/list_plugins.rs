@@ -61,6 +61,28 @@ pub struct PluginEntry {
     /// Every entry the plugin ships (subject to the `enabled_only` / `kind`
     /// filters), each with its per-entry index + invocability state.
     pub entries: Vec<Entry>,
+    /// Task C3: the plugin manifest's optional display metadata, read
+    /// best-effort from the on-disk `tome-plugin.toml` (via the same
+    /// `resolve_plugin_dir` the CLI's `plugin show` uses). A
+    /// declared-but-not-present plugin (no cache dir / unreadable manifest)
+    /// degrades gracefully — these fields stay at their empty defaults
+    /// rather than erroring or dropping the plugin from the list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bugs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    /// Rendered via `TomeAuthor::display()` — a `Name <email>` string per
+    /// contributor, mirroring `PluginRecord::contributors` (`plugin show`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contributors: Vec<String>,
 }
 
 /// One skill / command / agent within a plugin.
@@ -121,7 +143,9 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 
 /// Silent compute: enumerate the plugins for the resolved scope, join each with
 /// its index-side entries, and apply the `catalog` / `enabled_only` / `kind`
-/// filters. No I/O beyond the read-only index open; never the advisory lock.
+/// filters. Never the advisory lock. Task C3 adds one best-effort disk read
+/// per plugin (the `tome-plugin.toml` manifest, for the new optional
+/// metadata fields); every other field is index-only, as before.
 ///
 /// The plugin SET is sourced primarily from the index (the enabled
 /// `(catalog, plugin)` pairs in the resolved workspace — the SSOT for "enabled
@@ -179,6 +203,17 @@ fn pipeline(
 
         let version = rows.first().map(|r| r.plugin_version.clone());
 
+        // Best-effort per-plugin manifest read (Task C3). `list_for_plugin`
+        // above is index-only and never touches disk; this is the one disk
+        // read this tool performs, and it must never turn a listable plugin
+        // into a hard error — a resolve or parse failure just leaves
+        // `manifest` at `None`, and the new fields below fall back to their
+        // empty defaults.
+        let manifest =
+            crate::plugin::lifecycle::resolve_plugin_dir(&id, &conn, &workspace_name, paths)
+                .ok()
+                .and_then(|dir| crate::plugin::manifest::read_plugin_manifest(&dir).ok());
+
         let mut entries: Vec<Entry> = Vec::new();
         let mut enabled_entries: u32 = 0;
         for row in rows {
@@ -224,6 +259,19 @@ fn pipeline(
             version,
             enabled_entries,
             entries,
+            display_name: manifest.as_ref().and_then(|m| m.display_name.clone()),
+            keywords: manifest
+                .as_ref()
+                .map(|m| m.keywords.clone())
+                .unwrap_or_default(),
+            homepage: manifest.as_ref().and_then(|m| m.homepage.clone()),
+            repository: manifest.as_ref().and_then(|m| m.repository.clone()),
+            bugs: manifest.as_ref().and_then(|m| m.bugs.clone()),
+            documentation: manifest.as_ref().and_then(|m| m.documentation.clone()),
+            contributors: manifest
+                .as_ref()
+                .map(|m| m.contributors.iter().filter_map(|a| a.display()).collect())
+                .unwrap_or_default(),
         });
     }
 

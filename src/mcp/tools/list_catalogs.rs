@@ -40,6 +40,22 @@ pub struct CatalogEntry {
     /// The clone directory's last-modified time (RFC 3339), when resolvable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_synced: Option<String>,
+    /// Task C3: the catalog manifest's optional display metadata, surfaced
+    /// when the cached manifest is readable. Absent (not `null`) on the wire
+    /// when unset or the manifest is missing/unreadable — mirrors `catalog
+    /// show`'s `skip_serializing_if` posture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bugs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -95,9 +111,8 @@ fn pipeline(
         .into_iter()
         .map(|e| {
             let cache_dir = paths.cache_dir_for(&e.url);
-            let plugin_count = crate::catalog::manifest::read_catalog_manifest(&cache_dir)
-                .map(|m| m.plugins.len())
-                .unwrap_or(0);
+            let manifest = crate::catalog::manifest::read_catalog_manifest(&cache_dir);
+            let plugin_count = manifest.as_ref().map(|m| m.plugins.len()).unwrap_or(0);
             let last_synced = clone_mtime(&cache_dir);
             CatalogEntry {
                 name: e.catalog_name,
@@ -105,6 +120,15 @@ fn pipeline(
                 ref_: e.pinned_ref,
                 plugin_count,
                 last_synced,
+                display_name: manifest.as_ref().and_then(|m| m.display_name.clone()),
+                keywords: manifest
+                    .as_ref()
+                    .map(|m| m.keywords.clone())
+                    .unwrap_or_default(),
+                homepage: manifest.as_ref().and_then(|m| m.homepage.clone()),
+                repository: manifest.as_ref().and_then(|m| m.repository.clone()),
+                bugs: manifest.as_ref().and_then(|m| m.bugs.clone()),
+                documentation: manifest.as_ref().and_then(|m| m.documentation.clone()),
             }
         })
         .collect();
