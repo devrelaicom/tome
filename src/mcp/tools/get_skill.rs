@@ -65,7 +65,7 @@ pub struct Input {
     pub name: Option<String>,
     /// A loose identifier resolved to an indexed entry: an absolute/relative
     /// path to a `SKILL.md` (or its directory), a `<plugin>:<skill>` or
-    /// `<catalog>:<plugin>:<skill>` name (delimiter `:`, `_`, or `__`), or a
+    /// `<catalog>:<plugin>:<skill>` name (delimiter `:`, `__`, or `_`), or a
     /// bare entry name. Ambiguous URIs return `matches` + `next_actions`
     /// instead of a body. Provide EITHER `uri` OR the full triple.
     #[serde(default)]
