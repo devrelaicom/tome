@@ -79,6 +79,24 @@ fn emit_human(
     writeln!(out, "{} (v{})", m.name, m.version)?;
     writeln!(out, "  {}", m.description)?;
     writeln!(out, "  Owner: {} <{}>", m.owner.name, m.owner.email)?;
+    if let Some(display_name) = m.display_name.as_deref() {
+        writeln!(out, "  Display name: {}", display_name)?;
+    }
+    if let Some(homepage) = m.homepage.as_deref() {
+        writeln!(out, "  Homepage: {}", homepage)?;
+    }
+    if let Some(repository) = m.repository.as_deref() {
+        writeln!(out, "  Repository: {}", repository)?;
+    }
+    if let Some(bugs) = m.bugs.as_deref() {
+        writeln!(out, "  Bugs: {}", bugs)?;
+    }
+    if let Some(documentation) = m.documentation.as_deref() {
+        writeln!(out, "  Documentation: {}", documentation)?;
+    }
+    if !m.keywords.is_empty() {
+        writeln!(out, "  Keywords: {}", m.keywords.join(", "))?;
+    }
     writeln!(out, "  Source: {} (ref: {})", url, ref_)?;
     let synced = last_synced
         .and_then(|t| t.format(&Rfc3339).ok())
@@ -104,12 +122,28 @@ struct ShowEnvelope<'a> {
     owner: OwnerOut<'a>,
     registered: Registered<'a>,
     plugins: Vec<PluginOut<'a>>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    keywords: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    homepage: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bugs: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<&'a str>,
 }
 
 #[derive(Serialize)]
 struct OwnerOut<'a> {
     name: &'a str,
     email: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handles: Option<&'a crate::manifest_meta::Handles>,
 }
 
 #[derive(Serialize)]
@@ -140,6 +174,8 @@ fn emit_json(
         owner: OwnerOut {
             name: &m.owner.name,
             email: &m.owner.email,
+            url: m.owner.url.as_deref(),
+            handles: m.owner.handles.as_ref(),
         },
         registered: Registered {
             url,
@@ -154,6 +190,12 @@ fn emit_json(
                 source: &p.source,
             })
             .collect(),
+        keywords: &m.keywords,
+        homepage: m.homepage.as_deref(),
+        repository: m.repository.as_deref(),
+        bugs: m.bugs.as_deref(),
+        documentation: m.documentation.as_deref(),
+        display_name: m.display_name.as_deref(),
     };
     crate::output::write_json(&env)
 }

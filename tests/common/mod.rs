@@ -38,6 +38,14 @@ impl Fixture {
         Self::build_from(fixture_path("sample-catalog"))
     }
 
+    /// Like [`Self::build_sample`] but the manifest declares every optional
+    /// metadata field (keywords, homepage, repository, bugs, documentation,
+    /// display_name, owner.url, owner.handles) — used by `catalog show`
+    /// tests that assert those fields render when present.
+    pub fn build_metadata_sample() -> Self {
+        Self::build_from(fixture_path("sample-catalog-metadata"))
+    }
+
     pub fn build_from(skeleton: PathBuf) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         let repo_path = tempdir.path().join("catalog");
