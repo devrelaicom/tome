@@ -38,6 +38,14 @@ pub struct CatalogIr {
     pub description: String,
     pub owner: Owner,
     pub plugins: Vec<PluginIr>,
+    /// Discoverability keywords, mirroring [`crate::catalog::manifest::CatalogManifest::keywords`].
+    pub keywords: Vec<String>,
+    pub homepage: Option<String>,
+    pub repository: Option<String>,
+    pub bugs: Option<String>,
+    pub documentation: Option<String>,
+    pub display_name: Option<String>,
+    pub icon: Option<String>,
     /// Where this IR came from (source harness + path), for the report.
     pub provenance: Provenance,
     /// Diagnostics scoped to the catalog manifest itself.
@@ -53,6 +61,16 @@ pub struct PluginIr {
     pub description: Option<String>,
     pub author: Option<TomeAuthor>,
     pub license: Option<String>,
+    /// Discoverability keywords, mirroring [`crate::plugin::manifest::TomePluginManifest::keywords`].
+    pub keywords: Vec<String>,
+    pub homepage: Option<String>,
+    pub repository: Option<String>,
+    pub bugs: Option<String>,
+    pub documentation: Option<String>,
+    pub display_name: Option<String>,
+    pub icon: Option<String>,
+    /// `[[contributors]]`, mirroring [`crate::plugin::manifest::TomePluginManifest::contributors`].
+    pub contributors: Vec<TomeAuthor>,
     pub entries: Vec<EntryIr>,
     pub mcp_servers: Vec<McpServerIr>,
     /// Verbatim pass-through files — currently the `hooks/` subtree. Copied

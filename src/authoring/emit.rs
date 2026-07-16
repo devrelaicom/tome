@@ -174,15 +174,13 @@ fn plan_catalog(cat: &CatalogIr, files: &mut Vec<PlannedFile>) -> Result<(), Tom
             handles: cat.owner.handles.clone(),
         },
         plugins: plugin_decls,
-        // The IR does not (yet) carry the optional discoverability/provenance
-        // fields — nothing to emit until authoring grows a source for them.
-        keywords: Vec::new(),
-        homepage: None,
-        repository: None,
-        bugs: None,
-        documentation: None,
-        display_name: None,
-        icon: None,
+        keywords: cat.keywords.clone(),
+        homepage: cat.homepage.clone(),
+        repository: cat.repository.clone(),
+        bugs: cat.bugs.clone(),
+        documentation: cat.documentation.clone(),
+        display_name: cat.display_name.clone(),
+        icon: cat.icon.clone(),
     };
     let toml = toml::to_string(&manifest)
         .map_err(|e| TomeError::Internal(anyhow::anyhow!("serialise tome-catalog.toml: {e}")))?;
@@ -208,14 +206,14 @@ fn plan_plugin(
         description: plugin.description.clone(),
         license: plugin.license.clone(),
         author: plugin.author.clone(),
-        keywords: Vec::new(),
-        homepage: None,
-        repository: None,
-        bugs: None,
-        documentation: None,
-        display_name: None,
-        icon: None,
-        contributors: Vec::new(),
+        keywords: plugin.keywords.clone(),
+        homepage: plugin.homepage.clone(),
+        repository: plugin.repository.clone(),
+        bugs: plugin.bugs.clone(),
+        documentation: plugin.documentation.clone(),
+        display_name: plugin.display_name.clone(),
+        icon: plugin.icon.clone(),
+        contributors: plugin.contributors.clone(),
     };
     let toml = toml::to_string(&manifest)
         .map_err(|e| TomeError::Internal(anyhow::anyhow!("serialise tome-plugin.toml: {e}")))?;
@@ -595,6 +593,14 @@ mod tests {
                 handles: None,
             }),
             license: Some("MIT".into()),
+            keywords: Vec::new(),
+            homepage: None,
+            repository: None,
+            bugs: None,
+            documentation: None,
+            display_name: None,
+            icon: None,
+            contributors: Vec::new(),
             entries: vec![skill_entry(
                 "review",
                 "Reviews code",
@@ -643,6 +649,21 @@ mod tests {
         assert_eq!(parsed.body, "# Review\n\nDo it.\n");
 
         assert!(outcome.written.iter().any(|p| p.ends_with("SKILL.md")));
+    }
+
+    #[test]
+    fn emit_includes_plugin_metadata() {
+        let mut plugin = plugin_ir();
+        plugin.keywords = vec!["auth".into()];
+        plugin.homepage = Some("https://example.com".into());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("toolkit");
+        emit(&Artifact::Plugin(plugin), &target, EmitOptions::default()).expect("emit");
+
+        let m = TomePluginManifest::read(&target).expect("read manifest");
+        assert_eq!(m.keywords, vec!["auth"]);
+        assert_eq!(m.homepage.as_deref(), Some("https://example.com"));
     }
 
     #[test]

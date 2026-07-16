@@ -341,6 +341,13 @@ mod tests {
                 handles: None,
             },
             plugins: Vec::new(),
+            keywords: Vec::new(),
+            homepage: None,
+            repository: None,
+            bugs: None,
+            documentation: None,
+            display_name: None,
+            icon: None,
             provenance: Provenance::local("tome", std::path::PathBuf::from("c")),
             diagnostics: Vec::new(),
         });
