@@ -7,6 +7,7 @@ use crate::error::TomeError;
 use crate::index::skills;
 use crate::index::workspace_catalogs;
 use crate::paths::Paths;
+use crate::plugin::identity::EntryKind;
 
 /// One candidate interpretation of a URI, to be resolved against the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,11 +128,6 @@ pub struct ResolvedEntry {
 /// Lexically normalise a path (resolve `.` and collapse redundant
 /// separators) WITHOUT touching the filesystem. `..` is preserved
 /// component-for-component so callers can still detect/reject it upstream.
-// Task 4 (`resolve`) and Task 7 (`StagedWorkspace` integration tests) are
-// the first production consumers of this path-resolution machinery; until
-// then the pure helpers below are only reachable from this module's own
-// `#[cfg(test)]` tests, hence the `dead_code` allowances.
-#[allow(dead_code)]
 fn normalize_lexical(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
@@ -146,7 +142,6 @@ fn normalize_lexical(p: &Path) -> PathBuf {
 /// True when any component of `p` is a `..` (parent-dir) segment. The
 /// traversal guard `resolve_path` checks before touching the DB, split out
 /// so it can be unit-tested directly without a DB/catalog fixture.
-#[allow(dead_code)]
 fn has_parent_dir_component(p: &Path) -> bool {
     p.components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -155,7 +150,6 @@ fn has_parent_dir_component(p: &Path) -> bool {
 /// True when `p` is a symlink (or any of its existing ancestors is).
 /// Defence in depth against a hostile catalog committing a symlinked
 /// `SKILL.md`.
-#[allow(dead_code)]
 fn is_symlinked(p: &Path) -> bool {
     let mut cur = Some(p);
     while let Some(c) = cur {
@@ -178,7 +172,6 @@ fn is_symlinked(p: &Path) -> bool {
 /// parent). Factored out of the DB-backed [`resolve_path`] loop so it can be
 /// unit-tested with constructed `PathBuf`s and no filesystem/catalog
 /// fixture.
-#[allow(dead_code)]
 fn body_matches_target(
     target_norm: &Path,
     target_canon: Option<&Path>,
@@ -226,15 +219,14 @@ fn body_matches_target(
 /// matches, per [`body_matches_target`]. Symlinked bodies are skipped.
 ///
 /// DB-backed end-to-end coverage (real `entries_for_workspace` +
-/// `resolve_entry_body_path` + the symlink skip) lives in Task 4's
-/// `resolve` tests and Task 7's `StagedWorkspace` integration tests, where a
-/// real catalog + index fixture already exists — `resolve_path` is private
-/// and not reachable from integration tests, and standing up the
+/// `resolve_entry_body_path` + the symlink skip) lives in [`resolve`]'s
+/// integration tests (`tests/mcp_entries/uri_resolver_int.rs`), where a real
+/// catalog + index fixture already exists — `resolve_path` is private and
+/// not directly reachable from integration tests, and standing up the
 /// content-addressed catalog cache from a `src` unit test is not worth the
 /// fixture weight. This module covers the pure pieces
 /// (`normalize_lexical`, `has_parent_dir_component`, `body_matches_target`,
 /// `is_symlinked`) directly instead.
-#[allow(dead_code)]
 fn resolve_path(
     conn: &rusqlite::Connection,
     paths: &Paths,
@@ -288,6 +280,127 @@ fn resolve_path(
         }
     }
     Ok(out)
+}
+
+/// The collapsed result of resolving a URI against the index.
+#[derive(Debug)]
+pub enum ResolveOutcome {
+    /// Exactly one enabled entry matched — feed the existing fetch pipeline.
+    One(ResolvedEntry),
+    /// More than one matched — return previews + next_actions.
+    Many(Vec<ResolvedEntry>),
+    /// Zero matched — `available` carries the workspace's enabled entries so
+    /// the caller can surface guidance without a re-search.
+    NoMatch { available: Vec<skills::SkillRecord> },
+}
+
+/// Resolve a single non-path candidate to zero or more records.
+fn resolve_name(
+    conn: &rusqlite::Connection,
+    workspace_name: &str,
+    candidate: &Candidate,
+) -> Result<Vec<skills::SkillRecord>, TomeError> {
+    match candidate {
+        Candidate::Triple {
+            catalog,
+            plugin,
+            name,
+        } => {
+            // Try both kinds; caller filters. `find` needs an explicit kind.
+            let mut out = Vec::new();
+            for kind in [EntryKind::Skill, EntryKind::Command] {
+                if let Some(r) = skills::find(conn, workspace_name, catalog, plugin, kind, name)? {
+                    if r.enabled {
+                        out.push(r);
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Candidate::PluginName { plugin, name } => {
+            skills::find_by_plugin_name(conn, workspace_name, plugin, name)
+        }
+        Candidate::BareName(name) => {
+            skills::find_by_name_across_workspace(conn, workspace_name, name)
+        }
+        Candidate::Path(_) => Ok(Vec::new()), // handled by resolve_path
+    }
+}
+
+/// Filter `resolved` to `kinds`, de-dupe by `(catalog, plugin, kind, name)`,
+/// sort by the same key, and collapse to one/many/none against `available`.
+/// Pure — no I/O — so it can be unit-tested with constructed `SkillRecord` /
+/// `ResolvedEntry` values and no DB. Factored out of [`resolve`], which
+/// supplies `resolved` and `available` from live index queries.
+fn collapse(
+    mut resolved: Vec<ResolvedEntry>,
+    kinds: &[EntryKind],
+    available: Vec<skills::SkillRecord>,
+) -> ResolveOutcome {
+    resolved.retain(|e| kinds.contains(&e.record.kind));
+    resolved.sort_by(|a, b| {
+        let ka = (
+            &a.record.catalog,
+            &a.record.plugin,
+            a.record.kind.as_str(),
+            &a.record.name,
+        );
+        let kb = (
+            &b.record.catalog,
+            &b.record.plugin,
+            b.record.kind.as_str(),
+            &b.record.name,
+        );
+        ka.cmp(&kb)
+    });
+    resolved.dedup_by(|a, b| {
+        a.record.catalog == b.record.catalog
+            && a.record.plugin == b.record.plugin
+            && a.record.kind == b.record.kind
+            && a.record.name == b.record.name
+    });
+
+    match resolved.len() {
+        0 => ResolveOutcome::NoMatch { available },
+        1 => ResolveOutcome::One(resolved.pop().expect("len==1")),
+        _ => ResolveOutcome::Many(resolved),
+    }
+}
+
+/// Parse + resolve a URI against the workspace index, collapsing to
+/// one/many/none. Opens its own read-only connection (as `lookup_entry` does).
+pub fn resolve(
+    paths: &Paths,
+    workspace_name: &str,
+    uri: &str,
+    kinds: &[EntryKind],
+) -> Result<ResolveOutcome, TomeError> {
+    let conn = crate::index::db::open_read_only(&paths.index_db)?;
+
+    let mut resolved: Vec<ResolvedEntry> = Vec::new();
+    for candidate in parse_uri(uri) {
+        match &candidate {
+            Candidate::Path(target) => {
+                resolved.extend(resolve_path(&conn, paths, workspace_name, target)?);
+            }
+            _ => {
+                for record in resolve_name(&conn, workspace_name, &candidate)? {
+                    let body_path = skills::resolve_entry_body_path(
+                        &conn,
+                        paths,
+                        workspace_name,
+                        &record.catalog,
+                        &record.plugin,
+                        &record.path,
+                    )?;
+                    resolved.push(ResolvedEntry { record, body_path });
+                }
+            }
+        }
+    }
+
+    let available = skills::entries_for_workspace(&conn, workspace_name)?;
+    Ok(collapse(resolved, kinds, available))
 }
 
 #[cfg(test)]
@@ -559,5 +672,121 @@ mod tests {
         // must still catch that.
         assert!(!leaf_via_link.symlink_metadata().unwrap().is_symlink());
         assert!(is_symlinked(&leaf_via_link));
+    }
+
+    // ---- Task 4: `collapse` (filter/dedupe/sort/one-many-none) ---------
+    //
+    // `resolve` itself is DB-backed (opens a read-only connection, walks
+    // `resolve_path` / `resolve_name` against the index) and is exercised
+    // end-to-end in `tests/mcp_entries/uri_resolver_int.rs` via the
+    // `StagedWorkspace` fixture. `collapse` is the pure decision logic
+    // (filter-kinds + dedupe + sort + One/Many/NoMatch) factored out of
+    // `resolve` so it can be unit-tested directly with constructed
+    // `SkillRecord` / `ResolvedEntry` values and no DB.
+
+    fn mk_record(
+        catalog: &str,
+        plugin: &str,
+        kind: EntryKind,
+        name: &str,
+        id: i64,
+    ) -> skills::SkillRecord {
+        skills::SkillRecord {
+            id,
+            catalog: catalog.to_owned(),
+            plugin: plugin.to_owned(),
+            name: name.to_owned(),
+            kind,
+            description: "d".to_owned(),
+            plugin_version: "1.0.0".to_owned(),
+            path: format!("skills/{name}/SKILL.md"),
+            content_hash: "hash".to_owned(),
+            when_to_use: None,
+            searchable: true,
+            user_invocable: true,
+            enabled: true,
+            indexed_at: "2026-01-01T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn mk_resolved(
+        catalog: &str,
+        plugin: &str,
+        kind: EntryKind,
+        name: &str,
+        id: i64,
+    ) -> ResolvedEntry {
+        ResolvedEntry {
+            record: mk_record(catalog, plugin, kind, name, id),
+            body_path: PathBuf::from("/x/SKILL.md"),
+        }
+    }
+
+    #[test]
+    fn collapse_dedupes_identical_identities_to_one() {
+        let resolved = vec![
+            mk_resolved("acme", "plug", EntryKind::Skill, "foo", 1),
+            mk_resolved("acme", "plug", EntryKind::Skill, "foo", 1),
+        ];
+        let out = collapse(resolved, &[EntryKind::Skill], Vec::new());
+        match out {
+            ResolveOutcome::One(e) => {
+                assert_eq!(e.record.catalog, "acme");
+                assert_eq!(e.record.name, "foo");
+            }
+            other => panic!("expected One, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collapse_filters_out_kind_not_requested() {
+        let resolved = vec![
+            mk_resolved("acme", "plug", EntryKind::Skill, "foo", 1),
+            mk_resolved("acme", "plug", EntryKind::Command, "foo", 2),
+        ];
+        let out = collapse(resolved, &[EntryKind::Skill], Vec::new());
+        match out {
+            ResolveOutcome::One(e) => assert_eq!(e.record.kind, EntryKind::Skill),
+            other => panic!("expected One, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collapse_two_distinct_identities_returns_many_in_deterministic_order() {
+        let resolved = vec![
+            mk_resolved("beta", "plug2", EntryKind::Skill, "foo", 2),
+            mk_resolved("acme", "plug", EntryKind::Skill, "foo", 1),
+        ];
+        let out = collapse(resolved, &[EntryKind::Skill], Vec::new());
+        match out {
+            ResolveOutcome::Many(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0].record.catalog, "acme");
+                assert_eq!(v[1].record.catalog, "beta");
+            }
+            other => panic!("expected Many, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collapse_empty_returns_nomatch_with_available() {
+        let available = vec![mk_record("acme", "plug", EntryKind::Skill, "foo", 1)];
+        let out = collapse(Vec::new(), &[EntryKind::Skill], available);
+        match out {
+            ResolveOutcome::NoMatch { available } => {
+                assert!(available.iter().any(|r| r.name == "foo"));
+            }
+            other => panic!("expected NoMatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collapse_exactly_one_returns_one() {
+        let resolved = vec![mk_resolved("acme", "plug", EntryKind::Skill, "foo", 1)];
+        let out = collapse(resolved, &[EntryKind::Skill], Vec::new());
+        match out {
+            ResolveOutcome::One(e) => assert_eq!(e.record.name, "foo"),
+            other => panic!("expected One, got {other:?}"),
+        }
     }
 }
