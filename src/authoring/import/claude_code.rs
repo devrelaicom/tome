@@ -1574,11 +1574,15 @@ fn parse_author(value: Option<&serde_json::Value>) -> Option<TomeAuthor> {
             return Some(TomeAuthor {
                 name: (!name.is_empty()).then(|| name.to_owned()),
                 email: (!email.is_empty()).then(|| email.to_owned()),
+                url: None,
+                handles: None,
             });
         }
         return Some(TomeAuthor {
             name: Some(s.to_owned()),
             email: None,
+            url: None,
+            handles: None,
         });
     }
     if let Some(obj) = value.as_object() {
@@ -1597,7 +1601,12 @@ fn parse_author(value: Option<&serde_json::Value>) -> Option<TomeAuthor> {
         if name.is_none() && email.is_none() {
             return None;
         }
-        return Some(TomeAuthor { name, email });
+        return Some(TomeAuthor {
+            name,
+            email,
+            url: None,
+            handles: None,
+        });
     }
     None
 }

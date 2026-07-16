@@ -143,10 +143,27 @@ pub struct TomePluginManifest {
     pub license: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<TomeAuthor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bugs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributors: Vec<TomeAuthor>,
 }
 
-/// `[author]` table on a [`TomePluginManifest`]. Both fields optional; reused
-/// by the authoring IR ([`crate::authoring::ir`]) as the single author type.
+/// `[author]` table on a [`TomePluginManifest`]. All fields optional; reused
+/// by the authoring IR ([`crate::authoring::ir`]) as the single author type,
+/// and doubles as the `[[contributors]]` element type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TomeAuthor {
@@ -154,6 +171,10 @@ pub struct TomeAuthor {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handles: Option<crate::manifest_meta::Handles>,
 }
 
 impl TomeAuthor {
@@ -290,6 +311,37 @@ impl TomePluginManifest {
             return Err(err("`license` must not be empty when present".to_owned()));
         }
 
+        // 6. Optional metadata (shared with catalog::manifest).
+        let mut people_urls: Vec<Option<&str>> = Vec::new();
+        let mut people_handles: Vec<Option<&crate::manifest_meta::Handles>> = Vec::new();
+        for a in self.author.iter().chain(self.contributors.iter()) {
+            people_urls.push(a.url.as_deref());
+            people_handles.push(a.handles.as_ref());
+            if let Some(email) = a.email.as_deref().map(str::trim)
+                && !email.is_empty()
+                && !crate::catalog::manifest::looks_like_email(email)
+            {
+                return Err(err(format!("`email` is not a valid email: {email}")));
+            }
+        }
+        crate::catalog::manifest::validate_common_metadata(
+            &self.keywords,
+            &[
+                ("homepage", self.homepage.as_deref()),
+                ("repository", self.repository.as_deref()),
+                ("bugs", self.bugs.as_deref()),
+                ("documentation", self.documentation.as_deref()),
+            ],
+            self.display_name.as_deref(),
+            &people_urls,
+            &people_handles,
+        )
+        .map_err(err)?;
+
+        if let Some(icon) = self.icon.as_deref() {
+            crate::manifest_meta::validate_relative_path("icon", icon).map_err(err)?;
+        }
+
         Ok(())
     }
 }
@@ -322,7 +374,8 @@ mod tome_manifest_tests {
 
     #[test]
     fn unknown_field_is_rejected() {
-        let err = parse("name = \"foo\"\nversion = \"1.0.0\"\nhomepage = \"x\"\n").unwrap_err();
+        let err =
+            parse("name = \"foo\"\nversion = \"1.0.0\"\nnonexistent_field = \"x\"\n").unwrap_err();
         assert!(matches!(err, TomeError::PluginManifestParseError { .. }));
     }
 
@@ -368,5 +421,64 @@ mod tome_manifest_tests {
     fn empty_license_is_rejected() {
         let err = parse("name = \"foo\"\nversion = \"1.0.0\"\nlicense = \"  \"\n").unwrap_err();
         assert!(matches!(err, TomeError::PluginManifestParseError { .. }));
+    }
+
+    #[test]
+    fn plugin_accepts_new_metadata_and_contributors() {
+        let src = r#"
+name = "foo"
+version = "1.2.3"
+keywords = ["auth"]
+homepage = "https://example.com"
+display_name = "Foo Plugin"
+
+[author]
+name = "Jo"
+email = "jo@example.com"
+url = "https://jo.dev"
+
+[author.handles]
+github = "jo"
+
+[[contributors]]
+name = "Sam"
+email = "sam@example.com"
+"#;
+        let m = parse(src).expect("valid");
+        assert_eq!(m.keywords, vec!["auth"]);
+        assert_eq!(m.display_name.as_deref(), Some("Foo Plugin"));
+        assert_eq!(
+            m.author.as_ref().unwrap().url.as_deref(),
+            Some("https://jo.dev")
+        );
+        assert_eq!(m.contributors.len(), 1);
+        assert_eq!(m.contributors[0].name.as_deref(), Some("Sam"));
+    }
+
+    #[test]
+    fn plugin_rejects_bad_contributor_email() {
+        let src = "name=\"foo\"\nversion=\"1.0.0\"\n[[contributors]]\nemail=\"noatsign\"\n";
+        assert!(parse(src).is_err());
+    }
+
+    #[test]
+    fn plugin_full_metadata_round_trips_through_serialize() {
+        let src = r#"
+name = "foo"
+version = "1.2.3"
+keywords = ["a", "b"]
+homepage = "https://example.com"
+
+[author]
+name = "Jo"
+email = "jo@example.com"
+
+[author.handles]
+github = "jo"
+"#;
+        let m = parse(src).expect("valid");
+        let serialized = toml::to_string(&m).expect("serialize");
+        let reparsed = parse(&serialized).expect("re-parse");
+        assert_eq!(m, reparsed);
     }
 }

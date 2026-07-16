@@ -460,6 +460,11 @@ fn parse_author(value: Option<&toml::Value>) -> Option<TomeAuthor> {
     if name.is_none() && email.is_none() {
         None
     } else {
-        Some(TomeAuthor { name, email })
+        Some(TomeAuthor {
+            name,
+            email,
+            url: None,
+            handles: None,
+        })
     }
 }

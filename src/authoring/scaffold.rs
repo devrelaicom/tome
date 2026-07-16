@@ -257,6 +257,8 @@ fn plugin_ir(name: &str, entries: Vec<EntryIr>, params: &CreateParams) -> Plugin
             .map(|n| TomeAuthor {
                 name: Some(n.to_owned()),
                 email: None,
+                url: None,
+                handles: None,
             }),
         license: None,
         entries,
@@ -364,6 +366,8 @@ fn scaffold_hooks_plugin(plugin_name: &str, params: &CreateParams) -> Result<Plu
             .map(|n| TomeAuthor {
                 name: Some(n.to_owned()),
                 email: None,
+                url: None,
+                handles: None,
             }),
         license: None,
         entries: Vec::new(),
@@ -445,6 +449,8 @@ fn scaffold_mcp_plugin(plugin_name: &str, params: &CreateParams) -> Result<Plugi
             .map(|n| TomeAuthor {
                 name: Some(n.to_owned()),
                 email: None,
+                url: None,
+                handles: None,
             }),
         license: None,
         entries: Vec::new(),

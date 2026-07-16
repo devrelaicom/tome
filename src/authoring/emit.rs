@@ -208,6 +208,14 @@ fn plan_plugin(
         description: plugin.description.clone(),
         license: plugin.license.clone(),
         author: plugin.author.clone(),
+        keywords: Vec::new(),
+        homepage: None,
+        repository: None,
+        bugs: None,
+        documentation: None,
+        display_name: None,
+        icon: None,
+        contributors: Vec::new(),
     };
     let toml = toml::to_string(&manifest)
         .map_err(|e| TomeError::Internal(anyhow::anyhow!("serialise tome-plugin.toml: {e}")))?;
@@ -583,6 +591,8 @@ mod tests {
             author: Some(TomeAuthor {
                 name: Some("Jo".into()),
                 email: Some("jo@example.com".into()),
+                url: None,
+                handles: None,
             }),
             license: Some("MIT".into()),
             entries: vec![skill_entry(
