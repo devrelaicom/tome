@@ -25,3 +25,4 @@ pub mod list_plugins;
 pub mod meta;
 pub mod search_skills;
 pub mod status;
+pub mod uri_resolver;
