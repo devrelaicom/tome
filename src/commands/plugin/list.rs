@@ -231,8 +231,10 @@ fn build_row(
         status,
         component_counts,
         last_indexed_at: last_indexed_at_dt,
-        // Task C2: `list` builds rows from index state without a manifest —
-        // the new metadata is a `show`-only surface.
+        // Task C2: `list` intentionally does NOT surface the new
+        // discoverability metadata (out of scope — the manifest is
+        // available here, via `manifest.as_ref()` above, but only
+        // `plugin show` renders these fields).
         display_name: None,
         keywords: Vec::new(),
         homepage: None,

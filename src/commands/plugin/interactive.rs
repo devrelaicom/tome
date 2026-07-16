@@ -432,8 +432,10 @@ fn render_plugin_view(
             use time::format_description::well_known::Rfc3339;
             OffsetDateTime::parse(s, &Rfc3339).ok()
         }),
-        // Task C2: interactive rows build from index state without a
-        // manifest — the new metadata is a `show`-only surface.
+        // Task C2: interactive intentionally does NOT surface the new
+        // discoverability metadata (out of scope — the manifest is
+        // available here, via `manifest_ok` above, but only `plugin show`
+        // renders these fields).
         display_name: None,
         keywords: Vec::new(),
         homepage: None,
