@@ -43,7 +43,7 @@ writes nothing:
 $ tome catalog convert ~/.claude/plugins/marketplaces/midnight-expert --output ~/catalogs --dry-run
 Would convert claude-code catalog `midnight-expert` → `midnight-expert-tome`
   [info] convert/catalog-synthesized-field: marketplace has no `description`; synthesizing one
-  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `$schema` is not modelled by Tome; dropping it
   [warning] harness-ism/claude-skill-dir: rewrote 6 occurrence(s) of `${CLAUDE_SKILL_DIR}` → `${TOME_SKILL_DIR}`
   [warning] harness-ism/claude-plugin-data: rewrote 2 occurrence(s) of `${CLAUDE_PLUGIN_DATA}` → `${TOME_PLUGIN_DATA}`
   …

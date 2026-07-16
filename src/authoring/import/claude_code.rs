@@ -557,39 +557,11 @@ pub fn import_marketplace(
     };
     let owner = parse_owner(value.get("owner"), &mut diagnostics);
 
-    // Discoverability / link metadata (Task B3, `data-model.md §1`) — same
-    // shape and validation as `import_plugin`'s plugin.json read.
-    let homepage = validated_url(
-        value.get("homepage").and_then(|v| v.as_str()),
-        "homepage",
-        "marketplace.json",
-        &mut diagnostics,
-    );
-    let repository = validated_url(
-        value.get("repository").and_then(|v| v.as_str()),
-        "repository",
-        "marketplace.json",
-        &mut diagnostics,
-    );
-    let bugs = validated_url(
-        value.get("bugs").and_then(|v| v.as_str()),
-        "bugs",
-        "marketplace.json",
-        &mut diagnostics,
-    );
-    let documentation = validated_url(
-        value.get("documentation").and_then(|v| v.as_str()),
-        "documentation",
-        "marketplace.json",
-        &mut diagnostics,
-    );
-    let display_name = value
-        .get("displayName")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let keywords = parse_keywords(value.get("keywords"));
+    // marketplace.json carries no top-level discoverability metadata; those
+    // fields (`homepage`/`repository`/`bugs`/`documentation`/`displayName`/
+    // `keywords`) live per-`plugins[]`-entry as overrides, not at the
+    // marketplace level (future follow-up if catalog-level mapping is
+    // wanted) — so `CatalogIr` keeps its B1 defaults for them below.
 
     let mut plugins = Vec::new();
     if let Some(arr) = value.get("plugins").and_then(|v| v.as_array()) {
@@ -692,12 +664,12 @@ pub fn import_marketplace(
         description,
         owner,
         plugins,
-        keywords,
-        homepage,
-        repository,
-        bugs,
-        documentation,
-        display_name,
+        keywords: Vec::new(),
+        homepage: None,
+        repository: None,
+        bugs: None,
+        documentation: None,
+        display_name: None,
         icon: None,
         provenance: Provenance {
             source_harness: "claude-code".to_owned(),
