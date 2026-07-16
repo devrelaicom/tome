@@ -245,10 +245,11 @@ fn get_skill_body_vs_metadata_only_on_same_entry() {
     // Body mode: content present, metadata fields absent.
     let body = harness
         .call_get_skill(get_skill::Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "alpha".into(),
-            kind: EntryKind::Skill,
+            catalog: Some("acme".into()),
+            plugin: Some("plug".into()),
+            name: Some("alpha".into()),
+            uri: None,
+            kind: Some(EntryKind::Skill),
             metadata_only: false,
             raw: false,
             include_resource_bodies: false,
@@ -275,10 +276,11 @@ fn get_skill_body_vs_metadata_only_on_same_entry() {
     // Metadata mode: description present, no body read.
     let meta = harness
         .call_get_skill(get_skill::Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "alpha".into(),
-            kind: EntryKind::Skill,
+            catalog: Some("acme".into()),
+            plugin: Some("plug".into()),
+            name: Some("alpha".into()),
+            uri: None,
+            kind: Some(EntryKind::Skill),
             metadata_only: true,
             raw: false,
             include_resource_bodies: false,

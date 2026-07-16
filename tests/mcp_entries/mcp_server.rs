@@ -204,6 +204,7 @@ fn get_skill_input_schema_advertises_raw_boolean() {
         .expect("get_skill advertised");
 
     let schema = &get.input_schema;
+
     let properties = schema
         .get("properties")
         .and_then(|p| p.as_object())
@@ -218,28 +219,23 @@ fn get_skill_input_schema_advertises_raw_boolean() {
         "`raw` must be a boolean in the input schema; got: {raw}",
     );
 
-    // The three original fields stay required; `raw` (defaulted) must NOT be.
-    // Assert the `required` array UNCONDITIONALLY: a future schemars change
-    // that dropped it (silently promoting/omitting fields) must fail here,
-    // not skip the check. `catalog`/`plugin`/`name` must be present and `raw`
-    // absent.
-    let required: Vec<&str> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .expect("get_skill input schema has a `required` array")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    for field in ["catalog", "plugin", "name"] {
-        assert!(
-            required.contains(&field),
-            "`{field}` must remain a required field; got: {required:?}",
-        );
+    // Task 5: `catalog`/`plugin`/`name` became `Option<String>` (the triple is
+    // now ONE of two mutually-exclusive request shapes alongside `uri`;
+    // validated at runtime by `Input::into_request`, not by the JSON schema).
+    // Every field on `Input` now carries `#[serde(default)]`, so schemars
+    // emits NO `required` array at all — assert that explicitly, and that
+    // `raw` in particular is not required if a `required` array is ever
+    // reintroduced.
+    match schema.get("required").and_then(|r| r.as_array()) {
+        None => {}
+        Some(required) => {
+            let required: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+            assert!(
+                !required.contains(&"raw"),
+                "`raw` is defaulted (optional) and must not appear in `required`; got: {required:?}",
+            );
+        }
     }
-    assert!(
-        !required.contains(&"raw"),
-        "`raw` is defaulted (optional) and must not appear in `required`; got: {required:?}",
-    );
 }
 
 #[test]
@@ -270,17 +266,16 @@ fn get_skill_input_schema_advertises_include_resource_bodies_boolean() {
         "`include_resource_bodies` must be a boolean in the input schema; got: {flag}",
     );
 
-    let required: Vec<&str> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .expect("get_skill input schema has a `required` array")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    assert!(
-        !required.contains(&"include_resource_bodies"),
-        "`include_resource_bodies` is defaulted (optional) and must not be required; got: {required:?}",
-    );
+    // Task 5: every `Input` field carries `#[serde(default)]` now, so schemars
+    // emits no `required` array at all; only assert `include_resource_bodies`
+    // is absent from it if a `required` array is ever reintroduced.
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        let required: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            !required.contains(&"include_resource_bodies"),
+            "`include_resource_bodies` is defaulted (optional) and must not be required; got: {required:?}",
+        );
+    }
 }
 
 #[test]
@@ -445,17 +440,16 @@ fn get_skill_input_schema_advertises_metadata_only_boolean() {
         "`metadata_only` must be a boolean; got: {flag}",
     );
 
-    let required: Vec<&str> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .expect("get_skill input schema has a `required` array")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    assert!(
-        !required.contains(&"metadata_only"),
-        "`metadata_only` is defaulted (optional) and must not be required; got: {required:?}",
-    );
+    // Task 5: every `Input` field carries `#[serde(default)]` now, so schemars
+    // emits no `required` array at all; only assert `metadata_only` is absent
+    // from it if a `required` array is ever reintroduced.
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        let required: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            !required.contains(&"metadata_only"),
+            "`metadata_only` is defaulted (optional) and must not be required; got: {required:?}",
+        );
+    }
 }
 
 #[test]
@@ -756,10 +750,11 @@ fn get_skill_returns_unknown_catalog_for_missing_name() {
         .block_on(get_skill::handle(
             state,
             get_skill::Input {
-                catalog: "nonexistent".into(),
-                plugin: "p".into(),
-                name: "s".into(),
-                kind: EntryKind::Skill,
+                catalog: Some("nonexistent".into()),
+                plugin: Some("p".into()),
+                name: Some("s".into()),
+                uri: None,
+                kind: Some(EntryKind::Skill),
                 metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
@@ -789,10 +784,11 @@ fn get_skill_rejects_empty_fields() {
         .block_on(get_skill::handle(
             state,
             get_skill::Input {
-                catalog: "".into(),
-                plugin: "p".into(),
-                name: "s".into(),
-                kind: EntryKind::Skill,
+                catalog: Some("".into()),
+                plugin: Some("p".into()),
+                name: Some("s".into()),
+                uri: None,
+                kind: Some(EntryKind::Skill),
                 metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,

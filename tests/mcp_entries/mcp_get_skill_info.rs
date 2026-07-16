@@ -88,10 +88,11 @@ type SkillFile<'a> = (&'a str, &'a str);
 /// Build a metadata-only `get_skill::Input`.
 fn meta_input(catalog: &str, plugin: &str, name: &str, kind: EntryKind) -> Input {
     Input {
-        catalog: catalog.into(),
-        plugin: plugin.into(),
-        name: name.into(),
-        kind,
+        catalog: Some(catalog.into()),
+        plugin: Some(plugin.into()),
+        name: Some(name.into()),
+        uri: None,
+        kind: Some(kind),
         metadata_only: true,
         raw: false,
         include_resource_bodies: false,
@@ -379,8 +380,8 @@ fn default_kind_is_skill() {
     });
     let input: Input = serde_json::from_value(raw).expect("deserialise default kind");
     assert!(
-        matches!(input.kind, EntryKind::Skill),
-        "default kind must be Skill",
+        input.kind.is_none(),
+        "kind omitted from JSON must deserialise to None (defaulted to Skill by `into_request`)",
     );
 
     let info = invoke(state, input).expect("ok");
