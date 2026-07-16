@@ -247,6 +247,7 @@ fn make_input(query: &str, description_max_chars: u32) -> Input {
         catalog: None,
         plugin: None,
         kind: None,
+        keywords: Vec::new(),
         // #502: reranking is OFF by default, but these tests wire a StubReranker
         // via `build_state` and exercise the reranked path (scoring == "reranked"),
         // so opt in explicitly per-call rather than depend on the (now off) default.
@@ -640,6 +641,7 @@ fn search_skills_default_does_not_rerank() {
         catalog: None,
         plugin: None,
         kind: None,
+        keywords: Vec::new(),
         rerank: None,
         min_score: None,
         description_max_chars: Some(150),
@@ -668,6 +670,7 @@ fn search_skills_per_call_rerank_true_reranks() {
         catalog: None,
         plugin: None,
         kind: None,
+        keywords: Vec::new(),
         rerank: Some(true),
         min_score: None,
         description_max_chars: Some(150),
@@ -810,6 +813,7 @@ fn input_with_filters(query: &str, kind: Option<EntryKind>, min_score: Option<f3
         catalog: None,
         plugin: None,
         kind,
+        keywords: Vec::new(),
         // #502: opt into reranking explicitly — these tests wire a StubReranker
         // and assert the reranked scoring/threshold path; reranking is otherwise
         // off by default.
@@ -911,6 +915,107 @@ fn kind_filter_skill_excludes_commands() {
             .all(|m| matches!(m.kind, EntryKind::Skill)),
         "kind: skill must return ONLY skills; got kinds: {:?}",
         out.matches.iter().map(|m| m.kind).collect::<Vec<_>>(),
+    );
+}
+
+/// Stage two plugins in one catalog: `auth-plug` (manifest `keywords =
+/// ["auth"]`) and `other-plug` (no keywords declared), each with one skill
+/// whose description shares the same query tag so the stub embedder ties
+/// their scores — isolating the `keywords` filter as the only thing that can
+/// narrow the result set. Task E3.
+fn stage_two_plugin_workspace() -> (TempDir, tome::paths::Paths) {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = tmp.path().join("catalog");
+    fs::create_dir_all(&catalog_root).unwrap();
+    let config = config_with_catalog("acme", &catalog_root);
+
+    let write_plugin = |name: &str, keywords: &[&str], skill: &str| {
+        let plugin_dir = catalog_root.join(name);
+        fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+        let keywords_toml = keywords
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fs::write(
+            plugin_dir.join("tome-plugin.toml"),
+            format!("name = \"{name}\"\nversion = \"1.0.0\"\nkeywords = [{keywords_toml}]\n"),
+        )
+        .unwrap();
+        fs::write(
+            plugin_dir.join(".claude-plugin").join("plugin.json"),
+            format!(r#"{{"name": "{name}", "version": "1.0.0"}}"#),
+        )
+        .unwrap();
+        let skill_dir = plugin_dir.join("skills").join(skill);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {skill}\ndescription: matrix keyword-tagged skill.\n---\nbody\n"),
+        )
+        .unwrap();
+    };
+
+    write_plugin("auth-plug", &["auth"], "alpha");
+    write_plugin("other-plug", &[], "beta");
+
+    let embedder = StubEmbedder::new();
+    let scope = tome::workspace::Scope(global());
+    let deps = build_deps(&paths, &config, &embedder, &scope);
+    seed_catalog_enrolment(&paths, &catalog_root, "acme");
+    lifecycle::enable(&"acme/auth-plug".parse().unwrap(), &deps).expect("enable auth-plug");
+    lifecycle::enable(&"acme/other-plug".parse().unwrap(), &deps).expect("enable other-plug");
+
+    (tmp, paths)
+}
+
+#[test]
+fn keywords_filter_narrows_results_to_keyworded_plugin() {
+    // Task E3: `keywords: ["AUTH"]` (mixed case, proving the `COLLATE
+    // NOCASE` case-insensitivity carries through the MCP surface — mirrors
+    // the CLI `--keyword` proof in
+    // `run_with_deps_keyword_filter_matches_case_insensitively`,
+    // `tests/index_query_misc/query.rs`) must restrict results to entries
+    // whose PLUGIN declares that keyword. `other-plug` has no keyword and
+    // must be excluded even though its skill ties on score.
+    let (_tmp, paths) = stage_two_plugin_workspace();
+
+    let mut input = make_input("matrix", 150);
+    input.keywords = vec!["AUTH".to_owned()];
+    let out = invoke(build_state(&paths), input).expect("keyword-filtered search ok");
+
+    assert!(
+        !out.matches.is_empty(),
+        "keyword filter must not erase all hits"
+    );
+    assert!(
+        out.matches.iter().all(|m| m.plugin == "auth-plug"),
+        "keywords: [\"AUTH\"] must return ONLY the keyworded plugin's entries; got: {:?}",
+        out.matches
+            .iter()
+            .map(|m| m.plugin.as_str())
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn keywords_filter_absent_is_unchanged_behavior() {
+    // Omitting `keywords` (the default empty vec) must not filter anything —
+    // both plugins' entries are returned, matching pre-E3 behavior.
+    let (_tmp, paths) = stage_two_plugin_workspace();
+
+    let out = invoke(build_state(&paths), make_input("matrix", 150)).expect("unfiltered search ok");
+
+    let plugins: std::collections::BTreeSet<&str> =
+        out.matches.iter().map(|m| m.plugin.as_str()).collect();
+    assert_eq!(
+        plugins,
+        ["auth-plug", "other-plug"].into_iter().collect(),
+        "omitting keywords must search across both plugins unchanged; got: {plugins:?}",
     );
 }
 

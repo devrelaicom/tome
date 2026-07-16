@@ -358,6 +358,7 @@ pub fn search_input(query: &str) -> search_skills::Input {
         catalog: None,
         plugin: None,
         kind: None,
+        keywords: Vec::new(),
         rerank: None,
         min_score: None,
         description_max_chars: Some(150),

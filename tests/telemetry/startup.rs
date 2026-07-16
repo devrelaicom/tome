@@ -480,6 +480,7 @@ mod mcp_cold_start {
                 catalog: None,
                 plugin: None,
                 kind: None,
+                keywords: Vec::new(),
                 rerank: None,
                 min_score: None,
                 description_max_chars: Some(150),

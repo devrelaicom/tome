@@ -50,6 +50,10 @@ pub struct Input {
     /// `agent` typically yields nothing — agents are not searchable.)
     #[serde(default)]
     pub kind: Option<crate::plugin::identity::EntryKind>,
+    /// Restrict to entries whose PLUGIN declares any of these keywords
+    /// (OR / match-any; case-insensitive). Omit for no keyword filter.
+    #[serde(default)]
+    pub keywords: Vec<String>,
     /// Run the cross-encoder reranker for this call. OPT-IN — reranking is OFF
     /// by default (#502). When absent, the resolved default applies: `[query]
     /// rerank` in `~/.tome/config.toml` (explicit wins), else a configured
@@ -422,8 +426,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             .map(crate::commands::tier::set::tierkind_of)
             .into_iter()
             .collect(),
-        // Task E3 wires an MCP `keyword` input through to this field.
-        keyword: Vec::new(),
+        // Task E3: the MCP `keywords` input flows straight through — an
+        // empty vec (the default when the caller omits it) means no filter,
+        // matching the CLI's `--keyword` semantics.
+        keyword: input.keywords.clone(),
         // The `rerank` decision is already resolved into `no_rerank`; the
         // per-invocation `--rerank` flag is a CLI-only surface (the tool has
         // resolved its own `rerank` input above), so leave it `false` here.
