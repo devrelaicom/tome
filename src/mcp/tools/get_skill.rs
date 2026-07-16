@@ -603,17 +603,20 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             })?;
 
             match outcome {
-                crate::mcp::tools::uri_resolver::ResolveOutcome::One(entry) => LookupHit {
-                    catalog: entry.record.catalog.clone(),
-                    plugin: entry.record.plugin.clone(),
-                    body_path: entry.body_path,
-                    kind: entry.record.kind,
-                    name: entry.record.name.clone(),
-                    description: entry.record.description,
-                    when_to_use: entry.record.when_to_use,
-                    plugin_version: entry.record.plugin_version,
-                    user_invocable: entry.record.user_invocable,
-                },
+                crate::mcp::tools::uri_resolver::ResolveOutcome::One(entry) => {
+                    let entry = *entry;
+                    LookupHit {
+                        catalog: entry.record.catalog.clone(),
+                        plugin: entry.record.plugin.clone(),
+                        body_path: entry.body_path,
+                        kind: entry.record.kind,
+                        name: entry.record.name.clone(),
+                        description: entry.record.description,
+                        when_to_use: entry.record.when_to_use,
+                        plugin_version: entry.record.plugin_version,
+                        user_invocable: entry.record.user_invocable,
+                    }
+                }
                 crate::mcp::tools::uri_resolver::ResolveOutcome::Many(matches) => {
                     return handle_multi_match(input, started, matches).await;
                 }

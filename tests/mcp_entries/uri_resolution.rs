@@ -138,10 +138,10 @@ fn both_uri_and_triple_is_invalid_params() {
 
 /// Headline multi-match coverage: two catalogs (`acme` from `StagedWorkspace`
 /// + a second `beta` catalog staged manually here, mirroring
-/// `StagedWorkspace::stage`'s own setup) each ship a plugin with an entry
-/// named `collide`. A bare-name `uri` then collides across catalogs, and
-/// `get_skill` must return `matches` + index-aligned `next_actions` instead
-/// of a body.
+///   `StagedWorkspace::stage`'s own setup) each ship a plugin with an entry
+///   named `collide`. A bare-name `uri` then collides across catalogs, and
+///   `get_skill` must return `matches` + index-aligned `next_actions` instead
+///   of a body.
 #[test]
 fn uri_bare_name_multi_match_across_catalogs_returns_matches_and_next_actions() {
     const COLLIDE: &str = "---\nname: collide\ndescription: The collide skill.\n---\nCollide body.";

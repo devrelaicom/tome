@@ -219,12 +219,12 @@ fn body_matches_target(
         }
     }
 
-    if let Some(croot) = catalog_root {
-        if let Ok(rel) = body_path.strip_prefix(croot) {
-            forms.push(normalize_lexical(rel));
-            if let Some(rp) = rel.parent() {
-                forms.push(normalize_lexical(rp));
-            }
+    if let Some(croot) = catalog_root
+        && let Ok(rel) = body_path.strip_prefix(croot)
+    {
+        forms.push(normalize_lexical(rel));
+        if let Some(rp) = rel.parent() {
+            forms.push(normalize_lexical(rp));
         }
     }
 
@@ -315,7 +315,7 @@ fn resolve_path(
 #[derive(Debug)]
 pub enum ResolveOutcome {
     /// Exactly one enabled entry matched — feed the existing fetch pipeline.
-    One(ResolvedEntry),
+    One(Box<ResolvedEntry>),
     /// More than one matched — return previews + next_actions.
     Many(Vec<ResolvedEntry>),
     /// Zero matched — `available` carries the workspace's enabled entries so
@@ -338,10 +338,10 @@ fn resolve_name(
             // Try both kinds; caller filters. `find` needs an explicit kind.
             let mut out = Vec::new();
             for kind in [EntryKind::Skill, EntryKind::Command] {
-                if let Some(r) = skills::find(conn, workspace_name, catalog, plugin, kind, name)? {
-                    if r.enabled {
-                        out.push(r);
-                    }
+                if let Some(r) = skills::find(conn, workspace_name, catalog, plugin, kind, name)?
+                    && r.enabled
+                {
+                    out.push(r);
                 }
             }
             Ok(out)
@@ -391,7 +391,7 @@ fn collapse(
 
     match resolved.len() {
         0 => ResolveOutcome::NoMatch { available },
-        1 => ResolveOutcome::One(resolved.pop().expect("len==1")),
+        1 => ResolveOutcome::One(Box::new(resolved.pop().expect("len==1"))),
         _ => ResolveOutcome::Many(resolved),
     }
 }
