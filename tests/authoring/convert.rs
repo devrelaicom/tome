@@ -122,6 +122,70 @@ fn converts_a_cc_plugin_to_a_native_tome_plugin() {
 }
 
 #[test]
+fn convert_maps_claude_code_metadata_fields() {
+    // A CC plugin.json carrying homepage/repository/bugs/documentation/
+    // keywords/displayName/author.url should land in the emitted
+    // tome-plugin.toml, and those fields must no longer be reported as
+    // dropped (Task B1 modelled them into the IR).
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"meta-demo","version":"1.0.0","description":"d",
+             "displayName":"Meta Demo",
+             "homepage":"https://example.com",
+             "repository":"https://example.com/repo",
+             "bugs":"https://example.com/issues",
+             "documentation":"https://example.com/docs",
+             "keywords":["auth","search"],
+             "author":{"name":"Ada","email":"ada@x.io","url":"https://ada.example.com"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("skills/s")).unwrap();
+    fs::write(
+        src.join("skills/s/SKILL.md"),
+        "---\nname: s\ndescription: d\n---\nbody\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    let manifest = read_plugin_manifest(&target).unwrap();
+    assert_eq!(manifest.display_name.as_deref(), Some("Meta Demo"));
+    assert_eq!(manifest.homepage.as_deref(), Some("https://example.com"));
+    assert_eq!(
+        manifest.repository.as_deref(),
+        Some("https://example.com/repo")
+    );
+    assert_eq!(manifest.bugs.as_deref(), Some("https://example.com/issues"));
+    assert_eq!(
+        manifest.documentation.as_deref(),
+        Some("https://example.com/docs")
+    );
+    assert_eq!(
+        manifest.keywords,
+        vec!["auth".to_owned(), "search".to_owned()]
+    );
+    let author = manifest.author.expect("author present");
+    assert_eq!(author.url.as_deref(), Some("https://ada.example.com"));
+
+    // The mapped fields must not also be reported as dropped.
+    assert!(
+        !outcome
+            .report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "convert/dropped-manifest-field"),
+        "mapped fields must not be reported dropped: {:?}",
+        outcome.report.diagnostics
+    );
+}
+
+#[test]
 fn converted_plugin_relints_clean_from_disk() {
     // T-MAJOR-1 (phase-wide): convert lints the in-memory IR; this proves the
     // EMITTED on-disk tree re-parses and re-lints clean — the convert→lint

@@ -96,4 +96,8 @@ pub mod rule {
     /// loss: the component is effectively empty. Warning, strict-blocking.
     pub const COMPONENT_PATH_OVERRIDE_MISSING_DIR: &str =
         "convert/component-path-override-missing-dir";
+    /// A source `homepage`/`repository`/`bugs`/`documentation`/author `url`
+    /// value failed [`crate::manifest_meta::validate_http_url`]. The field is
+    /// optional, so it is dropped (not the whole import) with a Warning.
+    pub const INVALID_METADATA_URL: &str = "convert/invalid-metadata-url";
 }

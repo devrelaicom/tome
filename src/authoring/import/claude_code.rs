@@ -278,15 +278,9 @@ pub fn import_plugin(
         .get("license")
         .and_then(|v| v.as_str())
         .map(str::to_owned);
-    let author = parse_author(value.get("author"));
+    let author = parse_author(value.get("author"), &mut diagnostics);
 
-    for field in [
-        "displayName",
-        "homepage",
-        "repository",
-        "keywords",
-        "$schema",
-    ] {
+    for field in ["$schema"] {
         if value.get(field).is_some() {
             diagnostics.push(Diagnostic::info(
                 rule::DROPPED_MANIFEST_FIELD,
@@ -294,6 +288,42 @@ pub fn import_plugin(
             ));
         }
     }
+
+    // Discoverability / link metadata (Task B3, `data-model.md §1`):
+    // `homepage`/`repository`/`bugs`/`documentation` are optional URLs — a
+    // structurally invalid one is dropped with a Warning rather than failing
+    // the import. `displayName`/`keywords` need no such validation.
+    let homepage = validated_url(
+        value.get("homepage").and_then(|v| v.as_str()),
+        "homepage",
+        "plugin.json",
+        &mut diagnostics,
+    );
+    let repository = validated_url(
+        value.get("repository").and_then(|v| v.as_str()),
+        "repository",
+        "plugin.json",
+        &mut diagnostics,
+    );
+    let bugs = validated_url(
+        value.get("bugs").and_then(|v| v.as_str()),
+        "bugs",
+        "plugin.json",
+        &mut diagnostics,
+    );
+    let documentation = validated_url(
+        value.get("documentation").and_then(|v| v.as_str()),
+        "documentation",
+        "plugin.json",
+        &mut diagnostics,
+    );
+    let display_name = value
+        .get("displayName")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let keywords = parse_keywords(value.get("keywords"));
     for field in ["userConfig", "dependencies"] {
         if value.get(field).is_some() {
             diagnostics.push(Diagnostic::warning(
@@ -434,12 +464,12 @@ pub fn import_plugin(
         description,
         author,
         license,
-        keywords: Vec::new(),
-        homepage: None,
-        repository: None,
-        bugs: None,
-        documentation: None,
-        display_name: None,
+        keywords,
+        homepage,
+        repository,
+        bugs,
+        documentation,
+        display_name,
         icon: None,
         contributors: Vec::new(),
         entries,
@@ -526,6 +556,40 @@ pub fn import_marketplace(
         }
     };
     let owner = parse_owner(value.get("owner"), &mut diagnostics);
+
+    // Discoverability / link metadata (Task B3, `data-model.md §1`) — same
+    // shape and validation as `import_plugin`'s plugin.json read.
+    let homepage = validated_url(
+        value.get("homepage").and_then(|v| v.as_str()),
+        "homepage",
+        "marketplace.json",
+        &mut diagnostics,
+    );
+    let repository = validated_url(
+        value.get("repository").and_then(|v| v.as_str()),
+        "repository",
+        "marketplace.json",
+        &mut diagnostics,
+    );
+    let bugs = validated_url(
+        value.get("bugs").and_then(|v| v.as_str()),
+        "bugs",
+        "marketplace.json",
+        &mut diagnostics,
+    );
+    let documentation = validated_url(
+        value.get("documentation").and_then(|v| v.as_str()),
+        "documentation",
+        "marketplace.json",
+        &mut diagnostics,
+    );
+    let display_name = value
+        .get("displayName")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let keywords = parse_keywords(value.get("keywords"));
 
     let mut plugins = Vec::new();
     if let Some(arr) = value.get("plugins").and_then(|v| v.as_array()) {
@@ -628,12 +692,12 @@ pub fn import_marketplace(
         description,
         owner,
         plugins,
-        keywords: Vec::new(),
-        homepage: None,
-        repository: None,
-        bugs: None,
-        documentation: None,
-        display_name: None,
+        keywords,
+        homepage,
+        repository,
+        bugs,
+        documentation,
+        display_name,
         icon: None,
         provenance: Provenance {
             source_harness: "claude-code".to_owned(),
@@ -765,6 +829,45 @@ fn fetch_remote_plugin(
     let plugin = import_plugin(&plugin_root, default, &dest)?;
     fetch.keepalive.push(tempdir);
     Ok(plugin)
+}
+
+/// Validate an optional metadata URL string (`homepage`/`repository`/`bugs`/
+/// `documentation`/author `url`). A missing or blank value is silently
+/// absent; a structurally invalid one is dropped with a Warning naming the
+/// manifest + field (the field is optional, so this never fails the import).
+fn validated_url(
+    raw: Option<&str>,
+    field: &str,
+    manifest: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    match crate::manifest_meta::validate_http_url(field, raw) {
+        Ok(()) => Some(raw.to_owned()),
+        Err(e) => {
+            diagnostics.push(Diagnostic::warning(
+                rule::INVALID_METADATA_URL,
+                format!("{manifest} {e}; dropping it"),
+            ));
+            None
+        }
+    }
+}
+
+/// Parse a `keywords` array into a `Vec<String>`, trimming and dropping empty
+/// entries and non-string elements. Absent/non-array `keywords` yields empty.
+fn parse_keywords(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parse a CC marketplace `owner` (`{name, email}` object) into the required
@@ -1571,9 +1674,14 @@ fn import_mcp(
     Ok(out)
 }
 
-/// Parse a CC `author` value (a `"Name <email>"` string or a `{name, email}`
-/// object) into a [`TomeAuthor`]. Returns `None` when nothing usable is present.
-fn parse_author(value: Option<&serde_json::Value>) -> Option<TomeAuthor> {
+/// Parse a CC `author` value (a `"Name <email>"` string or a `{name, email,
+/// url}` object) into a [`TomeAuthor`]. Returns `None` when nothing usable is
+/// present. An invalid `author.url` is dropped with a Warning (see
+/// [`validated_url`]) — only the object form carries a `url`.
+fn parse_author(
+    value: Option<&serde_json::Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<TomeAuthor> {
     let value = value?;
     if let Some(s) = value.as_str() {
         let s = s.trim();
@@ -1613,13 +1721,19 @@ fn parse_author(value: Option<&serde_json::Value>) -> Option<TomeAuthor> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
-        if name.is_none() && email.is_none() {
+        let url = validated_url(
+            obj.get("url").and_then(|v| v.as_str()),
+            "url",
+            "author",
+            diagnostics,
+        );
+        if name.is_none() && email.is_none() && url.is_none() {
             return None;
         }
         return Some(TomeAuthor {
             name,
             email,
-            url: None,
+            url,
             handles: None,
         });
     }
@@ -1773,7 +1887,7 @@ mod tests {
         let (_t, root) = cc_plugin(|base| {
             fs::write(
                 base.join(".claude-plugin/plugin.json"),
-                br#"{"name":"p","version":"1.0.0","userConfig":{"k":1},"displayName":"P"}"#,
+                br#"{"name":"p","version":"1.0.0","userConfig":{"k":1},"$schema":"https://x"}"#,
             )
             .unwrap();
             fs::create_dir(base.join("monitors")).unwrap();
@@ -1782,7 +1896,27 @@ mod tests {
         let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
         assert!(has(&p.diagnostics, rule::UNSUPPORTED_COMPONENT)); // monitors/ + settings.json
         assert!(has(&p.diagnostics, rule::UNSUPPORTED_MANIFEST_FIELD)); // userConfig
-        assert!(has(&p.diagnostics, rule::DROPPED_MANIFEST_FIELD)); // displayName
+        assert!(has(&p.diagnostics, rule::DROPPED_MANIFEST_FIELD)); // $schema
+    }
+
+    #[test]
+    fn maps_metadata_fields_and_warns_on_an_invalid_url() {
+        let (_t, root) = cc_plugin(|base| {
+            fs::write(
+                base.join(".claude-plugin/plugin.json"),
+                br#"{"name":"p","version":"1.0.0",
+                     "displayName":"P","homepage":"https://example.com",
+                     "repository":"not-a-url","keywords":["a"," b ",""]}"#,
+            )
+            .unwrap();
+        });
+        let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
+        assert_eq!(p.display_name.as_deref(), Some("P"));
+        assert_eq!(p.homepage.as_deref(), Some("https://example.com"));
+        assert!(p.repository.is_none(), "invalid URL must be dropped");
+        assert_eq!(p.keywords, vec!["a".to_owned(), "b".to_owned()]);
+        assert!(has(&p.diagnostics, rule::INVALID_METADATA_URL));
+        assert!(!has(&p.diagnostics, rule::DROPPED_MANIFEST_FIELD));
     }
 
     #[test]
@@ -1901,14 +2035,41 @@ mod tests {
 
     #[test]
     fn parse_author_handles_object_and_string_and_empty() {
-        assert!(parse_author(None).is_none());
-        assert!(parse_author(Some(&serde_json::json!({}))).is_none());
-        let a = parse_author(Some(&serde_json::json!({"name":"Bo","email":"bo@x"}))).unwrap();
+        let mut diags = Vec::new();
+        assert!(parse_author(None, &mut diags).is_none());
+        assert!(parse_author(Some(&serde_json::json!({})), &mut diags).is_none());
+        let a = parse_author(
+            Some(&serde_json::json!({"name":"Bo","email":"bo@x"})),
+            &mut diags,
+        )
+        .unwrap();
         assert_eq!(a.name.as_deref(), Some("Bo"));
         assert_eq!(a.email.as_deref(), Some("bo@x"));
-        let b = parse_author(Some(&serde_json::json!("Just A Name"))).unwrap();
+        let b = parse_author(Some(&serde_json::json!("Just A Name")), &mut diags).unwrap();
         assert_eq!(b.name.as_deref(), Some("Just A Name"));
         assert!(b.email.is_none());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn parse_author_reads_url_and_drops_an_invalid_one() {
+        let mut diags = Vec::new();
+        let a = parse_author(
+            Some(&serde_json::json!({"name":"Ada","url":"https://ada.example.com"})),
+            &mut diags,
+        )
+        .unwrap();
+        assert_eq!(a.url.as_deref(), Some("https://ada.example.com"));
+        assert!(diags.is_empty());
+
+        let mut diags = Vec::new();
+        let b = parse_author(
+            Some(&serde_json::json!({"name":"Ada","url":"not-a-url"})),
+            &mut diags,
+        )
+        .unwrap();
+        assert!(b.url.is_none());
+        assert!(has(&diags, rule::INVALID_METADATA_URL));
     }
 
     #[test]
