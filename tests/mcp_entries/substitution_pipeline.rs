@@ -251,10 +251,11 @@ fn mcp_get_skill_runs_builtins_and_env() {
         .block_on(get_skill::handle(
             state,
             get_skill::Input {
-                catalog: "acme".to_string(),
-                plugin: "plug".to_string(),
-                name: "pipe-skill".to_string(),
-                kind: EntryKind::Skill,
+                catalog: Some("acme".to_string()),
+                plugin: Some("plug".to_string()),
+                name: Some("pipe-skill".to_string()),
+                uri: None,
+                kind: Some(EntryKind::Skill),
                 metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,

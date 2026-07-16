@@ -38,10 +38,11 @@ fn get_skill_resolves_db_enrolled_catalog_without_config() {
     let out = staged
         .harness()
         .call_get_skill(get_skill::Input {
-            catalog: staged.catalog_name.clone(),
-            plugin: staged.plugin_name.clone(),
-            name: "searchable".into(),
-            kind: EntryKind::Skill,
+            catalog: Some(staged.catalog_name.clone()),
+            plugin: Some(staged.plugin_name.clone()),
+            name: Some("searchable".into()),
+            uri: None,
+            kind: Some(EntryKind::Skill),
             metadata_only: false,
             raw: false,
             include_resource_bodies: false,
@@ -65,10 +66,11 @@ fn get_skill_unknown_catalog_still_errors_without_config() {
     let err = staged
         .harness()
         .call_get_skill(get_skill::Input {
-            catalog: "ghost-catalog".into(),
-            plugin: staged.plugin_name.clone(),
-            name: "searchable".into(),
-            kind: EntryKind::Skill,
+            catalog: Some("ghost-catalog".into()),
+            plugin: Some(staged.plugin_name.clone()),
+            name: Some("searchable".into()),
+            uri: None,
+            kind: Some(EntryKind::Skill),
             metadata_only: false,
             raw: false,
             include_resource_bodies: false,

@@ -45,31 +45,36 @@ use crate::substitution::{self, SubstitutionContext, SubstitutionError};
 /// (Inherited from the former `get_skill_info`.)
 const PER_DIRECTORY_CAP: usize = 5;
 
-fn default_kind() -> EntryKind {
-    EntryKind::Skill
-}
-
 /// The tool description per `mcp-tools.md` §get_skill lives on the
 /// `#[tool]`-decorated method in `mcp::server` as a doc comment.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
-    /// The catalog name, as returned by `search_skills` (e.g. `midnight-expert`).
-    pub catalog: String,
-    /// The plugin name within the catalog, as returned by `search_skills`
-    /// (e.g. `compact-core`). Plugin name only, NOT `<catalog>/<plugin>`.
-    pub plugin: String,
-    /// The entry `name` field as returned by `search_skills`. Also accepts a
-    /// `*` wildcard that resolves a unique match within `(catalog, plugin)` of
-    /// the requested `kind`; if the pattern matches more than one entry the
-    /// error lists the candidates, and if it matches none the error lists the
-    /// available `(name, kind)` entries so you needn't re-search.
-    pub name: String,
-    /// Disambiguator when a plugin ships entries with the same name across
-    /// kinds. One of `skill` (the default), `command`, or `agent`. Defaults to
-    /// `skill`.
-    #[serde(default = "default_kind")]
-    pub kind: EntryKind,
+    /// The catalog name (e.g. `midnight-expert`). Provide the full
+    /// `catalog`+`plugin`+`name` triple, OR `uri` — not both.
+    #[serde(default)]
+    pub catalog: Option<String>,
+    /// The plugin name within the catalog (e.g. `compact-core`). Part of the
+    /// full triple; omit when using `uri`.
+    #[serde(default)]
+    pub plugin: Option<String>,
+    /// The entry `name` as returned by `search_skills`. Part of the full
+    /// triple; omit when using `uri`. (The `*` wildcard still applies on the
+    /// triple path.)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// A loose identifier resolved to an indexed entry: an absolute/relative
+    /// path to a `SKILL.md` (or its directory), a `<plugin>:<skill>` or
+    /// `<catalog>:<plugin>:<skill>` name (delimiter `:`, `__`, or `_`), or a
+    /// bare entry name. Ambiguous URIs return `matches` + `next_actions`
+    /// instead of a body. Provide EITHER `uri` OR the full triple.
+    #[serde(default)]
+    pub uri: Option<String>,
+    /// Disambiguator. On the triple path: `skill` (default) | `command` |
+    /// `agent`. On the `uri` path: when set, filters matches to that kind;
+    /// when omitted, both `skill` and `command` are eligible.
+    #[serde(default)]
+    pub kind: Option<EntryKind>,
     /// Return metadata ONLY — description, `when_to_use`, resource listing,
     /// kind, version, and `user_invocable` — without fetching or rendering the
     /// entry body. This is the cheap middle tier between `search_skills`
@@ -121,6 +126,113 @@ pub struct Input {
     pub include_resource_bodies: bool,
 }
 
+/// A validated request: exactly one of the triple form or the uri form.
+#[derive(Debug)]
+pub enum Request {
+    Triple {
+        catalog: String,
+        plugin: String,
+        name: String,
+        kind: EntryKind,
+    },
+    Uri {
+        uri: String,
+        kinds: Vec<EntryKind>,
+    },
+}
+
+impl Input {
+    /// Terse constructor for the full-triple form (tests + triple callers).
+    pub fn triple(
+        catalog: impl Into<String>,
+        plugin: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            catalog: Some(catalog.into()),
+            plugin: Some(plugin.into()),
+            name: Some(name.into()),
+            uri: None,
+            kind: None,
+            metadata_only: false,
+            raw: false,
+            include_resource_bodies: false,
+        }
+    }
+
+    /// Terse constructor for the uri form.
+    pub fn for_uri(uri: impl Into<String>) -> Self {
+        Self {
+            catalog: None,
+            plugin: None,
+            name: None,
+            uri: Some(uri.into()),
+            kind: None,
+            metadata_only: false,
+            raw: false,
+            include_resource_bodies: false,
+        }
+    }
+
+    /// Validate the input into a `Request`. Exactly one of { full triple } or
+    /// { uri } must be present.
+    pub fn into_request(&self) -> Result<Request, McpError> {
+        let has_triple = self.catalog.is_some() || self.plugin.is_some() || self.name.is_some();
+        let full_triple = self.catalog.is_some() && self.plugin.is_some() && self.name.is_some();
+        let has_uri = self.uri.is_some();
+
+        match (has_uri, has_triple) {
+            (true, true) => Err(McpError::invalid_params(
+                "provide EITHER `uri` OR the full `catalog`+`plugin`+`name` triple, not both",
+                None,
+            )),
+            (false, false) => Err(McpError::invalid_params(
+                "provide `uri`, or the full `catalog`+`plugin`+`name` triple",
+                None,
+            )),
+            (true, false) => {
+                let uri = self.uri.clone().unwrap_or_default();
+                if uri.trim().is_empty() {
+                    return Err(McpError::invalid_params("`uri` must be non-empty", None));
+                }
+                let kinds = match self.kind {
+                    Some(k) => vec![k],
+                    None => vec![EntryKind::Skill, EntryKind::Command],
+                };
+                Ok(Request::Uri { uri, kinds })
+            }
+            (false, true) => {
+                if !full_triple {
+                    return Err(McpError::invalid_params(
+                        "the triple form needs all of `catalog`, `plugin`, and `name`",
+                        None,
+                    ));
+                }
+                let catalog = self.catalog.clone().unwrap();
+                let plugin = self.plugin.clone().unwrap();
+                let name = self.name.clone().unwrap();
+                // Pre-Task-5 behaviour, preserved byte-for-byte: an empty (but
+                // present) triple field is rejected with the same message the
+                // old `handle()`-top guard used, before it is ever handed to
+                // `lookup_entry` (which would otherwise surface a confusing
+                // downstream `unknown_catalog` / DB-open error instead).
+                if catalog.is_empty() || plugin.is_empty() || name.is_empty() {
+                    return Err(McpError::invalid_params(
+                        "catalog, plugin, and name must be non-empty",
+                        None,
+                    ));
+                }
+                Ok(Request::Triple {
+                    catalog,
+                    plugin,
+                    name,
+                    kind: self.kind.unwrap_or(EntryKind::Skill),
+                })
+            }
+        }
+    }
+}
+
 /// #333: one inlined resource — the absolute `path` (identical to the entry in
 /// `Output.resources`) plus its UTF-8 `content`. Emitted only for the subset of
 /// resources that fit the per-file + whole-response byte budgets when the caller
@@ -169,18 +281,26 @@ pub struct ResourceEnumeration {
 /// `prompt_name`) are shared by both modes.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
-    /// The entry's catalog.
-    pub catalog: String,
-    /// The entry's plugin.
-    pub plugin: String,
+    /// The entry's catalog. Absent in the multi-match case (`matches` /
+    /// `next_actions` carry per-candidate identity instead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    /// The entry's plugin. Absent in the multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
     /// The RESOLVED concrete entry name (equals the input `name` for an exact
-    /// match; the matched entry's real name for a `*` wildcard).
-    pub name: String,
-    /// The resolved entry kind (`skill` | `command`).
-    pub kind: EntryKind,
+    /// match; the matched entry's real name for a `*` wildcard). Absent in
+    /// the multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The resolved entry kind (`skill` | `command`). Absent in the
+    /// multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<EntryKind>,
     /// Absolute path to the entry body file (a skill's `SKILL.md` or a
-    /// command's `<name>.md`).
-    pub path: String,
+    /// command's `<name>.md`). Absent in the multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 
     // ---- Full-body mode fields (metadata_only == false) --------------------
     /// SKILL.md / command body with YAML frontmatter stripped, then
@@ -237,6 +357,43 @@ pub struct Output {
     /// LAST.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_name: Option<String>,
+
+    // ---- Multi-match `uri` mode fields --------------------------------------
+    /// Multi-match previews (present only when a `uri` matched >1 entry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matches: Option<Vec<MatchItem>>,
+    /// Exact disambiguating `get_skill` calls, aligned index-for-index with
+    /// `matches`. Present only in the multi-match case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_actions: Option<Vec<NextAction>>,
+}
+
+/// One entry in a multi-match `uri` response: identity + full description, no
+/// body. Serialize-only (the `deny_unknown_fields` guard is inputs-only).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MatchItem {
+    pub catalog: String,
+    pub plugin: String,
+    pub name: String,
+    pub kind: EntryKind,
+    pub path: String,
+    pub description: String,
+}
+
+/// A ready-to-issue `get_skill` call that disambiguates one match.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NextAction {
+    pub tool: String,
+    pub arguments: NextActionArgs,
+}
+
+/// The exact triple + kind for a `NextAction`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NextActionArgs {
+    pub catalog: String,
+    pub plugin: String,
+    pub name: String,
+    pub kind: EntryKind,
 }
 
 /// Tri-state for the metadata-only `when_to_use` field, so it can serialise as
@@ -291,141 +448,204 @@ const MAX_INLINE_TOTAL_BYTES: u64 = 1024 * 1024;
 pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpError> {
     let started = Instant::now();
 
-    if input.catalog.is_empty() || input.plugin.is_empty() || input.name.is_empty() {
-        return Err(McpError::invalid_params(
-            "catalog, plugin, and name must be non-empty",
-            None,
-        ));
-    }
-
-    let paths = state.paths.clone();
-    let scope = state.scope.scope.clone();
-    let catalog = input.catalog.clone();
-    let plugin = input.plugin.clone();
-    let name = input.name.clone();
-    let kind = input.kind;
-
-    let lookup = tokio::task::spawn_blocking(move || {
-        lookup_entry(&paths, &scope, &catalog, &plugin, kind, &name)
-    })
-    .await
-    .map_err(|e| {
-        internal(
-            &input,
-            started,
-            format!("lookup join: {e}"),
-            ErrorCategory::Internal,
-        )
-    })?
-    .map_err(|e| {
-        // C-L1: best-effort MCP-surface `tome.error` (closed category only),
-        // with this session's `calling_harness`. Never alters the returned
-        // `McpError`.
-        crate::mcp::enqueue_tool_error(&state, e.category());
-        internal(&input, started, e.to_string(), e.category())
-    })?;
-
-    let hit = match lookup {
-        LookupOutcome::Found(hit) => hit,
-        LookupOutcome::NotFound {
-            which: crate::mcp::tools::common::NotFound::UnknownCatalog,
-            ..
+    let hit = match input.into_request()? {
+        Request::Triple {
+            catalog,
+            plugin,
+            name,
+            kind,
         } => {
-            return Err(emit_error(
-                &input,
-                started,
-                "unknown_catalog",
-                McpError::invalid_params(
-                    format!(
-                        "catalog `{}` is not enabled in the resolved scope",
-                        input.catalog
-                    ),
-                    Some(error_data_with_code(
+            let paths = state.paths.clone();
+            let scope = state.scope.scope.clone();
+            let lookup_catalog = catalog.clone();
+            let lookup_plugin = plugin.clone();
+            let lookup_name = name.clone();
+
+            let lookup = tokio::task::spawn_blocking(move || {
+                lookup_entry(
+                    &paths,
+                    &scope,
+                    &lookup_catalog,
+                    &lookup_plugin,
+                    kind,
+                    &lookup_name,
+                )
+            })
+            .await
+            .map_err(|e| {
+                internal(
+                    &input,
+                    started,
+                    format!("lookup join: {e}"),
+                    ErrorCategory::Internal,
+                )
+            })?
+            .map_err(|e| {
+                // C-L1: best-effort MCP-surface `tome.error` (closed category only),
+                // with this session's `calling_harness`. Never alters the returned
+                // `McpError`.
+                crate::mcp::enqueue_tool_error(&state, e.category());
+                internal(&input, started, e.to_string(), e.category())
+            })?;
+
+            match lookup {
+                LookupOutcome::Found(hit) => hit,
+                LookupOutcome::NotFound {
+                    which: crate::mcp::tools::common::NotFound::UnknownCatalog,
+                    ..
+                } => {
+                    return Err(emit_error(
+                        &input,
+                        started,
                         "unknown_catalog",
-                        ErrorCategory::EntryNotFound,
-                        &[("catalog", json!(input.catalog))],
-                    )),
-                ),
-            ));
-        }
-        LookupOutcome::NotFound {
-            which: crate::mcp::tools::common::NotFound::UnknownPlugin,
-            ..
-        } => {
-            return Err(emit_error(
-                &input,
-                started,
-                "unknown_plugin",
-                McpError::invalid_params(
-                    format!(
-                        "plugin `{}/{}` is not enabled in the resolved scope",
-                        input.catalog, input.plugin
-                    ),
-                    Some(error_data_with_code(
+                        McpError::invalid_params(
+                            format!("catalog `{catalog}` is not enabled in the resolved scope"),
+                            Some(error_data_with_code(
+                                "unknown_catalog",
+                                ErrorCategory::EntryNotFound,
+                                &[("catalog", json!(catalog))],
+                            )),
+                        ),
+                    ));
+                }
+                LookupOutcome::NotFound {
+                    which: crate::mcp::tools::common::NotFound::UnknownPlugin,
+                    ..
+                } => {
+                    return Err(emit_error(
+                        &input,
+                        started,
                         "unknown_plugin",
-                        ErrorCategory::EntryNotFound,
-                        &[
-                            ("catalog", json!(input.catalog)),
-                            ("plugin", json!(input.plugin)),
-                        ],
-                    )),
-                ),
-            ));
-        }
-        LookupOutcome::NotFound {
-            which: crate::mcp::tools::common::NotFound::UnknownSkill,
-            available,
-        } => {
-            // #333: catalog + plugin resolved but the entry name did not (a
-            // mistyped exact name OR a glob that matched zero). ENRICH `data`
-            // with the enabled `(name, kind)` list for `(catalog, plugin)`.
-            return Err(emit_error(
-                &input,
-                started,
-                "unknown_skill",
-                McpError::invalid_params(
-                    format!(
-                        "skill `{}/{}/{}` is not enabled in the resolved scope",
-                        input.catalog, input.plugin, input.name,
-                    ),
-                    Some(error_data_with_code(
+                        McpError::invalid_params(
+                            format!(
+                                "plugin `{catalog}/{plugin}` is not enabled in the resolved scope"
+                            ),
+                            Some(error_data_with_code(
+                                "unknown_plugin",
+                                ErrorCategory::EntryNotFound,
+                                &[("catalog", json!(catalog)), ("plugin", json!(plugin))],
+                            )),
+                        ),
+                    ));
+                }
+                LookupOutcome::NotFound {
+                    which: crate::mcp::tools::common::NotFound::UnknownSkill,
+                    available,
+                } => {
+                    // #333: catalog + plugin resolved but the entry name did not (a
+                    // mistyped exact name OR a glob that matched zero). ENRICH `data`
+                    // with the enabled `(name, kind)` list for `(catalog, plugin)`.
+                    return Err(emit_error(
+                        &input,
+                        started,
                         "unknown_skill",
-                        ErrorCategory::EntryNotFound,
-                        &[
-                            ("catalog", json!(input.catalog)),
-                            ("plugin", json!(input.plugin)),
-                            ("name", json!(input.name)),
-                            ("available", available_json(&available)),
-                        ],
-                    )),
-                ),
-            ));
-        }
-        LookupOutcome::AmbiguousGlob { candidates } => {
-            return Err(emit_error(
-                &input,
-                started,
-                "ambiguous_name",
-                McpError::invalid_params(
-                    format!(
-                        "name pattern `{}` matched {} entries in `{}/{}`; pick one",
-                        input.name,
-                        candidates.len(),
-                        input.catalog,
-                        input.plugin,
-                    ),
-                    Some(error_data_with_code(
+                        McpError::invalid_params(
+                            format!(
+                                "skill `{catalog}/{plugin}/{name}` is not enabled in the resolved scope",
+                            ),
+                            Some(error_data_with_code(
+                                "unknown_skill",
+                                ErrorCategory::EntryNotFound,
+                                &[
+                                    ("catalog", json!(catalog)),
+                                    ("plugin", json!(plugin)),
+                                    ("name", json!(name)),
+                                    ("available", available_json(&available)),
+                                ],
+                            )),
+                        ),
+                    ));
+                }
+                LookupOutcome::AmbiguousGlob { candidates } => {
+                    return Err(emit_error(
+                        &input,
+                        started,
                         "ambiguous_name",
-                        ErrorCategory::EntryNotFound,
-                        &[
-                            ("catalog", json!(input.catalog)),
-                            ("plugin", json!(input.plugin)),
-                            ("name", json!(input.name)),
-                            ("candidates", available_json(&candidates)),
-                        ],
-                    )),
-                ),
-            ));
+                        McpError::invalid_params(
+                            format!(
+                                "name pattern `{name}` matched {} entries in `{catalog}/{plugin}`; pick one",
+                                candidates.len(),
+                            ),
+                            Some(error_data_with_code(
+                                "ambiguous_name",
+                                ErrorCategory::EntryNotFound,
+                                &[
+                                    ("catalog", json!(catalog)),
+                                    ("plugin", json!(plugin)),
+                                    ("name", json!(name)),
+                                    ("candidates", available_json(&candidates)),
+                                ],
+                            )),
+                        ),
+                    ));
+                }
+            }
+        }
+        Request::Uri { uri, kinds } => {
+            let paths = state.paths.clone();
+            let scope_name = state.scope.scope.name().as_str().to_owned();
+            let uri_for_task = uri.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::mcp::tools::uri_resolver::resolve(&paths, &scope_name, &uri_for_task, &kinds)
+            })
+            .await
+            .map_err(|e| {
+                internal(
+                    &input,
+                    started,
+                    format!("uri resolve join: {e}"),
+                    ErrorCategory::Internal,
+                )
+            })?
+            .map_err(|e| {
+                crate::mcp::enqueue_tool_error(&state, e.category());
+                internal(&input, started, e.to_string(), e.category())
+            })?;
+
+            match outcome {
+                crate::mcp::tools::uri_resolver::ResolveOutcome::One(entry) => {
+                    let entry = *entry;
+                    LookupHit {
+                        catalog: entry.record.catalog.clone(),
+                        plugin: entry.record.plugin.clone(),
+                        body_path: entry.body_path,
+                        kind: entry.record.kind,
+                        name: entry.record.name.clone(),
+                        description: entry.record.description,
+                        when_to_use: entry.record.when_to_use,
+                        plugin_version: entry.record.plugin_version,
+                        user_invocable: entry.record.user_invocable,
+                    }
+                }
+                crate::mcp::tools::uri_resolver::ResolveOutcome::Many(matches) => {
+                    return handle_multi_match(input, started, matches).await;
+                }
+                crate::mcp::tools::uri_resolver::ResolveOutcome::NoMatch { available } => {
+                    let available: Vec<AvailableEntry> = available
+                        .into_iter()
+                        .map(|r| AvailableEntry {
+                            name: r.name,
+                            kind: r.kind,
+                        })
+                        .collect();
+                    return Err(emit_error(
+                        &input,
+                        started,
+                        "unknown_skill",
+                        McpError::invalid_params(
+                            format!("uri `{uri}` did not resolve to an enabled entry"),
+                            Some(error_data_with_code(
+                                "unknown_skill",
+                                ErrorCategory::EntryNotFound,
+                                &[
+                                    ("uri", json!(uri)),
+                                    ("available", available_json(&available)),
+                                ],
+                            )),
+                        ),
+                    ));
+                }
+            }
         }
     };
 
@@ -445,6 +665,8 @@ async fn handle_metadata(
     hit: LookupHit,
 ) -> Result<Output, McpError> {
     let LookupHit {
+        catalog: hit_catalog,
+        plugin: hit_plugin,
         body_path,
         kind: resolved_kind,
         name: resolved_name,
@@ -492,8 +714,8 @@ async fn handle_metadata(
 
     info!(
         target: "tome::mcp::tools::get_skill",
-        catalog = input.catalog,
-        plugin = input.plugin,
+        catalog = hit_catalog,
+        plugin = hit_plugin,
         name = resolved_name,
         kind = resolved_kind.as_str(),
         metadata_only = true,
@@ -512,7 +734,7 @@ async fn handle_metadata(
         .prompt_registry
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .prompt_name_for(&input.catalog, &input.plugin, resolved_kind, &resolved_name)
+        .prompt_name_for(&hit_catalog, &hit_plugin, resolved_kind, &resolved_name)
         .map(str::to_owned);
 
     let when_to_use = match when_to_use {
@@ -521,11 +743,11 @@ async fn handle_metadata(
     };
 
     Ok(Output {
-        catalog: input.catalog,
-        plugin: input.plugin,
-        name: resolved_name,
-        kind: resolved_kind,
-        path: body_path.display().to_string(),
+        catalog: Some(hit_catalog),
+        plugin: Some(hit_plugin),
+        name: Some(resolved_name),
+        kind: Some(resolved_kind),
+        path: Some(body_path.display().to_string()),
         // Full-body-mode fields are absent in metadata mode.
         content: None,
         resources_paths: None,
@@ -538,6 +760,8 @@ async fn handle_metadata(
         user_invocable: Some(user_invocable),
         resources,
         prompt_name,
+        matches: None,
+        next_actions: None,
     })
 }
 
@@ -550,6 +774,8 @@ async fn handle_body(
     hit: LookupHit,
 ) -> Result<Output, McpError> {
     let LookupHit {
+        catalog: hit_catalog,
+        plugin: hit_plugin,
         body_path,
         kind: resolved_kind,
         name: resolved_name,
@@ -623,7 +849,9 @@ async fn handle_body(
             };
             emit_post_resolution_error_telemetry(
                 &state,
-                &input,
+                &hit_catalog,
+                &hit_plugin,
+                &resolved_name,
                 attributed_plugin_version.clone(),
                 category,
             )
@@ -640,14 +868,16 @@ async fn handle_body(
         (raw_content, false)
     } else {
         let ctx_state = state.clone();
-        let ctx_input = input.clone_for_log();
+        let ctx_catalog = hit_catalog.clone();
+        let ctx_plugin = hit_plugin.clone();
         let ctx_skill_path = skill_path.clone();
         let ctx_plugin_version = plugin_version;
         let ctx_resolved_name = resolved_name.clone();
         let rendered_result = tokio::task::spawn_blocking(move || {
             let ctx = build_substitution_context(
                 &ctx_state,
-                &ctx_input,
+                &ctx_catalog,
+                &ctx_plugin,
                 &ctx_resolved_name,
                 &ctx_skill_path,
                 ctx_plugin_version,
@@ -671,7 +901,9 @@ async fn handle_body(
                 let err = emit_error(&input, started, code, err);
                 emit_post_resolution_error_telemetry(
                     &state,
-                    &input,
+                    &hit_catalog,
+                    &hit_plugin,
+                    &resolved_name,
                     attributed_plugin_version.clone(),
                     category,
                 )
@@ -683,8 +915,8 @@ async fn handle_body(
 
     info!(
         target: "tome::mcp::tools::get_skill",
-        catalog = input.catalog,
-        plugin = input.plugin,
+        catalog = hit_catalog.as_str(),
+        plugin = hit_plugin.as_str(),
         name = resolved_name,
         kind = resolved_kind.as_str(),
         metadata_only = false,
@@ -705,9 +937,9 @@ async fn handle_body(
     // FR-052: attributed `catalog.<id>.entry_invoked`, folded into ONE blocking
     // task (the sync SQLite open+query must not run on the reactor).
     let attribution_scope = state.scope.clone();
-    let attribution_catalog = input.catalog.clone();
+    let attribution_catalog = hit_catalog.clone();
     let attribution_entry_name = resolved_name.clone();
-    let attribution_plugin_name = input.plugin.clone();
+    let attribution_plugin_name = hit_plugin.clone();
     let attribution_harness = crate::mcp::calling_harness(&state);
     let _ = tokio::task::spawn_blocking(move || {
         if let Some(catalog_id) =
@@ -729,7 +961,7 @@ async fn handle_body(
         .prompt_registry
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .prompt_name_for(&input.catalog, &input.plugin, resolved_kind, &resolved_name)
+        .prompt_name_for(&hit_catalog, &hit_plugin, resolved_kind, &resolved_name)
         .map(str::to_owned);
 
     // #333: when the caller opted in AND this is a skill, inline the byte-capped
@@ -754,11 +986,11 @@ async fn handle_body(
         };
 
     Ok(Output {
-        catalog: input.catalog,
-        plugin: input.plugin,
-        name: resolved_name,
-        kind: resolved_kind,
-        path: skill_path.display().to_string(),
+        catalog: Some(hit_catalog),
+        plugin: Some(hit_plugin),
+        name: Some(resolved_name),
+        kind: Some(resolved_kind),
+        path: Some(skill_path.display().to_string()),
         content: Some(content),
         resources_paths: Some(resources),
         substitutions_applied: Some(substitutions_applied),
@@ -770,6 +1002,71 @@ async fn handle_body(
         user_invocable: None,
         resources: None,
         prompt_name,
+        matches: None,
+        next_actions: None,
+    })
+}
+
+/// Assemble the multi-match `uri` response: previews + aligned next_actions.
+/// No body is read; the body-mode flags (`raw` / `include_resource_bodies`) and
+/// `metadata_only` are ignored — a multi-match short-circuits before either
+/// mode's tail runs.
+async fn handle_multi_match(
+    input: Input,
+    started: Instant,
+    matches: Vec<crate::mcp::tools::uri_resolver::ResolvedEntry>,
+) -> Result<Output, McpError> {
+    let items: Vec<MatchItem> = matches
+        .iter()
+        .map(|e| MatchItem {
+            catalog: e.record.catalog.clone(),
+            plugin: e.record.plugin.clone(),
+            name: e.record.name.clone(),
+            kind: e.record.kind,
+            path: e.body_path.display().to_string(),
+            description: e.record.description.clone(),
+        })
+        .collect();
+    let next_actions: Vec<NextAction> = matches
+        .iter()
+        .map(|e| NextAction {
+            tool: "get_skill".to_owned(),
+            arguments: NextActionArgs {
+                catalog: e.record.catalog.clone(),
+                plugin: e.record.plugin.clone(),
+                name: e.record.name.clone(),
+                kind: e.record.kind,
+            },
+        })
+        .collect();
+
+    info!(
+        target: "tome::mcp::tools::get_skill",
+        uri = input.uri.as_deref().unwrap_or(""),
+        result = "multi_match",
+        match_count = items.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "call",
+    );
+
+    Ok(Output {
+        catalog: None,
+        plugin: None,
+        name: None,
+        kind: None,
+        path: None,
+        content: None,
+        resources_paths: None,
+        substitutions_applied: None,
+        resource_bodies: None,
+        description: None,
+        when_to_use: MetaWhenToUse::Absent,
+        plugin_version: None,
+        user_invocable: None,
+        resources: None,
+        prompt_name: None,
+        matches: Some(items),
+        next_actions: Some(next_actions),
     })
 }
 
@@ -786,6 +1083,12 @@ fn available_json(entries: &[AvailableEntry]) -> serde_json::Value {
 
 /// A resolved entry hit carrying every field both modes need.
 struct LookupHit {
+    /// The entry's catalog. Sourced from the lookup, not `input` — correct
+    /// for both the triple path (equal to `input.catalog`) and the future
+    /// `uri` path (where `input.catalog` is absent).
+    catalog: String,
+    /// The entry's plugin. Same rationale as `catalog`.
+    plugin: String,
     body_path: PathBuf,
     kind: EntryKind,
     /// The resolved concrete name. Equals `input.name` for the exact-match
@@ -954,6 +1257,8 @@ fn hit_from_row(
     let body_path =
         skills::resolve_entry_body_path(conn, paths, workspace_name, catalog, plugin, &row.path)?;
     Ok(LookupHit {
+        catalog: catalog.to_owned(),
+        plugin: plugin.to_owned(),
         body_path,
         kind: row.kind,
         name: row.name,
@@ -1144,14 +1449,15 @@ fn inline_resource_bodies(resources: &[String]) -> Vec<ResourceBody> {
 /// matched entry, not the pattern).
 fn build_substitution_context(
     state: &McpState,
-    input: &Input,
+    catalog: &str,
+    plugin: &str,
     resolved_name: &str,
     skill_path: &Path,
     plugin_version: String,
 ) -> Result<SubstitutionContext, (&'static str, McpError)> {
     crate::mcp::substitution_helpers::build_context_for_entry(
-        input.catalog.clone(),
-        input.plugin.clone(),
+        catalog.to_owned(),
+        plugin.to_owned(),
         plugin_version,
         resolved_name.to_owned(),
         skill_path.to_path_buf(),
@@ -1255,10 +1561,11 @@ fn internal(input: &Input, started: Instant, msg: String, category: ErrorCategor
     let scrubbed = crate::catalog::git::scrub_to_string(msg.as_bytes());
     error!(
         target: "tome::mcp::tools::get_skill",
-        catalog = input.catalog,
-        plugin = input.plugin,
-        name = input.name,
-        kind = input.kind.as_str(),
+        catalog = input.catalog.as_deref().unwrap_or(""),
+        plugin = input.plugin.as_deref().unwrap_or(""),
+        name = input.name.as_deref().unwrap_or(""),
+        uri = input.uri.as_deref().unwrap_or(""),
+        kind = input.kind.map(|k| k.as_str()).unwrap_or("skill"),
         error_code = category.as_str(),
         error_message = %scrubbed,
         elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1272,10 +1579,11 @@ fn internal(input: &Input, started: Instant, msg: String, category: ErrorCategor
 fn emit_error(input: &Input, started: Instant, code: &str, err: McpError) -> McpError {
     info!(
         target: "tome::mcp::tools::get_skill",
-        catalog = input.catalog,
-        plugin = input.plugin,
-        name = input.name,
-        kind = input.kind.as_str(),
+        catalog = input.catalog.as_deref().unwrap_or(""),
+        plugin = input.plugin.as_deref().unwrap_or(""),
+        name = input.name.as_deref().unwrap_or(""),
+        uri = input.uri.as_deref().unwrap_or(""),
+        kind = input.kind.map(|k| k.as_str()).unwrap_or("skill"),
         result = code,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "call",
@@ -1285,18 +1593,25 @@ fn emit_error(input: &Input, started: Instant, code: &str, err: McpError) -> Mcp
 
 /// Co-M1 / FR-052: emit the POST-resolution telemetry for a full-body
 /// `get_skill` failure that occurred AFTER the entry row resolved.
+///
+/// `catalog` / `plugin` / `entry_name` are the RESOLVED identity from the
+/// `LookupHit` — not `input.catalog` / `input.plugin` / `input.name`, which
+/// are `None` on the `uri` path (the success paths in `handle_body` already
+/// attribute off the hit; this brings the error paths in line).
 async fn emit_post_resolution_error_telemetry(
     state: &Arc<McpState>,
-    input: &Input,
+    catalog: &str,
+    plugin: &str,
+    entry_name: &str,
     plugin_version: String,
     category: crate::error::ErrorCategory,
 ) {
     crate::mcp::enqueue_tool_error(state, category);
 
     let scope = state.scope.clone();
-    let catalog = input.catalog.clone();
-    let plugin_name = input.plugin.clone();
-    let entry_name = input.name.clone();
+    let catalog = catalog.to_owned();
+    let plugin_name = plugin.to_owned();
+    let entry_name = entry_name.to_owned();
     let _ = tokio::task::spawn_blocking(move || {
         if let Some(catalog_id) = crate::telemetry::resolve_attribution(&scope, &catalog) {
             crate::telemetry::emit(crate::telemetry::event::AttributedError {
@@ -1317,6 +1632,7 @@ impl Input {
             catalog: self.catalog.clone(),
             plugin: self.plugin.clone(),
             name: self.name.clone(),
+            uri: self.uri.clone(),
             kind: self.kind,
             metadata_only: self.metadata_only,
             raw: self.raw,
@@ -1461,11 +1777,11 @@ mod tests {
     #[test]
     fn body_mode_output_omits_metadata_fields() {
         let out = Output {
-            catalog: "c".into(),
-            plugin: "p".into(),
-            name: "s".into(),
-            kind: EntryKind::Skill,
-            path: "/abs/SKILL.md".into(),
+            catalog: Some("c".into()),
+            plugin: Some("p".into()),
+            name: Some("s".into()),
+            kind: Some(EntryKind::Skill),
+            path: Some("/abs/SKILL.md".into()),
             content: Some("body".into()),
             resources_paths: Some(vec!["/abs/a.txt".into()]),
             substitutions_applied: Some(true),
@@ -1476,6 +1792,8 @@ mod tests {
             user_invocable: None,
             resources: None,
             prompt_name: None,
+            matches: None,
+            next_actions: None,
         };
         let json = serde_json::to_string(&out).unwrap();
         // Body-mode fields present.
@@ -1505,11 +1823,11 @@ mod tests {
     #[test]
     fn metadata_mode_output_omits_body_fields() {
         let out = Output {
-            catalog: "c".into(),
-            plugin: "p".into(),
-            name: "s".into(),
-            kind: EntryKind::Skill,
-            path: "/abs/SKILL.md".into(),
+            catalog: Some("c".into()),
+            plugin: Some("p".into()),
+            name: Some("s".into()),
+            kind: Some(EntryKind::Skill),
+            path: Some("/abs/SKILL.md".into()),
             content: None,
             resources_paths: None,
             substitutions_applied: None,
@@ -1523,6 +1841,8 @@ mod tests {
                 directories: BTreeMap::new(),
             }),
             prompt_name: None,
+            matches: None,
+            next_actions: None,
         };
         let json = serde_json::to_string(&out).unwrap();
         assert!(json.contains("\"description\":\"desc\""), "{json}");
@@ -1535,5 +1855,115 @@ mod tests {
         assert!(!json.contains("\"content\""), "{json}");
         assert!(!json.contains("\"substitutions_applied\""), "{json}");
         assert!(!json.contains("\"resource_bodies\""), "{json}");
+    }
+
+    #[test]
+    fn multi_match_output_omits_identity_and_body_fields() {
+        let out = Output {
+            catalog: None,
+            plugin: None,
+            name: None,
+            kind: None,
+            path: None,
+            content: None,
+            resources_paths: None,
+            substitutions_applied: None,
+            resource_bodies: None,
+            description: None,
+            when_to_use: MetaWhenToUse::Absent,
+            plugin_version: None,
+            user_invocable: None,
+            resources: None,
+            prompt_name: None,
+            matches: Some(vec![MatchItem {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "foo".into(),
+                kind: EntryKind::Skill,
+                path: "/abs/SKILL.md".into(),
+                description: "d".into(),
+            }]),
+            next_actions: Some(vec![NextAction {
+                tool: "get_skill".into(),
+                arguments: NextActionArgs {
+                    catalog: "acme".into(),
+                    plugin: "plug".into(),
+                    name: "foo".into(),
+                    kind: EntryKind::Skill,
+                },
+            }]),
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(json.contains(r#""matches":[{"catalog":"acme","plugin":"plug","name":"foo","kind":"skill","path":"/abs/SKILL.md","description":"d"}]"#), "{json}");
+        assert!(json.contains(r#""next_actions":[{"tool":"get_skill","arguments":{"catalog":"acme","plugin":"plug","name":"foo","kind":"skill"}}]"#), "{json}");
+        // Identity + body fields omitted in multi-match.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("catalog"));
+        assert!(!obj.contains_key("path"));
+        assert!(!obj.contains_key("content"));
+    }
+
+    #[test]
+    fn into_request_accepts_full_triple() {
+        let input = Input::triple("cat", "plug", "skill");
+        match input.into_request().unwrap() {
+            Request::Triple {
+                catalog,
+                plugin,
+                name,
+                kind,
+            } => {
+                assert_eq!(
+                    (catalog.as_str(), plugin.as_str(), name.as_str()),
+                    ("cat", "plug", "skill")
+                );
+                assert_eq!(kind, EntryKind::Skill);
+            }
+            _ => panic!("expected Triple"),
+        }
+    }
+
+    #[test]
+    fn into_request_accepts_uri_with_both_kinds_by_default() {
+        let input = Input::for_uri("plug:skill");
+        match input.into_request().unwrap() {
+            Request::Uri { uri, kinds } => {
+                assert_eq!(uri, "plug:skill");
+                assert_eq!(kinds, vec![EntryKind::Skill, EntryKind::Command]);
+            }
+            _ => panic!("expected Uri"),
+        }
+    }
+
+    #[test]
+    fn into_request_rejects_both_uri_and_triple() {
+        let mut input = Input::triple("cat", "plug", "skill");
+        input.uri = Some("plug:skill".into());
+        assert!(input.into_request().is_err());
+    }
+
+    #[test]
+    fn into_request_rejects_partial_triple() {
+        let mut input = Input::for_uri("x"); // start empty-ish
+        input.uri = None;
+        input.plugin = Some("plug".into());
+        input.name = Some("skill".into()); // catalog missing
+        assert!(input.into_request().is_err());
+    }
+
+    #[test]
+    fn into_request_rejects_neither() {
+        let input = Input {
+            catalog: None,
+            plugin: None,
+            name: None,
+            uri: None,
+            kind: None,
+            metadata_only: false,
+            raw: false,
+            include_resource_bodies: false,
+        };
+        assert!(input.into_request().is_err());
     }
 }

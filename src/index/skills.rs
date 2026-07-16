@@ -276,6 +276,85 @@ pub fn list_for_plugin(
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect list: {e}")))
 }
 
+/// Every ENABLED entry (any kind) in `workspace_name`, ordered
+/// `catalog, plugin, kind, name`. Used by the URI resolver's path matcher,
+/// which needs each entry's `(catalog, plugin, name, kind, path)` to map an
+/// on-disk path back to an identity.
+pub fn entries_for_workspace(
+    conn: &Connection,
+    workspace_name: &str,
+) -> Result<Vec<SkillRecord>, TomeError> {
+    let sql = format!(
+        "SELECT {SELECT_COLS}, 1
+         FROM skills AS s
+         JOIN workspace_skills AS ws ON ws.skill_id = s.id
+         JOIN workspaces       AS w  ON w.id = ws.workspace_id
+         WHERE w.name = ?1
+         ORDER BY s.catalog, s.plugin, s.kind, s.name"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare entries ws: {e}")))?;
+    let rows = stmt
+        .query_map(params![workspace_name], row_to_skill_record)
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query entries ws: {e}")))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect entries ws: {e}")))
+}
+
+/// Every ENABLED entry named `name` across ALL catalogs/plugins in
+/// `workspace_name`. Backs the bare-token URI form. Kind filtering is left to
+/// the caller (the tiny skill/command set makes an in-Rust filter simpler than
+/// a dynamic `IN` clause).
+pub fn find_by_name_across_workspace(
+    conn: &Connection,
+    workspace_name: &str,
+    name: &str,
+) -> Result<Vec<SkillRecord>, TomeError> {
+    let sql = format!(
+        "SELECT {SELECT_COLS}, 1
+         FROM skills AS s
+         JOIN workspace_skills AS ws ON ws.skill_id = s.id
+         JOIN workspaces       AS w  ON w.id = ws.workspace_id
+         WHERE w.name = ?1 AND s.name = ?2
+         ORDER BY s.catalog, s.plugin, s.kind, s.name"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare by-name: {e}")))?;
+    let rows = stmt
+        .query_map(params![workspace_name, name], row_to_skill_record)
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query by-name: {e}")))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect by-name: {e}")))
+}
+
+/// Every ENABLED entry matching `(plugin, name)` across ALL catalogs in
+/// `workspace_name`. Backs the 2-segment `<plugin>:<skill>` URI form.
+pub fn find_by_plugin_name(
+    conn: &Connection,
+    workspace_name: &str,
+    plugin: &str,
+    name: &str,
+) -> Result<Vec<SkillRecord>, TomeError> {
+    let sql = format!(
+        "SELECT {SELECT_COLS}, 1
+         FROM skills AS s
+         JOIN workspace_skills AS ws ON ws.skill_id = s.id
+         JOIN workspaces       AS w  ON w.id = ws.workspace_id
+         WHERE w.name = ?1 AND s.plugin = ?2 AND s.name = ?3
+         ORDER BY s.catalog, s.plugin, s.kind, s.name"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare plugin-name: {e}")))?;
+    let rows = stmt
+        .query_map(params![workspace_name, plugin, name], row_to_skill_record)
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query plugin-name: {e}")))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect plugin-name: {e}")))
+}
+
 /// Distinct enabled plugin names for one catalog, sorted alphabetically.
 /// Used by `tome catalog update` to drive the per-catalog reindex pass and
 /// by `tome reindex <catalog>` to scope the explicit form. Phase 4 / F11a:
@@ -1403,6 +1482,35 @@ mod tests {
         .expect("enrol agent");
     }
 
+    /// Insert an ENABLED skill row for (catalog, plugin, name) enrolled in `global`.
+    fn insert_enabled_skill(conn: &Connection, catalog: &str, plugin: &str, name: &str) {
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES (?1, ?2, ?3, 'skill', 'd', '0.0.0', ?4, 'h', 1, 1, NULL, '1970-01-01T00:00:00Z')",
+            params![catalog, plugin, name, format!("skills/{name}/SKILL.md")],
+        )
+        .expect("insert skill");
+        let skill_id: i64 = conn
+            .query_row(
+                "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind='skill' AND name=?3",
+                params![catalog, plugin, name],
+                |r| r.get(0),
+            )
+            .expect("skill id");
+        let ws_id: i64 = conn
+            .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| {
+                r.get(0)
+            })
+            .expect("global ws id");
+        conn.execute(
+            "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+            params![ws_id, skill_id],
+        )
+        .expect("enrol skill");
+    }
+
     #[test]
     fn clash_set_reports_names_held_by_two_plugins() {
         let dir = TempDir::new().unwrap();
@@ -1761,5 +1869,63 @@ mod tests {
             entries.iter().all(|e| e.tier == 1),
             "all tierable entries must have tier 1",
         );
+    }
+
+    #[test]
+    fn find_by_name_across_workspace_spans_catalogs_and_plugins() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+        insert_enabled_skill(&conn, "cat-a", "plug-x", "shared");
+        insert_enabled_skill(&conn, "cat-b", "plug-y", "shared");
+        insert_enabled_skill(&conn, "cat-a", "plug-x", "unique");
+
+        let hits = find_by_name_across_workspace(&conn, "global", "shared").unwrap();
+        assert_eq!(hits.len(), 2, "both catalogs' `shared` must return");
+        // Deterministic order: catalog, plugin, kind, name.
+        assert_eq!(
+            (hits[0].catalog.as_str(), hits[0].plugin.as_str()),
+            ("cat-a", "plug-x")
+        );
+        assert_eq!(
+            (hits[1].catalog.as_str(), hits[1].plugin.as_str()),
+            ("cat-b", "plug-y")
+        );
+
+        let none = find_by_name_across_workspace(&conn, "global", "absent").unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn find_by_plugin_name_scopes_to_plugin_across_catalogs() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+        insert_enabled_skill(&conn, "cat-a", "shared-plug", "s");
+        insert_enabled_skill(&conn, "cat-b", "shared-plug", "s");
+        insert_enabled_skill(&conn, "cat-a", "other-plug", "s");
+
+        let hits = find_by_plugin_name(&conn, "global", "shared-plug", "s").unwrap();
+        assert_eq!(hits.len(), 2, "both catalogs' shared-plug/s must return");
+        assert!(hits.iter().all(|h| h.plugin == "shared-plug"));
+    }
+
+    #[test]
+    fn entries_for_workspace_returns_only_enabled_rows() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+        insert_enabled_skill(&conn, "cat-a", "plug-x", "enabled-one");
+        // A row with NO workspace_skills enrolment must be excluded.
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES ('cat-a','plug-x','disabled-one','skill','d','0.0.0',
+                     'skills/disabled-one/SKILL.md','h',1,1,NULL,'1970-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let all = entries_for_workspace(&conn, "global").unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "enabled-one");
     }
 }

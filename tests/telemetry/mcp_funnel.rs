@@ -287,10 +287,11 @@ fn search_then_get_skill_emits_funnel_with_rank() {
         .block_on(get_skill::handle(
             state.clone(),
             get_skill::Input {
-                catalog: "acme".into(),
-                plugin: "plug".into(),
-                name: top_entry.clone(),
-                kind: EntryKind::Skill,
+                catalog: Some("acme".into()),
+                plugin: Some("plug".into()),
+                name: Some(top_entry.clone()),
+                uri: None,
+                kind: Some(EntryKind::Skill),
                 metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
@@ -366,10 +367,11 @@ fn get_skill_metadata_emits_entry_info_with_rank() {
         .block_on(get_skill::handle(
             state.clone(),
             get_skill::Input {
-                catalog: "acme".into(),
-                plugin: "plug".into(),
-                name: top_entry,
-                kind: EntryKind::Skill,
+                catalog: Some("acme".into()),
+                plugin: Some("plug".into()),
+                name: Some(top_entry),
+                uri: None,
+                kind: Some(EntryKind::Skill),
                 metadata_only: true,
                 raw: false,
                 include_resource_bodies: false,
@@ -409,10 +411,11 @@ fn get_skill_without_preceding_search_has_zero_rank() {
         .block_on(get_skill::handle(
             state.clone(),
             get_skill::Input {
-                catalog: "acme".into(),
-                plugin: "plug".into(),
-                name: "alpha".into(),
-                kind: EntryKind::Skill,
+                catalog: Some("acme".into()),
+                plugin: Some("plug".into()),
+                name: Some("alpha".into()),
+                uri: None,
+                kind: Some(EntryKind::Skill),
                 metadata_only: false,
                 raw: false,
                 include_resource_bodies: false,
@@ -615,10 +618,11 @@ fn post_resolution_get_skill_failure_on_allowlisted_entry_emits_attributed_error
     let res = rt.block_on(get_skill::handle(
         state.clone(),
         get_skill::Input {
-            catalog: "acme".into(),
-            plugin: "plug".into(),
-            name: "alpha".into(),
-            kind: EntryKind::Skill,
+            catalog: Some("acme".into()),
+            plugin: Some("plug".into()),
+            name: Some("alpha".into()),
+            uri: None,
+            kind: Some(EntryKind::Skill),
             metadata_only: false,
             raw: false,
             include_resource_bodies: false,

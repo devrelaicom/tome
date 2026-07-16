@@ -84,10 +84,11 @@ fn get_skill_plugin_data_dir_unwritable_exits_9() {
     let harness = staged.harness();
     let err = harness
         .call_get_skill(get_skill::Input {
-            catalog: staged.catalog_name.clone(),
-            plugin: staged.plugin_name.clone(),
-            name: "needs-data".into(),
-            kind: tome::plugin::identity::EntryKind::Skill,
+            catalog: Some(staged.catalog_name.clone()),
+            plugin: Some(staged.plugin_name.clone()),
+            name: Some("needs-data".into()),
+            uri: None,
+            kind: Some(tome::plugin::identity::EntryKind::Skill),
             metadata_only: false,
             raw: false,
             include_resource_bodies: false,
@@ -171,10 +172,11 @@ fn get_skill_with_missing_plugin_dir_exits_27() {
     let harness = staged.harness();
     let err = harness
         .call_get_skill(get_skill::Input {
-            catalog: staged.catalog_name.clone(),
-            plugin: staged.plugin_name.clone(),
-            name: "ghost".into(),
-            kind: tome::plugin::identity::EntryKind::Skill,
+            catalog: Some(staged.catalog_name.clone()),
+            plugin: Some(staged.plugin_name.clone()),
+            name: Some("ghost".into()),
+            uri: None,
+            kind: Some(tome::plugin::identity::EntryKind::Skill),
             metadata_only: false,
             raw: false,
             include_resource_bodies: false,
