@@ -86,6 +86,7 @@ fn query_with_reranker(
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: reranker.is_none(),
         strict: false,

@@ -1342,6 +1342,12 @@ pub struct QueryArgs {
     #[arg(long, value_enum, action = clap::ArgAction::Append)]
     pub kind: Vec<TierKindArg>,
 
+    /// Restrict results to entries whose PLUGIN declares any of these keywords
+    /// (repeatable; multiple values are OR / match-any). Matching is
+    /// case-insensitive.
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub keyword: Vec<String>,
+
     /// Run the reranker stage for this query. Reranking is OFF by default
     /// (#502) — pass this to enable it per-invocation (or set `[query] rerank
     /// = true`, or configure a `[reranker]` provider). Mutually exclusive with

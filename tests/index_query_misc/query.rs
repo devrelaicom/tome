@@ -330,6 +330,7 @@ fn args_for(text: &str, top_k: u32) -> QueryArgs {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: true,
         strict: false,
@@ -707,6 +708,48 @@ fn run_with_deps_filters_applied_pre_rerank() {
     for hit in &outcome.results {
         assert_eq!(hit.candidate.plugin, "plugin-beta");
         assert_eq!(hit.candidate.catalog, "sample-plugin-catalog");
+    }
+}
+
+#[test]
+fn run_with_deps_keyword_filter_matches_case_insensitively() {
+    // Task E2: `--keyword` flows into `QueryFilters.keywords`, and the `knn`
+    // EXISTS filter over `plugin_keywords` is case-insensitive (`COLLATE
+    // NOCASE`, Task D1). Tag plugin-alpha with a lowercase "auth" keyword
+    // directly (the fixture's `tome-plugin.toml` declares none) and query
+    // with a mixed-case `--keyword AUTH` — it must still match and narrow
+    // results away from plugin-beta, which has no keyword.
+    let env = build_query_env();
+    let conn = open_conn(&env);
+    conn.execute(
+        "INSERT INTO plugin_keywords (catalog, plugin, keyword) VALUES \
+         ('sample-plugin-catalog', 'plugin-alpha', 'auth')",
+        [],
+    )
+    .expect("insert plugin_keywords row");
+    drop(conn);
+    let embedder = StubEmbedder::new();
+
+    let mut args = args_for("anything", 10);
+    args.keyword = vec!["AUTH".to_owned()];
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope(WorkspaceName::global()),
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let outcome = run_with_deps(args, deps, Mode::Json).expect("run_with_deps");
+    assert!(
+        !outcome.results.is_empty(),
+        "keyword filter must not erase all hits"
+    );
+    for hit in &outcome.results {
+        assert_eq!(hit.candidate.plugin, "plugin-alpha");
     }
 }
 

@@ -128,6 +128,7 @@ fn base_args() -> QueryArgs {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: false,
         strict: false,
@@ -372,6 +373,7 @@ fn top_k_none_falls_through_to_builtin_default() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: true,
         strict: false,
@@ -416,6 +418,7 @@ fn top_k_some_caps_results_at_the_supplied_value() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: true,
         strict: false,
@@ -464,6 +467,7 @@ fn top_k_from_config_caps_results() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: true,
         strict: false,
@@ -511,6 +515,7 @@ fn explicit_top_k_flag_beats_config() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: true,
         strict: false,
@@ -566,6 +571,7 @@ fn no_rerank_flag_forces_reranker_off_regardless_of_config() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: true,
         strict: false,
@@ -620,6 +626,7 @@ fn config_rerank_false_disables_reranker_when_flag_absent() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: false,
         strict: false,
@@ -668,6 +675,7 @@ fn strict_min_score_from_config_is_applied_when_flag_absent() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: true,
         strict: false,
@@ -714,6 +722,7 @@ fn explicit_min_score_flag_beats_config() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: true,
         strict: false,
@@ -752,6 +761,7 @@ fn strict_min_score_defaults_to_mode_default_when_both_absent() {
         catalog: Vec::new(),
         plugin: Vec::new(),
         kind: Vec::new(),
+        keyword: Vec::new(),
         rerank: false,
         no_rerank: true,
         strict: false,
@@ -871,6 +881,23 @@ fn catalog_and_plugin_are_repeatable() {
     let single = parse_query(&["tome", "query", "reset", "--catalog", "only"]);
     assert_eq!(single.catalog, vec!["only"]);
     assert!(single.plugin.is_empty());
+}
+
+#[test]
+fn keyword_is_repeatable() {
+    let args = parse_query(&[
+        "tome",
+        "query",
+        "foo",
+        "--keyword",
+        "auth",
+        "--keyword",
+        "oauth",
+    ]);
+    assert_eq!(args.keyword, vec!["auth", "oauth"]);
+    // A single value still parses to a one-element vec (mirrors `--catalog`).
+    let single = parse_query(&["tome", "query", "foo", "--keyword", "auth"]);
+    assert_eq!(single.keyword, vec!["auth"]);
 }
 
 #[test]

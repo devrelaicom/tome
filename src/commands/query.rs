@@ -611,8 +611,7 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
             .copied()
             .map(crate::commands::tier::set::kind_of)
             .collect(),
-        // Task E2 wires `--keyword` through to this filter.
-        keywords: Vec::new(),
+        keywords: args.keyword.iter().map(String::as_str).collect(),
     };
     let candidates = knn(
         &conn,

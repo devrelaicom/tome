@@ -422,6 +422,8 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             .map(crate::commands::tier::set::tierkind_of)
             .into_iter()
             .collect(),
+        // Task E3 wires an MCP `keyword` input through to this field.
+        keyword: Vec::new(),
         // The `rerank` decision is already resolved into `no_rerank`; the
         // per-invocation `--rerank` flag is a CLI-only surface (the tool has
         // resolved its own `rerank` input above), so leave it `false` here.
