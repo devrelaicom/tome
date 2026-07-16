@@ -48,6 +48,8 @@ mod plugin_repeated;
 mod plugin_resolve_from_db;
 #[path = "catalog_plugin/plugin_show.rs"]
 mod plugin_show;
+#[path = "catalog_plugin/plugin_show_metadata.rs"]
+mod plugin_show_metadata;
 #[path = "catalog_plugin/plugin_show_p5.rs"]
 mod plugin_show_p5;
 #[path = "catalog_plugin/plugin_show_p5_json_shape.rs"]

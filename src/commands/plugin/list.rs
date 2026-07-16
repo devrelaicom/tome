@@ -231,6 +231,15 @@ fn build_row(
         status,
         component_counts,
         last_indexed_at: last_indexed_at_dt,
+        // Task C2: `list` builds rows from index state without a manifest —
+        // the new metadata is a `show`-only surface.
+        display_name: None,
+        keywords: Vec::new(),
+        homepage: None,
+        repository: None,
+        bugs: None,
+        documentation: None,
+        contributors: Vec::new(),
     };
 
     Ok(Row {
@@ -389,6 +398,13 @@ mod tests {
             status: PluginStatus::Disabled,
             component_counts: crate::plugin::components::ComponentCounts::default(),
             last_indexed_at: None,
+            display_name: None,
+            keywords: Vec::new(),
+            homepage: None,
+            repository: None,
+            bugs: None,
+            documentation: None,
+            contributors: Vec::new(),
         };
         Row {
             id,

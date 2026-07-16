@@ -41,6 +41,28 @@ pub struct PluginRecord {
     pub component_counts: ComponentCounts,
     #[serde(with = "time::serde::rfc3339::option")]
     pub last_indexed_at: Option<OffsetDateTime>,
+    /// Task C2: surfaced ONLY by `plugin show` (populated from the manifest
+    /// read there); `plugin list` / interactive rows build a `PluginRecord`
+    /// from index rows without a manifest and leave these at their empty
+    /// defaults. `skip_serializing_if` keeps the JSON wire byte-stable when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bugs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    /// Rendered via `TomeAuthor::display()` — a `Name <email>` string per
+    /// contributor (falling back to whichever of name/email is present);
+    /// contributors with neither are dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

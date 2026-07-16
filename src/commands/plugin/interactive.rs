@@ -432,6 +432,15 @@ fn render_plugin_view(
             use time::format_description::well_known::Rfc3339;
             OffsetDateTime::parse(s, &Rfc3339).ok()
         }),
+        // Task C2: interactive rows build from index state without a
+        // manifest — the new metadata is a `show`-only surface.
+        display_name: None,
+        keywords: Vec::new(),
+        homepage: None,
+        repository: None,
+        bugs: None,
+        documentation: None,
+        contributors: Vec::new(),
     };
 
     write_plugin_view(&record, agg.last_indexed_at.as_deref())?;

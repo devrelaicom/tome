@@ -113,6 +113,20 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         status,
         component_counts,
         last_indexed_at: last_indexed_at_dt,
+        // Task C2: only `show` reads the manifest, so only `show` surfaces
+        // this metadata — `list` / interactive rows leave these at their
+        // `None`/`Vec::new()` defaults.
+        display_name: manifest.display_name.clone(),
+        keywords: manifest.keywords.clone(),
+        homepage: manifest.homepage.clone(),
+        repository: manifest.repository.clone(),
+        bugs: manifest.bugs.clone(),
+        documentation: manifest.documentation.clone(),
+        contributors: manifest
+            .contributors
+            .iter()
+            .filter_map(|a| a.display())
+            .collect(),
     };
 
     // Phase 6 / US5 (FR-083): hooks/guardrails presence booleans (read-only
@@ -366,6 +380,32 @@ fn emit_human(
 
     if let Some(desc) = &record.description {
         writeln!(out, "Description:  {}", desc)?;
+    }
+    // Task C2: each optional metadata field renders only when present —
+    // absent fields are silently omitted rather than shown as `—`.
+    if let Some(display_name) = &record.display_name {
+        writeln!(out, "Display name: {}", display_name)?;
+    }
+    if !record.keywords.is_empty() {
+        writeln!(out, "Keywords:     {}", record.keywords.join(", "))?;
+    }
+    if let Some(homepage) = &record.homepage {
+        writeln!(out, "Homepage:     {}", homepage)?;
+    }
+    if let Some(repository) = &record.repository {
+        writeln!(out, "Repository:   {}", repository)?;
+    }
+    if let Some(bugs) = &record.bugs {
+        writeln!(out, "Bugs:         {}", bugs)?;
+    }
+    if let Some(documentation) = &record.documentation {
+        writeln!(out, "Documentation: {}", documentation)?;
+    }
+    if !record.contributors.is_empty() {
+        writeln!(out, "Contributors:")?;
+        for c in &record.contributors {
+            writeln!(out, "  - {}", c)?;
+        }
     }
 
     writeln!(out)?;
