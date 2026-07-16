@@ -55,6 +55,13 @@ pub mod rule {
     /// A single text supporting file is too large for the agent to read in
     /// one call.
     pub const RESOURCE_TOO_LARGE: &str = "lint/resource-too-large";
+    /// Two `keywords` entries are the same, case-insensitively. A warning
+    /// only — the manifest parser already accepts duplicates (Task A1 rejects
+    /// empty/control/over-cap keywords, not dups).
+    pub const KEYWORD_DUPLICATE: &str = "lint/keyword-duplicate";
+    /// `icon` names a path, but no file exists there under the artifact root.
+    /// Path SHAPE is validated at manifest-load time; this checks EXISTENCE.
+    pub const ICON_MISSING: &str = "lint/icon-missing";
 }
 
 /// Agent-Skills description length cap (§9).
@@ -125,7 +132,11 @@ pub fn all() -> Vec<Box<dyn Rule>> {
     let budgets = TokenBudgets::from_env();
     vec![
         Box::new(CatalogManifest),
+        Box::new(CatalogKeywords),
+        Box::new(CatalogIcon),
         Box::new(PluginManifest),
+        Box::new(PluginKeywords),
+        Box::new(PluginIcon),
         Box::new(HooksSpec),
         Box::new(McpSpec),
         Box::new(AgentSpec),
@@ -203,6 +214,32 @@ impl Rule for CatalogManifest {
     }
 }
 
+struct CatalogKeywords;
+impl Rule for CatalogKeywords {
+    fn id(&self) -> &'static str {
+        rule::KEYWORD_DUPLICATE
+    }
+    fn scope(&self) -> Scope {
+        Scope::Catalog
+    }
+    fn check_catalog(&self, c: &CatalogIr) -> Vec<Diagnostic> {
+        check_keyword_duplicates(&c.keywords, "catalog")
+    }
+}
+
+struct CatalogIcon;
+impl Rule for CatalogIcon {
+    fn id(&self) -> &'static str {
+        rule::ICON_MISSING
+    }
+    fn scope(&self) -> Scope {
+        Scope::Catalog
+    }
+    fn check_catalog(&self, c: &CatalogIr) -> Vec<Diagnostic> {
+        check_icon_missing(&c.icon, &c.provenance.source_path, "catalog")
+    }
+}
+
 // --- plugin -----------------------------------------------------------------
 
 struct PluginManifest;
@@ -218,6 +255,69 @@ impl Rule for PluginManifest {
         check_name(&p.name, "plugin", &mut d);
         check_version(&p.version, &mut d);
         d
+    }
+}
+
+struct PluginKeywords;
+impl Rule for PluginKeywords {
+    fn id(&self) -> &'static str {
+        rule::KEYWORD_DUPLICATE
+    }
+    fn scope(&self) -> Scope {
+        Scope::Plugin
+    }
+    fn check_plugin(&self, p: &PluginIr) -> Vec<Diagnostic> {
+        check_keyword_duplicates(&p.keywords, "plugin")
+    }
+}
+
+struct PluginIcon;
+impl Rule for PluginIcon {
+    fn id(&self) -> &'static str {
+        rule::ICON_MISSING
+    }
+    fn scope(&self) -> Scope {
+        Scope::Plugin
+    }
+    fn check_plugin(&self, p: &PluginIr) -> Vec<Diagnostic> {
+        check_icon_missing(&p.icon, &p.provenance.source_path, "plugin")
+    }
+}
+
+/// Case-insensitive duplicate check for `keywords`, shared by the catalog and
+/// plugin scopes (same rule id, different node types — see
+/// [`rule::KEYWORD_DUPLICATE`]). A duplicate is a warning only: the manifest
+/// parser already accepts them (Task A1 rejects empty/control/over-cap
+/// keywords, not dups).
+fn check_keyword_duplicates(keywords: &[String], what: &str) -> Vec<Diagnostic> {
+    let mut seen = HashSet::new();
+    let mut d = Vec::new();
+    for k in keywords {
+        if !seen.insert(k.to_lowercase()) {
+            d.push(Diagnostic::warning(
+                rule::KEYWORD_DUPLICATE,
+                format!("{what} keyword `{k}` is a case-insensitive duplicate"),
+            ));
+        }
+    }
+    d
+}
+
+/// `icon`, when set, must resolve to a file that exists under the artifact
+/// root — shared by the catalog and plugin scopes (see [`rule::ICON_MISSING`]).
+/// Path SHAPE is already validated by the strict manifest parser at load
+/// time; this checks only EXISTENCE.
+fn check_icon_missing(icon: &Option<String>, root: &Path, what: &str) -> Vec<Diagnostic> {
+    let Some(path) = icon else {
+        return Vec::new();
+    };
+    if root.join(path).is_file() {
+        Vec::new()
+    } else {
+        vec![Diagnostic::warning(
+            rule::ICON_MISSING,
+            format!("{what} icon `{path}` does not exist under the artifact root"),
+        )]
     }
 }
 
@@ -1441,5 +1541,62 @@ mod tests {
         assert_eq!(d[0].rule_id, rule::HOOKS_SPEC);
         assert_eq!(d[0].severity, Severity::Warning);
         assert!(d[0].message.contains("hooks/hooks.json"));
+    }
+
+    // --- keyword-duplicate / icon-missing rules -------------------------------
+
+    #[test]
+    fn lint_warns_on_duplicate_keywords() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
+        p.keywords = vec!["auth".to_owned(), "Auth".to_owned()];
+        let d = run_plugin(p);
+        assert!(has(&d, rule::KEYWORD_DUPLICATE));
+    }
+
+    #[test]
+    fn lint_warns_on_missing_icon_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
+        p.icon = Some("assets/nope.png".to_owned());
+        let d = run_plugin(p);
+        assert!(has(&d, rule::ICON_MISSING));
+    }
+
+    #[test]
+    fn icon_missing_is_silent_when_file_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("assets")).unwrap();
+        fs::write(tmp.path().join("assets/x.png"), b"png").unwrap();
+        let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
+        p.icon = Some("assets/x.png".to_owned());
+        let d = run_plugin(p);
+        assert!(!has(&d, rule::ICON_MISSING));
+    }
+
+    #[test]
+    fn parse_plugin_populates_keywords_and_icon_from_toml() {
+        // Proves the parse.rs wiring (not just the rule): a real
+        // tome-plugin.toml with `keywords`/`icon` set must reach the lint IR
+        // with those values populated, not the Task-B1 compile-fallout
+        // hardcoded empties.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("tome-plugin.toml"),
+            r#"
+name = "p"
+version = "1.0.0"
+keywords = ["a", "b"]
+icon = "assets/x.png"
+"#,
+        )
+        .unwrap();
+
+        let artifact = crate::authoring::lint::parse::parse_artifact(tmp.path()).unwrap();
+        let Artifact::Plugin(p) = artifact else {
+            panic!("expected Artifact::Plugin");
+        };
+        assert_eq!(p.keywords, vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(p.icon.as_deref(), Some("assets/x.png"));
     }
 }

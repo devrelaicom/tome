@@ -164,13 +164,13 @@ fn parse_catalog(ur: &UntrustedRoot) -> Result<CatalogIr, TomeError> {
         description,
         owner,
         plugins,
-        keywords: Vec::new(),
+        keywords: str_array_field(value.as_ref(), "keywords"),
         homepage: None,
         repository: None,
         bugs: None,
         documentation: None,
         display_name: None,
-        icon: None,
+        icon: opt_str_field(value.as_ref(), "icon"),
         provenance: Provenance::local("tome", ur.root().to_path_buf()),
         diagnostics,
     })
@@ -256,13 +256,13 @@ fn parse_plugin(ur: &UntrustedRoot) -> Result<PluginIr, TomeError> {
         description,
         author,
         license,
-        keywords: Vec::new(),
+        keywords: str_array_field(value.as_ref(), "keywords"),
         homepage: None,
         repository: None,
         bugs: None,
         documentation: None,
         display_name: None,
-        icon: None,
+        icon: opt_str_field(value.as_ref(), "icon"),
         contributors: Vec::new(),
         entries,
         mcp_servers: Vec::new(),
@@ -442,6 +442,24 @@ fn opt_str_field(value: Option<&toml::Value>, key: &str) -> Option<String> {
         .and_then(|v| v.get(key))
         .and_then(|v| v.as_str())
         .map(str::to_owned)
+}
+
+/// Lenient `keywords`-array reader: parses the TOML value as an array of
+/// strings, silently skipping any non-string entry. This is the lenient
+/// lint-read path (distinct from the strict manifest parser, which rejects a
+/// malformed manifest outright) — a bad entry here is data for a rule to
+/// flag, not a parse abort.
+fn str_array_field(value: Option<&toml::Value>, key: &str) -> Vec<String> {
+    value
+        .and_then(|v| v.get(key))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_owner(value: Option<&toml::Value>) -> Owner {
