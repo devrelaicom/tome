@@ -597,6 +597,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.19](https://github.com/devrelaicom/tome/compare/v0.7.18...v0.7.19) - 2026-07-16
+
+### Added
+
+- *(mcp)* accept a URI in get_skill (path / name conventions / bare name) ([#551](https://github.com/devrelaicom/tome/pull/551))
+
 ## [0.7.18](https://github.com/devrelaicom/tome/compare/v0.7.17...v0.7.18) - 2026-07-10
 
 ### Added
