@@ -444,6 +444,7 @@ fn agents_absent_from_search() {
             "code-reviewer",
             "A non-searchable agent.",
             None,
+            &[],
         ))
         .expect("embed query");
     let hits = knn(&conn, "global", &query_vec, 50, &QueryFilters::default()).expect("knn");

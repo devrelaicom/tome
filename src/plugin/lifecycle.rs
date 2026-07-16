@@ -1817,7 +1817,7 @@ mod tests {
         let beta = snap.iter().find(|(n, _, _)| n == "beta").unwrap();
         assert_eq!(
             beta.1,
-            crate::index::skills::content_hash("beta", "updated second", None)
+            crate::index::skills::content_hash("beta", "updated second", None, &[])
         );
     }
 

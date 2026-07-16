@@ -320,8 +320,8 @@ fn enable_synchronises_both_kinds_into_workspace_skills_junction() {
 #[test]
 fn when_to_use_contributes_to_embedding_text() {
     use tome::index::skills::embedding_text;
-    let with = embedding_text("foo", "desc", Some("Use it well"));
-    let without = embedding_text("foo", "desc", None);
+    let with = embedding_text("foo", "desc", Some("Use it well"), &[]);
+    let without = embedding_text("foo", "desc", None, &[]);
     assert!(
         with.contains("When to use: Use it well"),
         "embedding_text must include the `When to use:` line when present; got {with:?}",
@@ -336,9 +336,9 @@ fn when_to_use_contributes_to_embedding_text() {
 #[test]
 fn content_hash_invalidates_when_when_to_use_changes() {
     use tome::index::skills::content_hash;
-    let a = content_hash("foo", "desc", None);
-    let b = content_hash("foo", "desc", Some("Use it well"));
-    let c = content_hash("foo", "desc", Some("Different guidance"));
+    let a = content_hash("foo", "desc", None, &[]);
+    let b = content_hash("foo", "desc", Some("Use it well"), &[]);
+    let c = content_hash("foo", "desc", Some("Different guidance"), &[]);
     assert_ne!(a, b, "adding when_to_use must change content_hash");
     assert_ne!(b, c, "changing when_to_use must change content_hash");
 }

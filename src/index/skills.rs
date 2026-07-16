@@ -124,31 +124,54 @@ pub struct ReindexSummary {
 /// ```
 ///
 /// The "When to use:" line + preceding blank line appear only when
-/// `when_to_use` is non-empty. Two entries with the same composition
-/// (name + description + when_to_use) produce the same hash, the
-/// condition under which FR-006 / FR-032 perform a no-op refresh.
+/// `when_to_use` is non-empty. A plugin's `keywords` widen the composition
+/// further still, appended after the `when_to_use` segment:
 ///
-/// Pre-Phase-5 callers that omit `when_to_use` (pass `None`) produce the
-/// historical `name + "\n\n" + description` shape — so existing rows
-/// migrated forward via the v2→v3 schema migration keep their hashes
-/// stable until they're reindexed with a frontmatter that now declares
-/// `when_to_use`.
-pub fn content_hash(name: &str, description: &str, when_to_use: Option<&str>) -> String {
+/// ```text
+/// Keywords: {keywords joined by ", "}
+/// ```
+///
+/// appearing only when `keywords` is non-empty. Two entries with the same
+/// composition (name + description + when_to_use + keywords) produce the
+/// same hash, the condition under which FR-006 / FR-032 perform a no-op
+/// refresh.
+///
+/// Callers that omit `when_to_use` (pass `None`) AND pass an empty
+/// `keywords` slice produce the historical `name + "\n\n" + description`
+/// shape byte-for-byte — so existing rows keep their hashes stable until
+/// they're reindexed with a frontmatter that now declares `when_to_use`
+/// or `keywords`.
+pub fn content_hash(
+    name: &str,
+    description: &str,
+    when_to_use: Option<&str>,
+    keywords: &[String],
+) -> String {
     let mut hasher = Sha256::new();
-    let text = embedding_text(name, description, when_to_use);
+    let text = embedding_text(name, description, when_to_use, keywords);
     hasher.update(text.as_bytes());
     hex::encode(hasher.finalize())
 }
 
 /// Embedding text per [`content_hash`]. Same composition function so the
 /// embedder sees exactly the bytes whose digest we stored.
-pub fn embedding_text(name: &str, description: &str, when_to_use: Option<&str>) -> String {
-    match when_to_use {
+pub fn embedding_text(
+    name: &str,
+    description: &str,
+    when_to_use: Option<&str>,
+    keywords: &[String],
+) -> String {
+    let mut text = match when_to_use {
         Some(wtu) if !wtu.is_empty() => {
             format!("{name}\n\n{description}\n\nWhen to use: {wtu}")
         }
         _ => format!("{name}\n\n{description}"),
+    };
+    if !keywords.is_empty() {
+        text.push_str("\n\nKeywords: ");
+        text.push_str(&keywords.join(", "));
     }
+    text
 }
 
 fn now_rfc3339() -> String {
@@ -852,10 +875,13 @@ where
     if pending.kind == EntryKind::Agent {
         return Ok(None);
     }
+    // `&[]`: `PendingSkill` has no `keywords` field yet — a later change
+    // wires the plugin's resolved keywords through here.
     let vector = embed(&embedding_text(
         &pending.name,
         &pending.description,
         pending.when_to_use.as_deref(),
+        &[],
     ))?;
     Ok(Some(vector))
 }
@@ -910,6 +936,7 @@ where
             &skill.name,
             &skill.description,
             skill.when_to_use.as_deref(),
+            &[],
         );
 
         // Phase 5: identity includes `kind` — same-name entries across
@@ -1094,6 +1121,7 @@ where
             &skill.name,
             &skill.description,
             skill.when_to_use.as_deref(),
+            &[],
         );
 
         let skill_id = match existing.remove(&(skill.kind, skill.name.clone())) {
@@ -1428,6 +1456,22 @@ mod tests {
     use super::*;
     use crate::index::{MetaSeed, OpenOptions, open};
     use tempfile::TempDir;
+
+    #[test]
+    fn embedding_text_is_byte_identical_with_no_keywords() {
+        // The critical backward-compat invariant: empty keywords MUST reproduce
+        // the historical output exactly, so keyword-less plugins never re-embed.
+        let with = embedding_text("n", "d", Some("w"), &[]);
+        assert_eq!(with, "n\n\nd\n\nWhen to use: w");
+        let without_wtu = embedding_text("n", "d", None, &[]);
+        assert_eq!(without_wtu, "n\n\nd");
+    }
+
+    #[test]
+    fn embedding_text_appends_keywords_when_present() {
+        let t = embedding_text("n", "d", None, &["auth".into(), "oauth".into()]);
+        assert_eq!(t, "n\n\nd\n\nKeywords: auth, oauth");
+    }
 
     fn seed() -> MetaSeed {
         MetaSeed {

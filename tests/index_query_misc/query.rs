@@ -167,7 +167,7 @@ fn knn_top_one_matches_self_embedded_skill() {
     // so distance to its own row is ~0.
     let target_name = "skill-a";
     let target_description = "Well-formed skill that documents how to make alpha widgets shine.";
-    let query_text = embedding_text(target_name, target_description, None);
+    let query_text = embedding_text(target_name, target_description, None, &[]);
     let query_vec = embedder.embed(&query_text).unwrap();
 
     let hits = knn(&conn, "global", &query_vec, 10, &QueryFilters::default()).unwrap();
@@ -344,7 +344,7 @@ fn run_with_deps_returns_scored_results_without_reranker() {
 
     let target_name = "skill-a";
     let target_description = "Well-formed skill that documents how to make alpha widgets shine.";
-    let query_text = embedding_text(target_name, target_description, None);
+    let query_text = embedding_text(target_name, target_description, None, &[]);
 
     let deps = QueryDeps {
         paths: &env.paths,
@@ -485,7 +485,7 @@ fn run_with_deps_strict_reports_applied_floor() {
 
     let target_name = "skill-a";
     let target_description = "Well-formed skill that documents how to make alpha widgets shine.";
-    let query_text = embedding_text(target_name, target_description, None);
+    let query_text = embedding_text(target_name, target_description, None, &[]);
 
     let mut args = args_for(&query_text, 5);
     args.strict = true;
@@ -524,7 +524,7 @@ fn run_with_deps_strict_default_floor_is_reported_for_cosine() {
 
     let target_name = "skill-a";
     let target_description = "Well-formed skill that documents how to make alpha widgets shine.";
-    let query_text = embedding_text(target_name, target_description, None);
+    let query_text = embedding_text(target_name, target_description, None, &[]);
 
     let mut args = args_for(&query_text, 5);
     args.strict = true;
