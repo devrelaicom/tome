@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::TomeError;
 use crate::index::skills;
+use crate::index::workspace_catalogs;
 use crate::paths::Paths;
 
 /// One candidate interpretation of a URI, to be resolved against the index.
@@ -212,6 +213,12 @@ fn body_matches_target(
         }
     }
 
+    // `body_norm` here is the lexically-normalized `body_path`, not a
+    // re-canonicalized one — deliberately. `resolve_path` (this function's
+    // only caller) already skips symlinked bodies via `is_symlinked` before
+    // calling here, so by the time we get `body_path` it has no symlink
+    // components left to resolve; lexical normalization is sufficient and
+    // avoids a redundant filesystem round-trip.
     forms.iter().any(|f| f == target_norm) || target_canon.is_some_and(|tc| tc == body_norm)
 }
 
@@ -258,14 +265,24 @@ fn resolve_path(
         }
         let plugin_root =
             skills::plugin_root_dir(conn, paths, workspace_name, &record.catalog, &record.plugin)?;
-        let catalog_root = plugin_root.parent();
+        // The catalog root must come from `resolve_catalog_path`, NOT from
+        // `plugin_root.parent()`: `skills::plugin_root_dir` computes
+        // `plugin_root = catalog_path.join(&decl.source)`, and a catalog
+        // manifest's `source` (see `catalog::manifest::validate_source`) may
+        // be a multi-segment relative path (e.g. `vendor/plugin-x`). For
+        // such a plugin, `plugin_root.parent()` yields an intermediate
+        // directory (e.g. `<catalog_path>/vendor`), not the true catalog
+        // root — which would silently break the catalog-relative
+        // equivalence forms below.
+        let catalog_root =
+            workspace_catalogs::resolve_catalog_path(conn, paths, workspace_name, &record.catalog)?;
 
         if body_matches_target(
             &target_norm,
             target_canon.as_deref(),
             &body_path,
             &plugin_root,
-            catalog_root,
+            Some(&catalog_root),
         ) {
             out.push(ResolvedEntry { record, body_path });
         }
@@ -520,5 +537,27 @@ mod tests {
 
         assert!(is_symlinked(&link));
         assert!(!is_symlinked(&real));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_symlinked_true_for_regular_file_under_symlinked_ancestor_dir() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real_dir = tmp.path().join("real_dir");
+        std::fs::create_dir(&real_dir).unwrap();
+        let leaf = real_dir.join("leaf.txt");
+        std::fs::write(&leaf, "hi").unwrap();
+
+        let linked_dir = tmp.path().join("linked_dir");
+        symlink(&real_dir, &linked_dir).unwrap();
+        let leaf_via_link = linked_dir.join("leaf.txt");
+
+        // `leaf_via_link` is itself a regular file (not a symlink), but one
+        // of its ancestors (`linked_dir`) is a symlink — `is_symlinked`
+        // must still catch that.
+        assert!(!leaf_via_link.symlink_metadata().unwrap().is_symlink());
+        assert!(is_symlinked(&leaf_via_link));
     }
 }
