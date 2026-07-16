@@ -51,6 +51,21 @@ search-then-load flow:
   when the host's file tool can't reach a path). Inlining is byte-capped per file
   and in total, so binary, oversized, or budget-exceeding resources are skipped —
   their paths still appear in `resources` for the agent to fetch itself.
+  Instead of the `(catalog, plugin, name)` triple you may address the entry with
+  a single `uri` — an absolute or relative path to a `SKILL.md` (or its
+  containing directory), a `<plugin>:<skill>` or `<catalog>:<plugin>:<skill>`
+  name (the delimiter may be `:`, `__`, or `_`), or a bare entry name. Provide
+  **either** the full triple **or** `uri`, never both. A `uri` always resolves
+  back to an enabled, indexed entry, so it grants nothing the triple doesn't; a
+  unique match returns the same body (or `metadata_only`) response, and an
+  optional `kind` narrows which kinds it may match (`skill` and `command` by
+  default). When a `uri` is ambiguous — a `<plugin>:<skill>` or bare name that
+  exists in more than one catalog — the response carries no body: instead a
+  `matches` array lists each hit's identity, path, and full description (the
+  preview, kept body-free to preserve context), paired index-for-index with a
+  `next_actions` array of ready-to-issue `get_skill` calls carrying the exact
+  `(catalog, plugin, name, kind)` for each match, so the agent disambiguates in
+  one follow-up.
 
 A `search_skills` result set is never a bare `[]` when it comes back empty or
 weak. The output always carries `corpus_size` (the scope-effective count of
