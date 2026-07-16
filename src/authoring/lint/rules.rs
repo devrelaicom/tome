@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use super::{Rule, Scope};
 use crate::authoring::ir::{CatalogIr, Diagnostic, EntryIr, Fix, Location, PluginIr};
 use crate::authoring::rewrite::{self, RewriteOptions, rewrite_body, rewrite_known_vars};
+use crate::authoring::untrusted::UntrustedRoot;
 use crate::catalog::manifest::looks_like_email;
 use crate::plugin::identity::{EntryKind, is_kebab, validate_segment};
 use crate::util::{ENTRY_BODY_MAX, bounded_read_to_string};
@@ -307,11 +308,20 @@ fn check_keyword_duplicates(keywords: &[String], what: &str) -> Vec<Diagnostic> 
 /// root — shared by the catalog and plugin scopes (see [`rule::ICON_MISSING`]).
 /// Path SHAPE is already validated by the strict manifest parser at load
 /// time; this checks only EXISTENCE.
+///
+/// `icon` is attacker/author-supplied TOML content, not a hardcoded literal
+/// (unlike e.g. `UnsupportedComponents`'s fixed dir names), so the existence
+/// check is routed through [`UntrustedRoot`] like every other read of the
+/// artifact tree: `UntrustedRoot::resolve` refuses a `..`/absolute/symlinked
+/// component before any stat, so an escaping `icon` path can never become a
+/// boolean existence oracle for content outside the root — it is simply
+/// reported as missing.
 fn check_icon_missing(icon: &Option<String>, root: &Path, what: &str) -> Vec<Diagnostic> {
     let Some(path) = icon else {
         return Vec::new();
     };
-    if root.join(path).is_file() {
+    let present = UntrustedRoot::open(root).is_ok_and(|ur| ur.is_file(Path::new(path.as_str())));
+    if present {
         Vec::new()
     } else {
         vec![Diagnostic::warning(
@@ -1572,6 +1582,25 @@ mod tests {
         p.icon = Some("assets/x.png".to_owned());
         let d = run_plugin(p);
         assert!(!has(&d, rule::ICON_MISSING));
+    }
+
+    #[test]
+    fn icon_missing_guards_against_path_traversal() {
+        // The plugin root is a subdirectory; the traversal target sits
+        // directly above it and DOES exist on disk — proving the assertion
+        // below is a real containment guard, not an accidental absence.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(tmp.path().join("outside.png"), b"png").unwrap();
+
+        let mut p = plugin("p", "1.0.0", plugin_dir, vec![]);
+        p.icon = Some("../outside.png".to_owned());
+        let d = run_plugin(p);
+        assert!(
+            has(&d, rule::ICON_MISSING),
+            "an escaping icon path must be treated as missing (never stat'd outside the root)"
+        );
     }
 
     #[test]
