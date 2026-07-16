@@ -152,6 +152,20 @@ fn has_parent_dir_component(p: &Path) -> bool {
 /// (Tome's cache dir, a symlinked $HOME, an NFS mount) are trusted and NOT
 /// inspected — only the catalog-author-controlled subtree is guarded (FR-S-02).
 fn symlink_within_plugin(plugin_root: &Path, body_path: &Path) -> bool {
+    // `plugin_root`'s own final segment is catalog-author-controlled
+    // (`catalog_path.join(plugin|source)`), so it is inside the FR-S-02
+    // threat surface and must be checked. `symlink_metadata` here lstats the
+    // FULL `plugin_root` path — the OS resolves any symlinked ANCESTOR of
+    // `plugin_root` normally, and only the final component is not followed —
+    // so this flags only when `plugin_root`'s own final segment is a
+    // symlink. It cannot reintroduce the trusted-ancestor over-rejection the
+    // scoping fix in the containing function was written to solve.
+    if std::fs::symlink_metadata(plugin_root)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return true;
+    }
     let Ok(rel) = body_path.strip_prefix(plugin_root) else {
         // body not under plugin_root — conservatively check the leaf only.
         return std::fs::symlink_metadata(body_path)
@@ -691,6 +705,34 @@ mod tests {
         let linked_skills_dir = plugin_root.join("skills");
         symlink(&real_skills_dir, &linked_skills_dir).unwrap();
         let body = linked_skills_dir.join("foo").join("SKILL.md");
+
+        assert!(symlink_within_plugin(&plugin_root, &body));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_within_plugin_true_for_symlinked_plugin_root_itself() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // A real target directory with a real body path beneath it — mirrors
+        // a legitimate plugin's on-disk layout.
+        let real_target = tmp.path().join("real_target");
+        let foo_dir = real_target.join("skills").join("foo");
+        std::fs::create_dir_all(&foo_dir).unwrap();
+        std::fs::write(foo_dir.join("SKILL.md"), "hi").unwrap();
+
+        // `plugin_root` itself (its OWN final segment, not an ancestor above
+        // it) is a symlink — e.g. a flat/manifest-less catalog layout where
+        // `catalog_path.join(plugin)` is `myplugin -> /etc`. The old
+        // all-ancestors `is_symlinked` caught this; the rescoped
+        // `symlink_within_plugin`, which only lstats components pushed BELOW
+        // `plugin_root`, must explicitly check `plugin_root` itself too.
+        let plugin_root = tmp.path().join("plugin_root");
+        symlink(&real_target, &plugin_root).unwrap();
+
+        let body = plugin_root.join("skills").join("foo").join("SKILL.md");
 
         assert!(symlink_within_plugin(&plugin_root, &body));
     }
