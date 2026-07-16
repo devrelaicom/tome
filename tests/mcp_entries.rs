@@ -124,5 +124,7 @@ mod substitution_env;
 mod substitution_pipeline;
 #[path = "mcp_entries/substitution_skeleton.rs"]
 mod substitution_skeleton;
+#[path = "mcp_entries/uri_resolution.rs"]
+mod uri_resolution;
 #[path = "mcp_entries/uri_resolver_int.rs"]
 mod uri_resolver_int;

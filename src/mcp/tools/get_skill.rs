@@ -448,144 +448,201 @@ const MAX_INLINE_TOTAL_BYTES: u64 = 1024 * 1024;
 pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpError> {
     let started = Instant::now();
 
-    // TEMPORARY bridge (removed in Task 7): keep the triple path working while
-    // Input becomes optional. Task 7 replaces this with Request dispatch.
-    let (catalog, plugin, name, kind) = match input.into_request()? {
+    let hit = match input.into_request()? {
         Request::Triple {
             catalog,
             plugin,
             name,
             kind,
-        } => (catalog, plugin, name, kind),
-        Request::Uri { .. } => {
-            return Err(McpError::invalid_params(
-                "uri resolution not yet wired (implemented in Task 7)",
-                None,
-            ));
-        }
-    };
-
-    let paths = state.paths.clone();
-    let scope = state.scope.scope.clone();
-    let lookup_catalog = catalog.clone();
-    let lookup_plugin = plugin.clone();
-    let lookup_name = name.clone();
-
-    let lookup = tokio::task::spawn_blocking(move || {
-        lookup_entry(
-            &paths,
-            &scope,
-            &lookup_catalog,
-            &lookup_plugin,
-            kind,
-            &lookup_name,
-        )
-    })
-    .await
-    .map_err(|e| {
-        internal(
-            &input,
-            started,
-            format!("lookup join: {e}"),
-            ErrorCategory::Internal,
-        )
-    })?
-    .map_err(|e| {
-        // C-L1: best-effort MCP-surface `tome.error` (closed category only),
-        // with this session's `calling_harness`. Never alters the returned
-        // `McpError`.
-        crate::mcp::enqueue_tool_error(&state, e.category());
-        internal(&input, started, e.to_string(), e.category())
-    })?;
-
-    let hit = match lookup {
-        LookupOutcome::Found(hit) => hit,
-        LookupOutcome::NotFound {
-            which: crate::mcp::tools::common::NotFound::UnknownCatalog,
-            ..
         } => {
-            return Err(emit_error(
-                &input,
-                started,
-                "unknown_catalog",
-                McpError::invalid_params(
-                    format!("catalog `{catalog}` is not enabled in the resolved scope"),
-                    Some(error_data_with_code(
+            let paths = state.paths.clone();
+            let scope = state.scope.scope.clone();
+            let lookup_catalog = catalog.clone();
+            let lookup_plugin = plugin.clone();
+            let lookup_name = name.clone();
+
+            let lookup = tokio::task::spawn_blocking(move || {
+                lookup_entry(
+                    &paths,
+                    &scope,
+                    &lookup_catalog,
+                    &lookup_plugin,
+                    kind,
+                    &lookup_name,
+                )
+            })
+            .await
+            .map_err(|e| {
+                internal(
+                    &input,
+                    started,
+                    format!("lookup join: {e}"),
+                    ErrorCategory::Internal,
+                )
+            })?
+            .map_err(|e| {
+                // C-L1: best-effort MCP-surface `tome.error` (closed category only),
+                // with this session's `calling_harness`. Never alters the returned
+                // `McpError`.
+                crate::mcp::enqueue_tool_error(&state, e.category());
+                internal(&input, started, e.to_string(), e.category())
+            })?;
+
+            match lookup {
+                LookupOutcome::Found(hit) => hit,
+                LookupOutcome::NotFound {
+                    which: crate::mcp::tools::common::NotFound::UnknownCatalog,
+                    ..
+                } => {
+                    return Err(emit_error(
+                        &input,
+                        started,
                         "unknown_catalog",
-                        ErrorCategory::EntryNotFound,
-                        &[("catalog", json!(catalog))],
-                    )),
-                ),
-            ));
-        }
-        LookupOutcome::NotFound {
-            which: crate::mcp::tools::common::NotFound::UnknownPlugin,
-            ..
-        } => {
-            return Err(emit_error(
-                &input,
-                started,
-                "unknown_plugin",
-                McpError::invalid_params(
-                    format!("plugin `{catalog}/{plugin}` is not enabled in the resolved scope"),
-                    Some(error_data_with_code(
+                        McpError::invalid_params(
+                            format!("catalog `{catalog}` is not enabled in the resolved scope"),
+                            Some(error_data_with_code(
+                                "unknown_catalog",
+                                ErrorCategory::EntryNotFound,
+                                &[("catalog", json!(catalog))],
+                            )),
+                        ),
+                    ));
+                }
+                LookupOutcome::NotFound {
+                    which: crate::mcp::tools::common::NotFound::UnknownPlugin,
+                    ..
+                } => {
+                    return Err(emit_error(
+                        &input,
+                        started,
                         "unknown_plugin",
-                        ErrorCategory::EntryNotFound,
-                        &[("catalog", json!(catalog)), ("plugin", json!(plugin))],
-                    )),
-                ),
-            ));
-        }
-        LookupOutcome::NotFound {
-            which: crate::mcp::tools::common::NotFound::UnknownSkill,
-            available,
-        } => {
-            // #333: catalog + plugin resolved but the entry name did not (a
-            // mistyped exact name OR a glob that matched zero). ENRICH `data`
-            // with the enabled `(name, kind)` list for `(catalog, plugin)`.
-            return Err(emit_error(
-                &input,
-                started,
-                "unknown_skill",
-                McpError::invalid_params(
-                    format!(
-                        "skill `{catalog}/{plugin}/{name}` is not enabled in the resolved scope",
-                    ),
-                    Some(error_data_with_code(
+                        McpError::invalid_params(
+                            format!(
+                                "plugin `{catalog}/{plugin}` is not enabled in the resolved scope"
+                            ),
+                            Some(error_data_with_code(
+                                "unknown_plugin",
+                                ErrorCategory::EntryNotFound,
+                                &[("catalog", json!(catalog)), ("plugin", json!(plugin))],
+                            )),
+                        ),
+                    ));
+                }
+                LookupOutcome::NotFound {
+                    which: crate::mcp::tools::common::NotFound::UnknownSkill,
+                    available,
+                } => {
+                    // #333: catalog + plugin resolved but the entry name did not (a
+                    // mistyped exact name OR a glob that matched zero). ENRICH `data`
+                    // with the enabled `(name, kind)` list for `(catalog, plugin)`.
+                    return Err(emit_error(
+                        &input,
+                        started,
                         "unknown_skill",
-                        ErrorCategory::EntryNotFound,
-                        &[
-                            ("catalog", json!(catalog)),
-                            ("plugin", json!(plugin)),
-                            ("name", json!(name)),
-                            ("available", available_json(&available)),
-                        ],
-                    )),
-                ),
-            ));
-        }
-        LookupOutcome::AmbiguousGlob { candidates } => {
-            return Err(emit_error(
-                &input,
-                started,
-                "ambiguous_name",
-                McpError::invalid_params(
-                    format!(
-                        "name pattern `{name}` matched {} entries in `{catalog}/{plugin}`; pick one",
-                        candidates.len(),
-                    ),
-                    Some(error_data_with_code(
+                        McpError::invalid_params(
+                            format!(
+                                "skill `{catalog}/{plugin}/{name}` is not enabled in the resolved scope",
+                            ),
+                            Some(error_data_with_code(
+                                "unknown_skill",
+                                ErrorCategory::EntryNotFound,
+                                &[
+                                    ("catalog", json!(catalog)),
+                                    ("plugin", json!(plugin)),
+                                    ("name", json!(name)),
+                                    ("available", available_json(&available)),
+                                ],
+                            )),
+                        ),
+                    ));
+                }
+                LookupOutcome::AmbiguousGlob { candidates } => {
+                    return Err(emit_error(
+                        &input,
+                        started,
                         "ambiguous_name",
-                        ErrorCategory::EntryNotFound,
-                        &[
-                            ("catalog", json!(catalog)),
-                            ("plugin", json!(plugin)),
-                            ("name", json!(name)),
-                            ("candidates", available_json(&candidates)),
-                        ],
-                    )),
-                ),
-            ));
+                        McpError::invalid_params(
+                            format!(
+                                "name pattern `{name}` matched {} entries in `{catalog}/{plugin}`; pick one",
+                                candidates.len(),
+                            ),
+                            Some(error_data_with_code(
+                                "ambiguous_name",
+                                ErrorCategory::EntryNotFound,
+                                &[
+                                    ("catalog", json!(catalog)),
+                                    ("plugin", json!(plugin)),
+                                    ("name", json!(name)),
+                                    ("candidates", available_json(&candidates)),
+                                ],
+                            )),
+                        ),
+                    ));
+                }
+            }
+        }
+        Request::Uri { uri, kinds } => {
+            let paths = state.paths.clone();
+            let scope_name = state.scope.scope.name().as_str().to_owned();
+            let uri_for_task = uri.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::mcp::tools::uri_resolver::resolve(&paths, &scope_name, &uri_for_task, &kinds)
+            })
+            .await
+            .map_err(|e| {
+                internal(
+                    &input,
+                    started,
+                    format!("uri resolve join: {e}"),
+                    ErrorCategory::Internal,
+                )
+            })?
+            .map_err(|e| {
+                crate::mcp::enqueue_tool_error(&state, e.category());
+                internal(&input, started, e.to_string(), e.category())
+            })?;
+
+            match outcome {
+                crate::mcp::tools::uri_resolver::ResolveOutcome::One(entry) => LookupHit {
+                    catalog: entry.record.catalog.clone(),
+                    plugin: entry.record.plugin.clone(),
+                    body_path: entry.body_path,
+                    kind: entry.record.kind,
+                    name: entry.record.name.clone(),
+                    description: entry.record.description,
+                    when_to_use: entry.record.when_to_use,
+                    plugin_version: entry.record.plugin_version,
+                    user_invocable: entry.record.user_invocable,
+                },
+                crate::mcp::tools::uri_resolver::ResolveOutcome::Many(matches) => {
+                    return handle_multi_match(input, started, matches).await;
+                }
+                crate::mcp::tools::uri_resolver::ResolveOutcome::NoMatch { available } => {
+                    let available: Vec<AvailableEntry> = available
+                        .into_iter()
+                        .map(|r| AvailableEntry {
+                            name: r.name,
+                            kind: r.kind,
+                        })
+                        .collect();
+                    return Err(emit_error(
+                        &input,
+                        started,
+                        "unknown_skill",
+                        McpError::invalid_params(
+                            format!("uri `{uri}` did not resolve to an enabled entry"),
+                            Some(error_data_with_code(
+                                "unknown_skill",
+                                ErrorCategory::EntryNotFound,
+                                &[
+                                    ("uri", json!(uri)),
+                                    ("available", available_json(&available)),
+                                ],
+                            )),
+                        ),
+                    ));
+                }
+            }
         }
     };
 
@@ -940,6 +997,69 @@ async fn handle_body(
         prompt_name,
         matches: None,
         next_actions: None,
+    })
+}
+
+/// Assemble the multi-match `uri` response: previews + aligned next_actions.
+/// No body is read; the body-mode flags (`raw` / `include_resource_bodies`) and
+/// `metadata_only` are ignored — a multi-match short-circuits before either
+/// mode's tail runs.
+async fn handle_multi_match(
+    input: Input,
+    started: Instant,
+    matches: Vec<crate::mcp::tools::uri_resolver::ResolvedEntry>,
+) -> Result<Output, McpError> {
+    let items: Vec<MatchItem> = matches
+        .iter()
+        .map(|e| MatchItem {
+            catalog: e.record.catalog.clone(),
+            plugin: e.record.plugin.clone(),
+            name: e.record.name.clone(),
+            kind: e.record.kind,
+            path: e.body_path.display().to_string(),
+            description: e.record.description.clone(),
+        })
+        .collect();
+    let next_actions: Vec<NextAction> = matches
+        .iter()
+        .map(|e| NextAction {
+            tool: "get_skill".to_owned(),
+            arguments: NextActionArgs {
+                catalog: e.record.catalog.clone(),
+                plugin: e.record.plugin.clone(),
+                name: e.record.name.clone(),
+                kind: e.record.kind,
+            },
+        })
+        .collect();
+
+    info!(
+        target: "tome::mcp::tools::get_skill",
+        uri = input.uri.as_deref().unwrap_or(""),
+        result = "multi_match",
+        match_count = items.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "call",
+    );
+
+    Ok(Output {
+        catalog: None,
+        plugin: None,
+        name: None,
+        kind: None,
+        path: None,
+        content: None,
+        resources_paths: None,
+        substitutions_applied: None,
+        resource_bodies: None,
+        description: None,
+        when_to_use: MetaWhenToUse::Absent,
+        plugin_version: None,
+        user_invocable: None,
+        resources: None,
+        prompt_name: None,
+        matches: Some(items),
+        next_actions: Some(next_actions),
     })
 }
 
