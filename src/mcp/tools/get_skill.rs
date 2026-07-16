@@ -846,7 +846,9 @@ async fn handle_body(
             };
             emit_post_resolution_error_telemetry(
                 &state,
-                &input,
+                &hit_catalog,
+                &hit_plugin,
+                &resolved_name,
                 attributed_plugin_version.clone(),
                 category,
             )
@@ -896,7 +898,9 @@ async fn handle_body(
                 let err = emit_error(&input, started, code, err);
                 emit_post_resolution_error_telemetry(
                     &state,
-                    &input,
+                    &hit_catalog,
+                    &hit_plugin,
+                    &resolved_name,
                     attributed_plugin_version.clone(),
                     category,
                 )
@@ -1586,18 +1590,25 @@ fn emit_error(input: &Input, started: Instant, code: &str, err: McpError) -> Mcp
 
 /// Co-M1 / FR-052: emit the POST-resolution telemetry for a full-body
 /// `get_skill` failure that occurred AFTER the entry row resolved.
+///
+/// `catalog` / `plugin` / `entry_name` are the RESOLVED identity from the
+/// `LookupHit` — not `input.catalog` / `input.plugin` / `input.name`, which
+/// are `None` on the `uri` path (the success paths in `handle_body` already
+/// attribute off the hit; this brings the error paths in line).
 async fn emit_post_resolution_error_telemetry(
     state: &Arc<McpState>,
-    input: &Input,
+    catalog: &str,
+    plugin: &str,
+    entry_name: &str,
     plugin_version: String,
     category: crate::error::ErrorCategory,
 ) {
     crate::mcp::enqueue_tool_error(state, category);
 
     let scope = state.scope.clone();
-    let catalog = input.catalog.clone().unwrap_or_default();
-    let plugin_name = input.plugin.clone().unwrap_or_default();
-    let entry_name = input.name.clone().unwrap_or_default();
+    let catalog = catalog.to_owned();
+    let plugin_name = plugin.to_owned();
+    let entry_name = entry_name.to_owned();
     let _ = tokio::task::spawn_blocking(move || {
         if let Some(catalog_id) = crate::telemetry::resolve_attribution(&scope, &catalog) {
             crate::telemetry::emit(crate::telemetry::event::AttributedError {

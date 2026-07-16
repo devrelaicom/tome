@@ -168,7 +168,7 @@ impl Server {
     ///
     /// Alternatively pass `uri` — a path to a SKILL.md (or its directory), a
     /// `<plugin>:<skill>` or `<catalog>:<plugin>:<skill>` name (delimiter `:`,
-    /// `_`, or `__`), or a bare name — INSTEAD of the triple; provide EITHER
+    /// `__`, or `_`), or a bare name — INSTEAD of the triple; provide EITHER
     /// `uri` OR the full triple, not both. An ambiguous `uri` returns
     /// `matches` (candidate identities + descriptions) and index-aligned
     /// `next_actions` (exact `get_skill` triples) rather than a body, so you
