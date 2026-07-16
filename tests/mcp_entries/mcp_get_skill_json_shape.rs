@@ -186,3 +186,48 @@ fn full_body_resources_is_a_flat_array_never_the_metadata_object() {
     // No metadata-object shape leaks in.
     let _unused: BTreeMap<String, Vec<String>> = BTreeMap::new();
 }
+
+/// Multi-match `uri` mode: every identity/body field is absent and only
+/// `matches` / `next_actions` are populated, appended LAST (after
+/// `prompt_name`).
+#[test]
+fn get_skill_multi_match_wire_shape() {
+    use tome::mcp::tools::get_skill::{MatchItem, NextAction, NextActionArgs};
+    let out = Output {
+        catalog: None,
+        plugin: None,
+        name: None,
+        kind: None,
+        path: None,
+        content: None,
+        resources_paths: None,
+        substitutions_applied: None,
+        resource_bodies: None,
+        description: None,
+        when_to_use: MetaWhenToUse::Absent,
+        plugin_version: None,
+        user_invocable: None,
+        resources: None,
+        prompt_name: None,
+        matches: Some(vec![MatchItem {
+            catalog: "acme".into(),
+            plugin: "plug".into(),
+            name: "foo".into(),
+            kind: EntryKind::Skill,
+            path: "/abs/SKILL.md".into(),
+            description: "d".into(),
+        }]),
+        next_actions: Some(vec![NextAction {
+            tool: "get_skill".into(),
+            arguments: NextActionArgs {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "foo".into(),
+                kind: EntryKind::Skill,
+            },
+        }]),
+    };
+    let json = serde_json::to_string(&out).unwrap();
+    let expected = r#"{"matches":[{"catalog":"acme","plugin":"plug","name":"foo","kind":"skill","path":"/abs/SKILL.md","description":"d"}],"next_actions":[{"tool":"get_skill","arguments":{"catalog":"acme","plugin":"plug","name":"foo","kind":"skill"}}]}"#;
+    assert_eq!(json, expected, "multi-match wire shape drift");
+}

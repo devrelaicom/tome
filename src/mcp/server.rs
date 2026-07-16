@@ -165,6 +165,14 @@ impl Server {
     }
 
     /// Fetch one entry by `(catalog, plugin, name)` — typically a triple returned by a prior `search_skills` call. By default returns the entry body with frontmatter stripped and `${TOME_*}` substitutions applied, plus the absolute paths of every sibling resource file. Pass `metadata_only: true` for the cheap middle tier — full description, `when_to_use` guidance, plugin version, user-invocable flag, and (for skills) a capped enumeration of adjacent files — WITHOUT reading or rendering the body. Use `kind` to disambiguate a name shared across skill/command/agent; `name` accepts a `*` wildcard that resolves a unique match (the error lists the available `(name, kind)` entries if it resolves nothing). In body mode, pass `raw: true` to preserve literal `${TOME_*}` tokens (for authoring/conversion) and `include_resource_bodies: true` to inline small text resources as `{ path, content }` (byte-capped per-file and in total).
+    ///
+    /// Alternatively pass `uri` — a path to a SKILL.md (or its directory), a
+    /// `<plugin>:<skill>` or `<catalog>:<plugin>:<skill>` name (delimiter `:`,
+    /// `_`, or `__`), or a bare name — INSTEAD of the triple; provide EITHER
+    /// `uri` OR the full triple, not both. An ambiguous `uri` returns
+    /// `matches` (candidate identities + descriptions) and index-aligned
+    /// `next_actions` (exact `get_skill` triples) rather than a body, so you
+    /// can pick one and call again.
     #[tool(name = "get_skill")]
     async fn get_skill(
         &self,
