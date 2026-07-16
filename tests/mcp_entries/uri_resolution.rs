@@ -3,9 +3,6 @@
 //! to an `unknown_skill` `invalid_params` envelope (no match) — driven
 //! through the REAL `get_skill::handle` via the in-process `McpHarness`.
 
-use std::path::PathBuf;
-
-use tome::embedding::stub::StubEmbedder;
 use tome::mcp::tools::get_skill;
 use tome::plugin::PluginId;
 use tome::plugin::identity::EntryKind;
@@ -13,11 +10,10 @@ use tome::plugin::lifecycle::{self, LifecycleDeps};
 use tome::workspace::{Scope, WorkspaceName};
 
 use crate::common::mcp_harness::{
-    McpHarness, StagedWorkspace, mcp_error_slug, open_index, seed_catalog_enrolment, write_plugin,
+    StagedWorkspace, mcp_error_slug, seed_catalog_enrolment, write_plugin,
 };
 use crate::common::{
-    config_with_catalog, fabricate_models, lifecycle_paths, stub_embedder_seed, stub_reranker_seed,
-    stub_summariser_seed,
+    config_with_catalog, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 
 const SKILL: &str = "---\nname: alpha\ndescription: A skill\n---\nBODY";
@@ -80,69 +76,41 @@ fn uri_plugin_name_resolves_when_unique() {
     assert!(out.content.is_some());
 }
 
-/// Stage a workspace whose catalog clone lives DIRECTLY at
-/// `paths.cache_dir_for(url)` — no `#[cfg(unix)]` symlink indirection. This
-/// deliberately does NOT reuse `StagedWorkspace::stage` /
-/// `seed_catalog_enrolment`: those symlink the content-addressed cache dir
-/// onto a separate on-disk `catalog_root`, and `uri_resolver::resolve_path`'s
-/// `is_symlinked` guard (FR-S-02, "reject a hostile catalog's symlinked
-/// SKILL.md") walks every ANCESTOR of a candidate body path — so it also
-/// trips on that symlinked cache dir itself, filtering every record out of
-/// path-candidate resolution before a match is even attempted. Building the
-/// plugin tree straight into the (non-symlinked) cache dir sidesteps that,
-/// so this test exercises the intended path-equivalence logic in
-/// `body_matches_target` rather than the symlink guard.
-fn stage_workspace_with_real_cache_dir(
-    skill_name: &str,
-    skill_body: &str,
-) -> (tempfile::TempDir, tome::paths::Paths, PathBuf, &'static str) {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_models(&paths);
-
-    const CATALOG_NAME: &str = "direct";
-    const PLUGIN_NAME: &str = "plug";
-    let url = format!("file://{}/direct-catalog-marker", tmp.path().display());
-    let cache_dir = paths.cache_dir_for(&url);
-    std::fs::create_dir_all(&cache_dir).unwrap();
-    write_plugin(&cache_dir, PLUGIN_NAME, &[(skill_name, skill_body)], &[]);
-
-    let conn = open_index(&paths);
-    tome::index::workspace_catalogs::insert(&conn, "global", CATALOG_NAME, &url, "main")
-        .expect("seed workspace_catalogs");
-    drop(conn);
-
-    let config = config_with_catalog(CATALOG_NAME, &cache_dir);
-    let embedder = StubEmbedder::new();
-    let scope = Scope(WorkspaceName::global());
-    let deps = LifecycleDeps {
-        paths: &paths,
-        scope: &scope,
-        config: &config,
-        embedder: &embedder,
-        embedder_seed: stub_embedder_seed(),
-        reranker_seed: stub_reranker_seed(),
-        summariser_seed: stub_summariser_seed(),
-        allow_model_download: false,
-    };
-    let id: PluginId = format!("{CATALOG_NAME}/{PLUGIN_NAME}").parse().unwrap();
-    lifecycle::enable(&id, &deps).expect("enable plugin");
-
-    (tmp, paths, cache_dir, PLUGIN_NAME)
-}
-
+/// Regression proof for the FR-S-02 symlink guard rescope: `StagedWorkspace`
+/// (`tests/common/mcp_harness.rs`) reaches its content-addressed cache dir
+/// via a symlinked ancestor (`seed_catalog_enrolment` symlinks
+/// `paths.cache_dir_for(url)` onto `catalog_root`) — the same shape as
+/// Tome's real layout on macOS, where `$HOME` itself is a symlink (CR-08,
+/// `src/workspace/resolution.rs:247-261`). Before the rescope,
+/// `uri_resolver::resolve_path`'s symlink guard walked every ANCESTOR of a
+/// candidate body path, so it rejected every entry via that trusted
+/// symlinked cache dir before a match was even attempted, and an
+/// absolute-path `uri` always fell through to `unknown_skill`. The guard now
+/// only inspects components strictly below `plugin_root`
+/// (`symlink_within_plugin`), so this standard fixture must resolve.
 #[test]
 fn uri_absolute_path_resolves() {
-    let (_tmp, paths, cache_dir, plugin_name) = stage_workspace_with_real_cache_dir("alpha", SKILL);
-    let h = McpHarness::new(&paths);
-    let body = cache_dir
-        .join(plugin_name)
-        .join("skills")
-        .join("alpha")
-        .join("SKILL.md");
+    let ws = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
+    let h = ws.harness();
+
+    // Learn the exact absolute body path `resolve_entry_body_path` computes
+    // (via a triple lookup) — for `StagedWorkspace` this is reached through
+    // the symlinked content-addressed cache dir, not `ws.plugin_dir()`'s
+    // real on-disk path. Feeding that literal path back in as `uri` mirrors
+    // how a client would round-trip a path it learned from a prior
+    // `get_skill` response, and exercises the guard's ancestor-symlink
+    // handling for real.
+    let by_triple = h
+        .call_get_skill(get_skill::Input::triple(
+            &ws.catalog_name,
+            &ws.plugin_name,
+            "alpha",
+        ))
+        .expect("triple resolves");
+    let body_path = by_triple.path.expect("triple response carries body path");
+
     let out = h
-        .call_get_skill(get_skill::Input::for_uri(body.display().to_string()))
+        .call_get_skill(get_skill::Input::for_uri(body_path))
         .expect("path resolves");
     assert_eq!(out.name.as_deref(), Some("alpha"));
 }

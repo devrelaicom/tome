@@ -147,18 +147,26 @@ fn has_parent_dir_component(p: &Path) -> bool {
         .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
-/// True when `p` is a symlink (or any of its existing ancestors is).
-/// Defence in depth against a hostile catalog committing a symlinked
-/// `SKILL.md`.
-fn is_symlinked(p: &Path) -> bool {
-    let mut cur = Some(p);
-    while let Some(c) = cur {
-        if let Ok(meta) = std::fs::symlink_metadata(c) {
-            if meta.file_type().is_symlink() {
-                return true;
-            }
+/// True if any path component strictly below `plugin_root` (down to and
+/// including `body_path`) is a symlink. Ancestors at/above `plugin_root`
+/// (Tome's cache dir, a symlinked $HOME, an NFS mount) are trusted and NOT
+/// inspected — only the catalog-author-controlled subtree is guarded (FR-S-02).
+fn symlink_within_plugin(plugin_root: &Path, body_path: &Path) -> bool {
+    let Ok(rel) = body_path.strip_prefix(plugin_root) else {
+        // body not under plugin_root — conservatively check the leaf only.
+        return std::fs::symlink_metadata(body_path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+    };
+    let mut cur = plugin_root.to_path_buf();
+    for comp in rel.components() {
+        cur.push(comp);
+        if std::fs::symlink_metadata(&cur)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
         }
-        cur = c.parent();
     }
     false
 }
@@ -208,15 +216,22 @@ fn body_matches_target(
 
     // `body_norm` here is the lexically-normalized `body_path`, not a
     // re-canonicalized one — deliberately. `resolve_path` (this function's
-    // only caller) already skips symlinked bodies via `is_symlinked` before
-    // calling here, so by the time we get `body_path` it has no symlink
-    // components left to resolve; lexical normalization is sufficient and
-    // avoids a redundant filesystem round-trip.
+    // only caller) already skips bodies with a symlink component AT OR
+    // BELOW `plugin_root` via `symlink_within_plugin` before calling here,
+    // so lexical normalization is sufficient for that catalog-author-
+    // controlled subtree. Trusted ancestors ABOVE `plugin_root` (Tome's
+    // cache dir, a symlinked $HOME, an NFS mount) may still be symlinks and
+    // are deliberately not resolved here either — a caller-supplied path
+    // built the same way `body_path` is built (via `plugin_root_dir`)
+    // matches lexically regardless; `target_canon` remains available as a
+    // fallback for callers that pass an already-resolved absolute path.
     forms.iter().any(|f| f == target_norm) || target_canon.is_some_and(|tc| tc == body_norm)
 }
 
 /// Resolve a filesystem `target` to enabled entries whose on-disk body
-/// matches, per [`body_matches_target`]. Symlinked bodies are skipped.
+/// matches, per [`body_matches_target`]. Bodies with a symlink component
+/// within the catalog-author-controlled plugin subtree are skipped
+/// (FR-S-02); trusted ancestors at/above `plugin_root` are not inspected.
 ///
 /// DB-backed end-to-end coverage (real `entries_for_workspace` +
 /// `resolve_entry_body_path` + the symlink skip) lives in [`resolve`]'s
@@ -226,7 +241,7 @@ fn body_matches_target(
 /// content-addressed catalog cache from a `src` unit test is not worth the
 /// fixture weight. This module covers the pure pieces
 /// (`normalize_lexical`, `has_parent_dir_component`, `body_matches_target`,
-/// `is_symlinked`) directly instead.
+/// `symlink_within_plugin`) directly instead.
 fn resolve_path(
     conn: &rusqlite::Connection,
     paths: &Paths,
@@ -252,11 +267,11 @@ fn resolve_path(
             &record.plugin,
             &record.path,
         )?;
-        if is_symlinked(&body_path) {
-            continue;
-        }
         let plugin_root =
             skills::plugin_root_dir(conn, paths, workspace_name, &record.catalog, &record.plugin)?;
+        if symlink_within_plugin(&plugin_root, &body_path) {
+            continue;
+        }
         // The catalog root must come from `resolve_catalog_path`, NOT from
         // `plugin_root.parent()`: `skills::plugin_root_dir` computes
         // `plugin_root = catalog_path.join(&decl.source)`, and a catalog
@@ -524,7 +539,7 @@ mod tests {
     // have that fixture. What's covered here instead is every pure piece
     // `resolve_path` is built from, in isolation: `normalize_lexical`,
     // `has_parent_dir_component` (the traversal guard), `body_matches_target`
-    // (the per-entry equivalence-form comparison), and `is_symlinked`.
+    // (the per-entry equivalence-form comparison), and `symlink_within_plugin`.
 
     #[test]
     fn normalize_lexical_collapses_dot_and_redundant_separators() {
@@ -639,39 +654,74 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn is_symlinked_true_for_real_symlink_false_for_regular_file() {
+    fn symlink_within_plugin_true_for_symlinked_leaf() {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let real = tmp.path().join("real.txt");
-        std::fs::write(&real, "hi").unwrap();
-        let link = tmp.path().join("link.txt");
-        symlink(&real, &link).unwrap();
+        let plugin_root = tmp.path().join("plugin_root");
+        std::fs::create_dir(&plugin_root).unwrap();
 
-        assert!(is_symlinked(&link));
-        assert!(!is_symlinked(&real));
+        let real = plugin_root.join("real_SKILL.md");
+        std::fs::write(&real, "hi").unwrap();
+        let leaf = plugin_root.join("SKILL.md");
+        symlink(&real, &leaf).unwrap();
+
+        // A symlinked LEAF committed by a hostile catalog author, directly
+        // under `plugin_root` — still rejected (FR-S-02).
+        assert!(symlink_within_plugin(&plugin_root, &leaf));
     }
 
     #[cfg(unix)]
     #[test]
-    fn is_symlinked_true_for_regular_file_under_symlinked_ancestor_dir() {
+    fn symlink_within_plugin_true_for_symlinked_component_in_subtree() {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let real_dir = tmp.path().join("real_dir");
-        std::fs::create_dir(&real_dir).unwrap();
-        let leaf = real_dir.join("leaf.txt");
-        std::fs::write(&leaf, "hi").unwrap();
+        let plugin_root = tmp.path().join("plugin_root");
+        std::fs::create_dir(&plugin_root).unwrap();
 
-        let linked_dir = tmp.path().join("linked_dir");
-        symlink(&real_dir, &linked_dir).unwrap();
-        let leaf_via_link = linked_dir.join("leaf.txt");
+        let real_skills_dir = tmp.path().join("real_skills");
+        std::fs::create_dir(&real_skills_dir).unwrap();
+        let foo_dir = real_skills_dir.join("foo");
+        std::fs::create_dir(&foo_dir).unwrap();
+        std::fs::write(foo_dir.join("SKILL.md"), "hi").unwrap();
 
-        // `leaf_via_link` is itself a regular file (not a symlink), but one
-        // of its ancestors (`linked_dir`) is a symlink — `is_symlinked`
-        // must still catch that.
-        assert!(!leaf_via_link.symlink_metadata().unwrap().is_symlink());
-        assert!(is_symlinked(&leaf_via_link));
+        // `plugin_root/skills` is itself a symlink, with a real file
+        // beneath it — a symlinked COMPONENT within the guarded subtree.
+        let linked_skills_dir = plugin_root.join("skills");
+        symlink(&real_skills_dir, &linked_skills_dir).unwrap();
+        let body = linked_skills_dir.join("foo").join("SKILL.md");
+
+        assert!(symlink_within_plugin(&plugin_root, &body));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_within_plugin_false_for_symlinked_ancestor_above_plugin_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // A real, non-symlinked subtree under a "real_home" dir — mirrors
+        // Tome's own layout: `<home>/.tome/catalogs/<hash>/plugin_root/…`.
+        let real_home = tmp.path().join("real_home");
+        let plugin_root_real = real_home.join("skills").join("foo");
+        std::fs::create_dir_all(&plugin_root_real).unwrap();
+        std::fs::write(plugin_root_real.join("SKILL.md"), "hi").unwrap();
+
+        // `plugin_root`'s PARENT (an ancestor ABOVE plugin_root) is a
+        // symlink — e.g. a symlinked $HOME on macOS (CR-08:
+        // `src/workspace/resolution.rs:247-261`), Tome's own cache dir, or
+        // an NFS-mounted home. This is the key regression proof: a trusted
+        // ancestor symlink above `plugin_root` must NOT cause the body to
+        // be rejected.
+        let linked_home = tmp.path().join("linked_home");
+        symlink(&real_home, &linked_home).unwrap();
+
+        let plugin_root = linked_home.join("skills").join("foo");
+        let body = plugin_root.join("SKILL.md");
+
+        assert!(!symlink_within_plugin(&plugin_root, &body));
     }
 
     // ---- Task 4: `collapse` (filter/dedupe/sort/one-many-none) ---------
