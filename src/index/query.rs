@@ -39,15 +39,19 @@ pub struct Candidate {
     pub distance: f32,
 }
 
-/// Optional pre-filters for [`knn`]. The three dimensions are AND-joined; each
-/// non-empty list is an OR set within its dimension (`s.<col> IN (…)`). An empty
-/// list means "no filter for that dimension". A single-element list is exactly
+/// Optional pre-filters for [`knn`]. The four dimensions are AND-joined; each
+/// non-empty list is an OR set within its dimension (`s.<col> IN (…)`, or for
+/// `keywords`, a correlated `EXISTS` over `plugin_keywords`). An empty list
+/// means "no filter for that dimension". A single-element list is exactly
 /// `s.<col> = <v>` semantically, preserving the pre-#319 single-value behaviour.
 #[derive(Debug, Clone, Default)]
 pub struct QueryFilters<'a> {
     pub catalogs: Vec<&'a str>,
     pub plugins: Vec<&'a str>,
     pub kinds: Vec<EntryKind>,
+    /// Task E1: `--keyword` filter. Matched case-insensitively via
+    /// `plugin_keywords.keyword COLLATE NOCASE` — no lowercasing needed here.
+    pub keywords: Vec<&'a str>,
 }
 
 /// Top-`top_k` enabled, searchable skills closest to `query_vec` in the
@@ -71,12 +75,16 @@ pub fn knn(
     // LOCKSTEP INVARIANT: the params pushed here from `?4` onward MUST match, in
     // count and order, the `?N` placeholders `build_knn_sql` assigns. Both walk
     // the filter dimensions in the SAME fixed order — catalogs, then plugins,
-    // then kinds — so `?4..` line up positionally. Changing the order in one
-    // place without the other silently mis-filters (an off-by-one binds a
-    // catalog value to a plugin placeholder). Keep the two loops in sync; the
-    // `knn_param_count_matches_placeholders` unit test guards the invariant.
+    // then kinds, then keywords — so `?4..` line up positionally. Changing the
+    // order in one place without the other silently mis-filters (an off-by-one
+    // binds a catalog value to a plugin placeholder). Keep the two loops in
+    // sync; the `knn_param_count_matches_placeholders` unit test guards the
+    // invariant.
     let mut params: Vec<ToSqlOutput<'_>> = Vec::with_capacity(
-        3 + filters.catalogs.len() + filters.plugins.len() + filters.kinds.len(),
+        3 + filters.catalogs.len()
+            + filters.plugins.len()
+            + filters.kinds.len()
+            + filters.keywords.len(),
     );
     params.push(ToSqlOutput::from(query_bytes)); // ?1 query vector
     params.push(ToSqlOutput::from(workspace_name.to_owned())); // ?2 workspace
@@ -89,6 +97,9 @@ pub fn knn(
     }
     for k in &filters.kinds {
         params.push(ToSqlOutput::from(k.as_str().to_owned())); // then kinds
+    }
+    for k in &filters.keywords {
+        params.push(ToSqlOutput::from((*k).to_owned())); // then keywords
     }
 
     let mut stmt = conn
@@ -123,11 +134,14 @@ pub fn knn(
 
 /// Build the (parameterised) KNN SQL for the given filters. `?1` is the query
 /// vector BLOB, `?2` the workspace name, `?3` the LIMIT; the optional
-/// `--catalog` / `--plugin` / `--kind` filters take the positional indices
-/// `?4` onward, in that FIXED order (catalogs, plugins, kinds), one placeholder
-/// per value in each non-empty list. `vec_distance_cosine` is applied as a
-/// scalar in the SELECT list and the ORDER BY, so filtering is done at JOIN
-/// level before the LIMIT is applied — no over-fetch / widen loop needed.
+/// `--catalog` / `--plugin` / `--kind` / `--keyword` filters take the
+/// positional indices `?4` onward, in that FIXED order (catalogs, plugins,
+/// kinds, keywords), one placeholder per value in each non-empty list. The
+/// keyword dimension is a correlated `EXISTS` over `plugin_keywords` rather
+/// than an `IN` on `s.<col>` (keywords live at the plugin level, not the
+/// per-skill row). `vec_distance_cosine` is applied as a scalar in the
+/// SELECT list and the ORDER BY, so filtering is done at JOIN level before
+/// the LIMIT is applied — no over-fetch / widen loop needed.
 ///
 /// # Why exact scan, not vec0 ANN
 ///
@@ -165,7 +179,7 @@ pub fn knn(
 /// fallback would remain for filtered queries).
 ///
 /// LOCKSTEP INVARIANT: `knn` binds params in the exact same dimension order
-/// (catalogs → plugins → kinds). The two must be changed together.
+/// (catalogs → plugins → kinds → keywords). The two must be changed together.
 fn build_knn_sql(filters: &QueryFilters<'_>) -> String {
     let mut sql = String::from(
         "SELECT s.id, s.catalog, s.plugin, s.name, s.kind, s.description,
@@ -177,13 +191,27 @@ fn build_knn_sql(filters: &QueryFilters<'_>) -> String {
                 AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?2)
          WHERE s.searchable = 1",
     );
-    // Shared counter across all three IN-clauses: filter placeholders start at
-    // ?4 (?1/?2/?3 are the vector / workspace / LIMIT). Fixed order to match the
-    // `knn` param push: catalogs, then plugins, then kinds.
+    // Shared counter across all four filter clauses: placeholders start at ?4
+    // (?1/?2/?3 are the vector / workspace / LIMIT). Fixed order to match the
+    // `knn` param push: catalogs, then plugins, then kinds, then keywords.
     let mut next = 4;
     push_in_clause(&mut sql, "s.catalog", filters.catalogs.len(), &mut next);
     push_in_clause(&mut sql, "s.plugin", filters.plugins.len(), &mut next);
     push_in_clause(&mut sql, "s.kind", filters.kinds.len(), &mut next);
+    if !filters.keywords.is_empty() {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM plugin_keywords pk \
+              WHERE pk.catalog = s.catalog AND pk.plugin = s.plugin AND pk.keyword IN (",
+        );
+        for i in 0..filters.keywords.len() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&format!("?{next}"));
+            next += 1;
+        }
+        sql.push_str("))");
+    }
     sql.push_str(" ORDER BY distance LIMIT ?3");
     sql
 }
@@ -250,7 +278,10 @@ mod tests {
     /// push loop: 3 fixed (vector / workspace / LIMIT) + one per filter value.
     /// Used to assert the SQL placeholder count and the param count agree.
     fn expected_param_count(filters: &QueryFilters<'_>) -> usize {
-        3 + filters.catalogs.len() + filters.plugins.len() + filters.kinds.len()
+        3 + filters.catalogs.len()
+            + filters.plugins.len()
+            + filters.kinds.len()
+            + filters.keywords.len()
     }
 
     /// The FILTER placeholders (`?N` with N >= 4) in the SQL, in order of
@@ -383,6 +414,7 @@ mod tests {
             catalogs: vec!["c1", "c2"],
             plugins: vec!["p1"],
             kinds: vec![EntryKind::Skill],
+            keywords: Vec::new(),
         };
         let sql = build_knn_sql(&filters);
         assert!(
@@ -409,6 +441,47 @@ mod tests {
     }
 
     #[test]
+    fn build_knn_sql_with_keyword_filter_uses_exists_subquery() {
+        let filters = QueryFilters {
+            keywords: vec!["auth"],
+            ..Default::default()
+        };
+        let sql = build_knn_sql(&filters);
+        assert!(
+            sql.contains(
+                "AND EXISTS (SELECT 1 FROM plugin_keywords pk \
+                 WHERE pk.catalog = s.catalog AND pk.plugin = s.plugin AND pk.keyword IN ("
+            ),
+            "keyword filter must use a correlated EXISTS subquery over \
+             plugin_keywords, got: {sql}"
+        );
+        assert!(
+            sql.contains("pk.keyword IN (?4))"),
+            "single keyword filter (no other filters) is `IN (?4)`, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn build_knn_sql_keywords_is_fourth_dimension_after_kinds() {
+        // Keywords extend the fixed dimension order to catalogs → plugins →
+        // kinds → keywords, sharing the same placeholder counter.
+        let filters = QueryFilters {
+            catalogs: vec!["c1"],
+            plugins: vec!["p1"],
+            kinds: vec![EntryKind::Skill],
+            keywords: vec!["auth", "oauth"],
+        };
+        let sql = build_knn_sql(&filters);
+        assert!(
+            sql.contains("pk.keyword IN (?7, ?8)"),
+            "two keywords after one catalog/plugin/kind must number ?7..?8, got: {sql}"
+        );
+        let kind = sql.find("s.kind IN").unwrap();
+        let keyword = sql.find("plugin_keywords").unwrap();
+        assert!(kind < keyword, "clause order must be kind<keyword");
+    }
+
+    #[test]
     fn knn_param_count_matches_placeholders() {
         // The lockstep, asserted directly: for every combination of filter
         // widths, the number of filter placeholders in the SQL equals the
@@ -429,9 +502,14 @@ mod tests {
                 ..Default::default()
             },
             QueryFilters {
+                keywords: vec!["auth"],
+                ..Default::default()
+            },
+            QueryFilters {
                 catalogs: vec!["c1", "c2"],
                 plugins: vec!["p1"],
                 kinds: vec![EntryKind::Skill, EntryKind::Command],
+                keywords: vec!["auth", "oauth"],
             },
         ];
         for f in &combos {
@@ -497,5 +575,86 @@ mod tests {
             count, 0,
             "an unknown/empty scope must count 0 searchable rows"
         );
+    }
+
+    /// Bootstrap an in-memory index and insert one enabled+searchable skill
+    /// row per `(plugin, name)`, all sharing the same non-zero embedding so
+    /// they tie on distance — the keyword filter is the only thing that can
+    /// separate them in the assertions below.
+    fn insert_searchable_skill(conn: &Connection, plugin: &str, name: &str) {
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES ('cat', ?1, ?2, 'skill', 'd', '0.0.0', ?3, ?4, 1, 1, NULL, '1970-01-01T00:00:00Z')",
+            rusqlite::params![
+                plugin,
+                name,
+                format!("skills/{name}/SKILL.md"),
+                format!("hash-{plugin}-{name}"),
+            ],
+        )
+        .expect("insert skill");
+        let skill_id: i64 = conn
+            .query_row(
+                "SELECT id FROM skills WHERE catalog='cat' AND plugin=?1 AND name=?2",
+                rusqlite::params![plugin, name],
+                |r| r.get(0),
+            )
+            .expect("skill id");
+        conn.execute(
+            "INSERT INTO skill_embeddings (skill_id, embedding) VALUES (?1, ?2)",
+            rusqlite::params![skill_id, vector_to_bytes(&[1.0f32; 4])],
+        )
+        .expect("insert embedding");
+        let ws_id: i64 = conn
+            .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| {
+                r.get(0)
+            })
+            .expect("global ws id");
+        conn.execute(
+            "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+            rusqlite::params![ws_id, skill_id],
+        )
+        .expect("enrol skill");
+    }
+
+    #[test]
+    fn knn_keyword_filter_returns_only_the_keyworded_plugins_entries() {
+        crate::index::vec_ext::register_globally().unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let seed = crate::index::schema::MetaSeed {
+            name: "stub".into(),
+            version: "0".into(),
+        };
+        crate::index::schema::bootstrap(
+            &mut conn,
+            &seed,
+            &seed,
+            &seed,
+            crate::embedding::profile::Profile::DEFAULT,
+        )
+        .unwrap();
+
+        insert_searchable_skill(&conn, "plugin-auth", "login");
+        insert_searchable_skill(&conn, "plugin-other", "unrelated");
+        conn.execute(
+            "INSERT INTO plugin_keywords (catalog, plugin, keyword) VALUES ('cat', 'plugin-auth', 'auth')",
+            [],
+        )
+        .unwrap();
+
+        let filters = QueryFilters {
+            keywords: vec!["auth"],
+            ..Default::default()
+        };
+        let results = knn(&conn, "global", &[1.0f32; 4], 10, &filters).unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "keyword filter must exclude the non-keyworded plugin's entries: {results:?}"
+        );
+        assert_eq!(results[0].plugin, "plugin-auth");
     }
 }
