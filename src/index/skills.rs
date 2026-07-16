@@ -1500,7 +1500,9 @@ mod tests {
             )
             .expect("skill id");
         let ws_id: i64 = conn
-            .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| r.get(0))
+            .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| {
+                r.get(0)
+            })
             .expect("global ws id");
         conn.execute(
             "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
@@ -1880,8 +1882,14 @@ mod tests {
         let hits = find_by_name_across_workspace(&conn, "global", "shared").unwrap();
         assert_eq!(hits.len(), 2, "both catalogs' `shared` must return");
         // Deterministic order: catalog, plugin, kind, name.
-        assert_eq!((hits[0].catalog.as_str(), hits[0].plugin.as_str()), ("cat-a", "plug-x"));
-        assert_eq!((hits[1].catalog.as_str(), hits[1].plugin.as_str()), ("cat-b", "plug-y"));
+        assert_eq!(
+            (hits[0].catalog.as_str(), hits[0].plugin.as_str()),
+            ("cat-a", "plug-x")
+        );
+        assert_eq!(
+            (hits[1].catalog.as_str(), hits[1].plugin.as_str()),
+            ("cat-b", "plug-y")
+        );
 
         let none = find_by_name_across_workspace(&conn, "global", "absent").unwrap();
         assert!(none.is_empty());

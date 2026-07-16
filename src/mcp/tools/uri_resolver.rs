@@ -8,7 +8,11 @@ pub enum Candidate {
     /// enabled entries' resolved body paths.
     Path(String),
     /// A fully-qualified `(catalog, plugin, name)`.
-    Triple { catalog: String, plugin: String, name: String },
+    Triple {
+        catalog: String,
+        plugin: String,
+        name: String,
+    },
     /// A `(plugin, name)` to resolve across all catalogs.
     PluginName { plugin: String, name: String },
     /// A bare entry name to resolve across the whole workspace.
@@ -76,7 +80,9 @@ pub fn parse_uri(uri: &str) -> Vec<Candidate> {
         let mut out: Vec<Candidate> = Vec::new();
         // 2-way partitions → PluginName, skipping any empty-field candidate.
         for i in 1..tokens.len() {
-            if let Some(candidate) = segments_to_candidate(&[&tokens[..i].join("_"), &tokens[i..].join("_")]) {
+            if let Some(candidate) =
+                segments_to_candidate(&[&tokens[..i].join("_"), &tokens[i..].join("_")])
+            {
                 out.push(candidate);
             }
         }
@@ -98,7 +104,10 @@ pub fn parse_uri(uri: &str) -> Vec<Candidate> {
     }
 
     // Bare token: try as a relative path fragment AND as a bare name.
-    vec![Candidate::Path(uri.to_owned()), Candidate::BareName(uri.to_owned())]
+    vec![
+        Candidate::Path(uri.to_owned()),
+        Candidate::BareName(uri.to_owned()),
+    ]
 }
 
 #[cfg(test)]
@@ -121,7 +130,10 @@ mod tests {
     fn colon_two_segments_is_plugin_name() {
         assert_eq!(
             parse_uri("plug:skill"),
-            vec![Candidate::PluginName { plugin: "plug".into(), name: "skill".into() }]
+            vec![Candidate::PluginName {
+                plugin: "plug".into(),
+                name: "skill".into()
+            }]
         );
     }
 
@@ -141,11 +153,19 @@ mod tests {
     fn single_underscore_emits_all_partitions_plus_bare() {
         let got = parse_uri("a_b_c");
         // 2-way: (a | b_c), (a_b | c)
-        assert!(got.contains(&Candidate::PluginName { plugin: "a".into(), name: "b_c".into() }));
-        assert!(got.contains(&Candidate::PluginName { plugin: "a_b".into(), name: "c".into() }));
+        assert!(got.contains(&Candidate::PluginName {
+            plugin: "a".into(),
+            name: "b_c".into()
+        }));
+        assert!(got.contains(&Candidate::PluginName {
+            plugin: "a_b".into(),
+            name: "c".into()
+        }));
         // 3-way: (a | b | c)
         assert!(got.contains(&Candidate::Triple {
-            catalog: "a".into(), plugin: "b".into(), name: "c".into()
+            catalog: "a".into(),
+            plugin: "b".into(),
+            name: "c".into()
         }));
         // Bare fallback for a name that itself contains underscores.
         assert!(got.contains(&Candidate::BareName("a_b_c".into())));
@@ -153,9 +173,18 @@ mod tests {
 
     #[test]
     fn absolute_and_dotted_and_md_are_paths() {
-        assert_eq!(parse_uri("/abs/SKILL.md"), vec![Candidate::Path("/abs/SKILL.md".into())]);
-        assert_eq!(parse_uri("./rel/dir"), vec![Candidate::Path("./rel/dir".into())]);
-        assert_eq!(parse_uri("SKILL.md"), vec![Candidate::Path("SKILL.md".into())]);
+        assert_eq!(
+            parse_uri("/abs/SKILL.md"),
+            vec![Candidate::Path("/abs/SKILL.md".into())]
+        );
+        assert_eq!(
+            parse_uri("./rel/dir"),
+            vec![Candidate::Path("./rel/dir".into())]
+        );
+        assert_eq!(
+            parse_uri("SKILL.md"),
+            vec![Candidate::Path("SKILL.md".into())]
+        );
         assert_eq!(parse_uri("a/b"), vec![Candidate::Path("a/b".into())]);
     }
 
@@ -163,7 +192,10 @@ mod tests {
     fn bare_token_is_path_fragment_and_bare_name() {
         assert_eq!(
             parse_uri("basic-start"),
-            vec![Candidate::Path("basic-start".into()), Candidate::BareName("basic-start".into())]
+            vec![
+                Candidate::Path("basic-start".into()),
+                Candidate::BareName("basic-start".into())
+            ]
         );
     }
 
