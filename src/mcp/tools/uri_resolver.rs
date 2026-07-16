@@ -70,22 +70,26 @@ pub fn parse_uri(uri: &str) -> Vec<Candidate> {
 
     if uri.contains('_') {
         let tokens: Vec<&str> = uri.split('_').collect();
-        let mut out: Vec<Candidate> = Vec::new();
-        // 2-way partitions → PluginName.
-        for i in 1..tokens.len() {
-            out.push(Candidate::PluginName {
-                plugin: tokens[..i].join("_"),
-                name: tokens[i..].join("_"),
-            });
+        if tokens.iter().all(|t| t.is_empty()) {
+            return Vec::new();
         }
-        // 3-way partitions → Triple.
+        let mut out: Vec<Candidate> = Vec::new();
+        // 2-way partitions → PluginName, skipping any empty-field candidate.
+        for i in 1..tokens.len() {
+            if let Some(candidate) = segments_to_candidate(&[&tokens[..i].join("_"), &tokens[i..].join("_")]) {
+                out.push(candidate);
+            }
+        }
+        // 3-way partitions → Triple, skipping any empty-field candidate.
         for i in 1..tokens.len() {
             for j in (i + 1)..tokens.len() {
-                out.push(Candidate::Triple {
-                    catalog: tokens[..i].join("_"),
-                    plugin: tokens[i..j].join("_"),
-                    name: tokens[j..].join("_"),
-                });
+                if let Some(candidate) = segments_to_candidate(&[
+                    &tokens[..i].join("_"),
+                    &tokens[i..j].join("_"),
+                    &tokens[j..].join("_"),
+                ]) {
+                    out.push(candidate);
+                }
             }
         }
         // Fallback: the name itself may contain underscores.
@@ -169,5 +173,18 @@ mod tests {
         assert!(parse_uri("   ").is_empty());
         assert!(parse_uri(":").is_empty());
         assert!(parse_uri("::").is_empty());
+    }
+
+    #[test]
+    fn single_underscore_all_delimiters_is_malformed() {
+        assert!(parse_uri("_").is_empty());
+        assert!(parse_uri("__").is_empty());
+        assert!(parse_uri("___").is_empty());
+    }
+
+    #[test]
+    fn single_underscore_leading_or_trailing_skips_empty_field_candidates() {
+        assert_eq!(parse_uri("_abc"), vec![Candidate::BareName("_abc".into())]);
+        assert_eq!(parse_uri("abc_"), vec![Candidate::BareName("abc_".into())]);
     }
 }
