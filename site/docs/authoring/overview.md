@@ -70,6 +70,37 @@ name = "my-plugin"
 source = "my-plugin"
 ```
 
+A handful of optional fields add discoverability and provenance metadata,
+mirrored on `tome-plugin.toml` below:
+
+| Field | Type | Purpose |
+| --- | --- | --- |
+| `keywords` | array of strings | Feeds keyword search (`tome query --keyword`, MCP `search_skills` `keywords`). Max 20 entries, 40 chars each. |
+| `homepage` | string | Project homepage URL. |
+| `repository` | string | Source repository URL. |
+| `bugs` | string | Issue tracker URL. |
+| `documentation` | string | Documentation URL. |
+| `display_name` | string | Human-friendly name shown in place of `name` where space allows. |
+| `icon` | string | Path to an icon file, relative to the manifest. |
+
+`homepage`, `repository`, `bugs`, and `documentation` must be `http://` or
+`https://` URLs. `icon` must be a relative path (no URL, no `..` traversal, no
+absolute path).
+
+`[owner]` also accepts an optional `url` and an open `[owner.handles]` table
+mapping platform name to handle:
+
+```toml
+[owner]
+name = "Your Name"
+email = "you@example.com"
+url = "https://example.com"
+
+[owner.handles]
+github = "your-handle"
+bluesky = "you.bsky.social"
+```
+
 ## `tome-plugin.toml`
 
 Each plugin has a manifest at its root: `<plugin>/tome-plugin.toml`. Like the
@@ -89,6 +120,27 @@ email = "you@example.com"
 
 You rarely write this file by hand: [`create`](./create.md) scaffolds it and
 [`convert`](./convert.md) derives it from a legacy `plugin.json`.
+
+The same optional metadata fields as `tome-catalog.toml` are accepted —
+`keywords`, `homepage`, `repository`, `bugs`, `documentation`, `display_name`,
+`icon` — with the same types and validation notes. `[author]` gains an
+optional `url` and an open `[author.handles]` table (platform → handle), and
+the plugin may also list `[[contributors]]`, each entry shaped exactly like
+`[author]`:
+
+```toml
+[author]
+name = "Your Name"
+email = "you@example.com"
+url = "https://example.com"
+
+[author.handles]
+github = "your-handle"
+
+[[contributors]]
+name = "A. Nother"
+handles = { github = "a-nother" }
+```
 
 ## Entries
 

@@ -22,14 +22,17 @@ search-then-load flow:
 
 - **`search_skills`** — semantic search over enabled skills and commands. Returns
   candidate matches (KNN + reranker), so the agent can decide what's relevant.
-  Alongside `query`, it accepts optional `catalog`, `plugin`, `kind`, and
-  `min_score` filters to narrow the result set at the source instead of
-  over-fetching and post-filtering. `kind` restricts to one entry kind
-  (`skill`, `command`, or `agent`), symmetric with `catalog`/`plugin`;
-  `min_score` is an opt-in relevance floor that drops matches scoring below it,
-  measured on the scale the `scoring` output field names, and a non-finite value
-  (NaN or ±inf) is rejected. So `{"query":"format a contract","kind":"command","min_score":0.5}`
-  returns only command matches at or above the floor.
+  Alongside `query`, it accepts optional `catalog`, `plugin`, `kind`,
+  `keywords`, and `min_score` filters to narrow the result set at the source
+  instead of over-fetching and post-filtering. `kind` restricts to one entry
+  kind (`skill`, `command`, or `agent`), symmetric with `catalog`/`plugin`;
+  `keywords` restricts to entries whose plugin declares any of the given
+  keywords (OR / match-any, case-insensitive) — the same semantics as `tome
+  query --keyword`; `min_score` is an opt-in relevance floor that drops matches
+  scoring below it, measured on the scale the `scoring` output field names, and
+  a non-finite value (NaN or ±inf) is rejected. So
+  `{"query":"format a contract","kind":"command","min_score":0.5}` returns only
+  command matches at or above the floor.
 - **`get_skill`** — loads an entry by `(catalog, plugin, name)`. By default it
   returns the full content with variable substitution applied, ready for the
   agent to use. Pass `metadata_only: true` for the cheap middle tier: the

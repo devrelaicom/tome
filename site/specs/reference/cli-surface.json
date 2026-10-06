@@ -156,6 +156,7 @@
       "subcommands": {},
       "flags": [
         "--catalog",
+        "--keyword",
         "--kind",
         "--min-score",
         "--no-rerank",

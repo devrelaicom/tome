@@ -126,6 +126,7 @@ rerank = true`, or implicitly by configuring a `[reranker]` provider (an explici
 | `--catalog <name>` | Restrict the search to a catalog. Repeatable: pass `--catalog` several times to include entries from any of the named catalogs. |
 | `--plugin <name>` | Restrict the search to a plugin (across all catalogs unless `--catalog` is also set). Repeatable: include entries from any of the named plugins. |
 | `--kind <kind>` | Restrict the search to an entry kind (`skill`, `command`, or `agent`). Repeatable. Note that `query` only searches indexed, searchable entries, so `--kind agent` typically returns nothing. |
+| `--keyword <kw>` | Restrict the search to entries whose plugin declares any of these keywords (repeatable; multiple values are OR / match-any). Matching is case-insensitive. |
 | `--rerank` | Run the reranker stage for this query (off by default). Mutually exclusive with `--no-rerank`. |
 | `--no-rerank` | Skip the reranker stage; scores are raw cosine similarity. Only meaningful when reranking is otherwise on (via `[query] rerank` or a configured reranker provider). Mutually exclusive with `--rerank`. |
 | `--strict` | Apply the score threshold and exit `40` on an empty result. |

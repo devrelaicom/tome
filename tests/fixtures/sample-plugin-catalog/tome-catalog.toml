@@ -1,10 +1,16 @@
 name = "sample-plugin-catalog"
 description = "Catalog used by Phase 3 plugin integration tests"
 version = "0.1.0"
+keywords = ["test", "phase-3"]
+homepage = "https://example.invalid/sample-plugin-catalog"
+display_name = "Sample Plugin Catalog"
 
 [owner]
 name = "Tome Test Harness"
 email = "tests@tome.invalid"
+
+[owner.handles]
+github = "tome-test-harness"
 
 [[plugins]]
 name = "plugin-alpha"
